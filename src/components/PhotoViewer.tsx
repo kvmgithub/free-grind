@@ -1,4 +1,4 @@
-import { AlertTriangle, ChevronLeft, ChevronRight, Download, EllipsisVertical, Loader2, Pause, Play, Volume2, VolumeX } from "lucide-react";
+import { AlertTriangle, ChevronLeft, ChevronRight, Download, EllipsisVertical, Loader2, Pause, Play, ScanSearch, Volume2, VolumeX } from "lucide-react";
 import React, { useEffect, useLayoutEffect, useRef, useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
@@ -11,6 +11,12 @@ import { ProfileImage } from "./ui/profile-image";
 import { useDesktopBreakpoint } from "../hooks/useDesktopBreakpoint";
 import { menuTransitionStyle, usePresence } from "../hooks/usePresence";
 import { proxyMediaUrl } from "../utils/mediaProxy";
+import {
+	REVERSE_IMAGE_SEARCH_ENGINES,
+	getReverseSearchableUrl,
+	openReverseImageSearch,
+	type ReverseImageSearchEngine,
+} from "../utils/reverseImageSearch";
 
 /** A video position as the player shows it: m:ss, or h:mm:ss past an hour. */
 function formatVideoTime(seconds: number): string {
@@ -963,6 +969,17 @@ export function PhotoViewer({
 		}
 	};
 
+	// Reverse image search (fake-profile check): images only, and only with a
+	// public URL the search engine can fetch itself.
+	const reverseSearchUrl = currentMedia?.type === "image" ? getReverseSearchableUrl(currentMedia.url) : null;
+	// Brand names only: full "Search with …" labels wrap and make the menu too wide.
+	const reverseSearchLabel = (engine: ReverseImageSearchEngine) => (engine === "google" ? "Google Lens" : "Yandex");
+	const handleReverseSearch = (engine: ReverseImageSearchEngine) => {
+		setIsMenuOpen(false);
+		if (!reverseSearchUrl) return;
+		void openReverseImageSearch(engine, reverseSearchUrl);
+	};
+
 	const toggleVideoPlay = () => {
 		const el = mediaRef.current;
 		if (!el || !(el instanceof HTMLVideoElement)) return;
@@ -1207,7 +1224,7 @@ export function PhotoViewer({
 							)}
 						</div>
 
-						{(canSave || visibleMenuActions.length > 0) && (
+						{(canSave || visibleMenuActions.length > 0 || reverseSearchUrl) && (
 						<div ref={menuRef} className="relative shrink-0">
 							<button
 								type="button"
@@ -1234,6 +1251,17 @@ export function PhotoViewer({
 										{t("profile_details.save")}
 									</button>
 									)}
+									{reverseSearchUrl && REVERSE_IMAGE_SEARCH_ENGINES.map((engine) => (
+										<button
+											key={`reverse-search-${engine}`}
+											type="button"
+											onClick={() => handleReverseSearch(engine)}
+											className="flex w-full items-center rounded-sm px-2 py-2 text-left text-sm text-white transition hover:bg-white/10"
+										>
+											<ScanSearch className="mr-2 h-4 w-4 shrink-0 opacity-70" />
+											{reverseSearchLabel(engine)}
+										</button>
+									))}
 									{visibleMenuActions.map((action) => (
 										<button
 											key={action.key}
@@ -1268,18 +1296,61 @@ export function PhotoViewer({
 						<ChevronLeft className="h-4 w-4" />
 					</button>
 
-					{canSave && (
-					<button
-						type="button"
-						onClick={(e) => { e.stopPropagation(); void handleSave(); }}
-						onTouchEnd={(e) => handleButtonTouchEnd(e, () => void handleSave())}
-						disabled={isSaving}
-						className={`header-icon-btn absolute right-[var(--app-px)] z-[83] inline-flex items-center justify-center rounded-xl border border-white/45 bg-black/40 p-2 text-white backdrop-blur-md drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)] transition active:scale-90 disabled:opacity-50 ${chromeFadeClass}`}
+					{(canSave || reverseSearchUrl) && (
+					<div
+						className={`absolute right-[var(--app-px)] z-[83] flex items-center gap-2 ${chromeFadeClass}`}
 						style={{ top: chromeButtonTop }}
-						aria-label={t("profile_details.save")}
 					>
-						<Download className="h-4 w-4" />
-					</button>
+						{reverseSearchUrl && (
+						<div ref={menuRef} className="relative">
+							<button
+								type="button"
+								onClick={(e) => { e.stopPropagation(); setIsMenuOpen((v) => !v); }}
+								onTouchStart={(e) => { e.stopPropagation(); gestureMovedRef.current = false; }}
+								onTouchEnd={(e) => handleButtonTouchEnd(e, () => setIsMenuOpen((v) => !v))}
+								aria-label={t("photo_viewer.reverse_search", { defaultValue: "Reverse image search" })}
+								aria-expanded={isMenuOpen}
+								className="header-icon-btn inline-flex items-center justify-center rounded-xl border border-white/45 bg-black/40 p-2 text-white backdrop-blur-md drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)] transition active:scale-90"
+							>
+								<ScanSearch className="h-4 w-4" />
+							</button>
+							{menuPresence.rendered && (
+								<div data-lenis-prevent style={menuTransitionStyle(menuPresence.visible)} className="absolute right-0 top-[calc(100%+0.25rem)] w-max rounded-lg border border-white/15 bg-black/90 py-2 shadow-xl backdrop-blur-md">
+									<p className="whitespace-nowrap px-4 pb-1 pt-0.5 text-xs text-white/60">
+										{t("photo_viewer.reverse_search", { defaultValue: "Reverse image search" })}
+									</p>
+									<div className="flex flex-col gap-1 px-2">
+										{REVERSE_IMAGE_SEARCH_ENGINES.map((engine) => (
+											<button
+												key={engine}
+												type="button"
+												onClick={(e) => { e.stopPropagation(); handleReverseSearch(engine); }}
+												onTouchStart={(e) => e.stopPropagation()}
+												onTouchEnd={(e) => handleButtonTouchEnd(e, () => handleReverseSearch(engine))}
+												className="flex w-full items-center rounded-sm px-2 py-2 text-left text-sm text-white transition hover:bg-white/10"
+											>
+												<ScanSearch className="mr-2 h-4 w-4 shrink-0 opacity-70" />
+												{reverseSearchLabel(engine)}
+											</button>
+										))}
+									</div>
+								</div>
+							)}
+						</div>
+						)}
+						{canSave && (
+						<button
+							type="button"
+							onClick={(e) => { e.stopPropagation(); void handleSave(); }}
+							onTouchEnd={(e) => handleButtonTouchEnd(e, () => void handleSave())}
+							disabled={isSaving}
+							className="header-icon-btn inline-flex items-center justify-center rounded-xl border border-white/45 bg-black/40 p-2 text-white backdrop-blur-md drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)] transition active:scale-90 disabled:opacity-50"
+							aria-label={t("profile_details.save")}
+						>
+							<Download className="h-4 w-4" />
+						</button>
+						)}
+					</div>
 					)}
 				</>
 			)}

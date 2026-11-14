@@ -3887,7 +3887,8 @@
         "reply_placeholder": "رد…",
         "send": "ابعت",
         "reacted": "الرياكشن اتبعت",
-        "react": "اعمل رياكشن"
+        "react": "اعمل رياكشن",
+        "reverse_search": "البحث العكسي عن الصور"
     },
     "render_crash": {
         "title": "التطبيق اتقفل فجأة",

@@ -3854,7 +3854,8 @@
     "reply_placeholder": "Reply…",
     "send": "Send",
     "reacted": "Reaction sent",
-    "react": "React"
+    "react": "React",
+    "reverse_search": "Reverse image search"
   },
   "render_crash": {
     "title": "App Closed Unexpectedly",

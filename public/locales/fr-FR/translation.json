@@ -3794,7 +3794,8 @@
         "reply_placeholder": "Répondre…",
         "send": "Envoyer",
         "reacted": "Réaction envoyée",
-        "react": "Réagir"
+        "react": "Réagir",
+        "reverse_search": "Recherche d'image inversée"
     },
     "render_crash": {
         "title": "L'application s'est fermée de façon inattendue",

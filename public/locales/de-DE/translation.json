@@ -3856,7 +3856,8 @@
         "reply_placeholder": "Antworten…",
         "send": "Senden",
         "reacted": "Reaktion gesendet",
-        "react": "Reagieren"
+        "react": "Reagieren",
+        "reverse_search": "Bildersuche"
     },
     "render_crash": {
         "title": "App unerwartet beendet",

@@ -3825,7 +3825,8 @@
         "reply_placeholder": "Odgovori …",
         "send": "Pošlji",
         "reacted": "Odziv poslan",
-        "react": "Odzovi se"
+        "react": "Odzovi se",
+        "reverse_search": "Obratno iskanje slik"
     },
     "render_crash": {
         "title": "Aplikacija se je nepričakovano zaprla",

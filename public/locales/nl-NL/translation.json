@@ -3763,7 +3763,8 @@
         "reply_placeholder": "Antwoorden…",
         "send": "Versturen",
         "reacted": "Reactie verstuurd",
-        "react": "Reageren"
+        "react": "Reageren",
+        "reverse_search": "Omgekeerd zoeken op afbeelding"
     },
     "render_crash": {
         "title": "App onverwacht gesloten",

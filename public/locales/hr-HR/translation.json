@@ -3794,7 +3794,8 @@
         "reply_placeholder": "Odgovori…",
         "send": "Pošalji",
         "reacted": "Reakcija poslana",
-        "react": "Reagiraj"
+        "react": "Reagiraj",
+        "reverse_search": "Obrnuto pretraživanje slika"
     },
     "render_crash": {
         "title": "Aplikacija se neočekivano zatvorila",
