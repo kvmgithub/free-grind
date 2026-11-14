@@ -2249,6 +2249,8 @@
         "unblock_failed": "Profiel deblokkeren mislukt",
         "hide_success": "Profiel verborgen in Grid",
         "unhide_success": "Profiel weer zichtbaar",
+        "hide_failed": "Profiel verbergen mislukt",
+        "unhide_failed": "Profiel weer tonen mislukt",
         "visiting": "Op bezoek",
         "roaming": "Onderweg",
         "chat_history": "Chatgeschiedenis",

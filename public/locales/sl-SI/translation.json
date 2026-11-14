@@ -2285,6 +2285,8 @@
         "unblock_failed": "Odblokiranje profila ni uspelo",
         "hide_success": "Profil skrit iz mreže",
         "unhide_success": "Profil znova viden",
+        "hide_failed": "Profila ni bilo mogoče skriti",
+        "unhide_failed": "Profila ni bilo mogoče znova prikazati",
         "visiting": "Na obisku",
         "roaming": "Na poti",
         "chat_history": "Zgodovina klepeta",

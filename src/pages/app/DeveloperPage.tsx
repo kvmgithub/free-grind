@@ -7,6 +7,7 @@ import {
 	ArchiveRestoreFilled,
 	BellFilled,
 	BugFilled,
+	EyeOffFilled,
 	FileUpFilled,
 	FlaskConicalFilled,
 	GhostFilled,
@@ -33,6 +34,7 @@ import type { AccountStatus } from "../../contexts/auth-context";
 import { VERSION_ANNOUNCEMENTS } from "../../data/versionAnnouncements";
 import { getCurrentHotswapChannel, showHotswapUpdatePrompt } from "../../services/hotswap";
 import { setChatArchiveEnabled, useChatArchiveEnabled } from "../../services/chatArchiveMode";
+import { setProfileHideMode, useProfileHideMode } from "../../services/profileHideMode";
 import {
 	isScreenCaptureProtectionSupported,
 	setScreenCaptureProtectionEnabled,
@@ -148,6 +150,7 @@ export function DeveloperPage() {
 	const { userId } = useAuth();
 	const { showDebugInfo, setPreferences } = usePreferences();
 	const isChatArchiveEnabled = useChatArchiveEnabled();
+	const profileHideMode = useProfileHideMode();
 	const isScreenCaptureProtected = useScreenCaptureProtectionEnabled();
 	const fingerprintCheck = useFingerprintCheck();
 	const frontendVersion = import.meta.env.VITE_APP_VERSION;
@@ -287,6 +290,19 @@ export function DeveloperPage() {
 						description={isChatArchiveEnabled
 							? "Expiring photos, videos and albums stay viewable after they expire, and unsent messages keep their content."
 							: "Expiring photos, videos and albums expire as sent and use a view only when opened. Unsent messages show as unsent."}
+					/>
+				</Section>
+
+				<Section title="Profiles">
+					<ToggleRow
+						checked={profileHideMode === "api"}
+						onChange={(checked) => setProfileHideMode(checked ? "api" : "local")}
+						icon={<EyeOffFilled className="h-5 w-5" />}
+						iconClass={DEV_ICON_CLASS}
+						label="Hide via API"
+						description={profileHideMode === "api"
+							? "Hidden profiles are stored on the server (/v1/hides), like the official app, and follow your account to other devices."
+							: "Hidden profiles are only stored on this device; the server never learns about them. Switching keeps each list separate."}
 					/>
 				</Section>
 

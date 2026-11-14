@@ -79,7 +79,7 @@ import { useIsRightNowLive } from "../../hooks/useIsRightNowLive";
 import type { BrowseFiltersDraft } from "./browse-filters-storage";
 import { SKIP_BLOCK_CONFIRM_KEY, isBlockConfirmSkipped } from "../../utils/blockConfirm";
 import * as chatDb from "../../services/chatDb";
-import { hideProfile as hideProfileLocally, unhideProfile as unhideProfileLocally } from "../../services/profileHide";
+import { hideProfile, unhideProfile } from "../../services/profileHide";
 import { useHiddenProfileIds } from "../../hooks/useHiddenProfileIds";
 import { usePresence } from "../../hooks/usePresence";
 import {
@@ -1566,18 +1566,22 @@ export function GridPage() {
 			const isActive = String(activeProfile?.profileId) === targetProfileId;
 			const displayName = (isActive ? activeProfile?.displayName : null) ?? card?.displayName ?? null;
 			const avatarMediaHash = (isActive ? activeProfile?.profileImageMediaHash : null) ?? null;
-			void hideProfileLocally(targetProfileId, displayName, avatarMediaHash);
-			toast.success(t("profile_details.hide_success"));
+			void hideProfile(apiFunctions, targetProfileId, displayName, avatarMediaHash).then((ok) => {
+				if (ok) toast.success(t("profile_details.hide_success"));
+				else toast.error(t("profile_details.hide_failed", { defaultValue: "Failed to hide profile." }));
+			});
 		},
-		[activeProfile, cards, t],
+		[activeProfile, apiFunctions, cards, t],
 	);
 
 	const handleUnhideProfile = useCallback(
 		(targetProfileId: string) => {
-			void unhideProfileLocally(targetProfileId);
-			toast.success(t("profile_details.unhide_success"));
+			void unhideProfile(apiFunctions, targetProfileId).then((ok) => {
+				if (ok) toast.success(t("profile_details.unhide_success"));
+				else toast.error(t("profile_details.unhide_failed", { defaultValue: "Failed to unhide profile." }));
+			});
 		},
-		[t],
+		[apiFunctions, t],
 	);
 
 	const handleToggleFavoriteProfile = useCallback(

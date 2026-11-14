@@ -2326,6 +2326,8 @@
         "unblock_failed": "Profil konnte nicht entsperrt werden",
         "hide_success": "Profil im Grid ausgeblendet",
         "unhide_success": "Profil wieder eingeblendet",
+        "hide_failed": "Profil konnte nicht ausgeblendet werden",
+        "unhide_failed": "Profil konnte nicht wieder eingeblendet werden",
         "visiting": "Auf Besuch",
         "roaming": "Unterwegs",
         "chat_history": "Chat-Verlauf",

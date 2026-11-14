@@ -11,7 +11,7 @@ import { useBlockProfile } from "../../../hooks/queries/useProfileQueries";
 import { ConfirmDialog } from "../../../components/ui/confirm-dialog";
 import { PromptDialog } from "../../../components/ui/prompt-dialog";
 import { getLocalNicknamesForProfiles, setLocalNicknameForProfile } from "../../../services/chatContactIndex";
-import { hideProfile as hideProfileLocally } from "../../../services/profileHide";
+import { hideProfile } from "../../../services/profileHide";
 import { requestProfileShare, useCanShareProfiles } from "../../../services/profileShare";
 import { SKIP_BLOCK_CONFIRM_KEY, isBlockConfirmSkipped } from "../../../utils/blockConfirm";
 import { isLocateEnabled } from "../../../utils/optionalFeatures";
@@ -157,8 +157,10 @@ export function InterestProfileMenu({
 						onToggleFavorite={() => void toggleFavorite(profileId, isFavorite)}
 						onEditNickname={() => setNicknamePromptItem(item)}
 						onHide={() => {
-							void hideProfileLocally(profileId, item.displayName, item.imageHash);
-							toast.success(t("profile_details.hide_success"));
+							void hideProfile(apiFunctions, profileId, item.displayName, item.imageHash).then((ok) => {
+								if (ok) toast.success(t("profile_details.hide_success"));
+								else toast.error(t("profile_details.hide_failed", { defaultValue: "Failed to hide profile." }));
+							});
 						}}
 						onBlock={() => {
 							if (isBlockConfirmSkipped()) {

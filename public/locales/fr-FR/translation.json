@@ -2267,6 +2267,8 @@
         "unblock_failed": "Erreur lors du déblocage du profil",
         "hide_success": "Profil masqué de la grille",
         "unhide_success": "Profil réaffiché",
+        "hide_failed": "Impossible de masquer le profil",
+        "unhide_failed": "Impossible de réafficher le profil",
         "visiting": "Visite",
         "roaming": "Itinérance",
         "chat_history": "Historique des discussions",

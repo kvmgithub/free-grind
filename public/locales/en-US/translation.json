@@ -2326,6 +2326,8 @@
     "unblock_failed": "Failed to unblock profile",
     "hide_success": "Profile hidden from grid",
     "unhide_success": "Profile unhidden",
+    "hide_failed": "Failed to hide profile.",
+    "unhide_failed": "Failed to unhide profile.",
     "visiting": "Visiting",
     "roaming": "Roaming",
     "chat_history": "Chat history",

@@ -2267,6 +2267,8 @@
         "unblock_failed": "Deblokiranje profila nije uspjelo",
         "hide_success": "Profil sakriven s Grida",
         "unhide_success": "Profil ponovno vidljiv",
+        "hide_failed": "Skrivanje profila nije uspjelo",
+        "unhide_failed": "Ponovno prikazivanje profila nije uspjelo",
         "visiting": "U posjeti",
         "roaming": "Na putu",
         "chat_history": "Povijest razgovora",

@@ -84,6 +84,9 @@ export const profileDetailItemSchema = z.object({
 	profileId: z
 		.union([z.string(), z.number()])
 		.transform((value) => String(value)),
+	// GET /v7/profiles/:id: "FULL" for a real profile, "ERROR" for the
+	// blocked/hidden/gone stub (see classifyProfileAccess). Absent elsewhere.
+	profileType: z.string().nullable().optional(),
 	displayName: z.string().nullable().optional(),
 	age: z.number().nullable().optional(),
 	showAge: z.boolean().optional(),

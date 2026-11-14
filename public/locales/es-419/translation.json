@@ -2267,6 +2267,8 @@
         "unblock_failed": "Error al desbloquear perfil",
         "hide_success": "Perfil ocultado de la cuadrícula",
         "unhide_success": "Perfil visible de nuevo",
+        "hide_failed": "No se pudo ocultar el perfil",
+        "unhide_failed": "No se pudo volver a mostrar el perfil",
         "visiting": "Visitando",
         "roaming": "Roaming",
         "chat_history": "Historial del chat",

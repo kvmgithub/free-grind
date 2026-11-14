@@ -2267,6 +2267,8 @@
         "unblock_failed": "Falha ao desbloquear o perfil",
         "hide_success": "Perfil ocultado da grelha",
         "unhide_success": "Perfil visível novamente",
+        "hide_failed": "Não foi possível ocultar o perfil",
+        "unhide_failed": "Não foi possível voltar a mostrar o perfil",
         "visiting": "A visitar",
         "roaming": "A viajar",
         "chat_history": "Histórico de bate-papo",

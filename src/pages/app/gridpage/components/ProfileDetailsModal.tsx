@@ -683,8 +683,11 @@ export function ProfileDetailsModal({
 	const canBlockProfile = useCanBlockProfile();
 	// A profile that can't be blocked (and isn't already): the block button hides it instead.
 	const blockBecomesHide = !isBlocked && !isOwnProfile && !canBlockProfile(activeProfile?.isBlockable ?? selectedBrowseCard?.isBlockable);
+	// Unhiding stays possible on an unavailable profile (e.g. one hidden and
+	// since deleted), so it can still be taken off the hidden list.
+	const canToggleHidden = isHidden || !isProfileUnavailable;
 	const toggleHidden = () => {
-		if (!messageProfileId || isProfileUnavailable) return;
+		if (!messageProfileId || !canToggleHidden) return;
 		if (isHidden) onUnhideProfile?.(String(messageProfileId));
 		else onHideProfile?.(String(messageProfileId));
 	};
@@ -2679,7 +2682,7 @@ export function ProfileDetailsModal({
 									<Star className={`h-4 w-4 ${isFavorite ? "fill-current" : ""}`} />
 								</button>
 							)}
-							{blockBecomesHide && (onHideProfile || onUnhideProfile) && !isProfileUnavailable && (
+							{blockBecomesHide && (onHideProfile || onUnhideProfile) && canToggleHidden && (
 								<button
 									type="button"
 									onClick={toggleHidden}
@@ -2733,8 +2736,8 @@ export function ProfileDetailsModal({
 										{!blockBecomesHide && (onHideProfile || onUnhideProfile) && (
 										<button
 											type="button"
-											disabled={isProfileUnavailable}
-											onClick={() => { setIsActionsMenuOpen(false); if (!messageProfileId || isProfileUnavailable) return; isHidden ? onUnhideProfile?.(String(messageProfileId)) : onHideProfile?.(String(messageProfileId)); }}
+											disabled={!canToggleHidden}
+											onClick={() => { setIsActionsMenuOpen(false); toggleHidden(); }}
 											className="flex items-center rounded-sm px-2 py-2 text-start text-sm text-[var(--text)] transition hover-fill disabled:opacity-50"
 										>
 											{isHidden ? <EyeFilled className="me-2 h-4 w-4 opacity-70" /> : <EyeOffFilled className="me-2 h-4 w-4 opacity-70" />}
@@ -3172,7 +3175,7 @@ export function ProfileDetailsModal({
 													<Star className={`h-4 w-4 ${isFavorite ? "fill-current" : ""}`} />
 												</button>
 											)}
-											{blockBecomesHide && (onHideProfile || onUnhideProfile) && !isProfileUnavailable && (
+											{blockBecomesHide && (onHideProfile || onUnhideProfile) && canToggleHidden && (
 												<button type="button" onClick={toggleHidden}
 													className="header-icon-btn shrink-0 rounded-xl text-[var(--text-muted)] transition-colors hover:text-[var(--text)]"
 													aria-label={isHidden ? t("profile_details.unhide") : t("profile_details.hide")}>
@@ -3208,8 +3211,8 @@ export function ProfileDetailsModal({
 														{!blockBecomesHide && (onHideProfile || onUnhideProfile) && (
 														<button
 															type="button"
-															disabled={isProfileUnavailable}
-															onClick={() => { setIsActionsMenuOpen(false); if (!messageProfileId || isProfileUnavailable) return; isHidden ? onUnhideProfile?.(String(messageProfileId)) : onHideProfile?.(String(messageProfileId)); }}
+															disabled={!canToggleHidden}
+															onClick={() => { setIsActionsMenuOpen(false); toggleHidden(); }}
 															className="flex items-center rounded-sm px-2 py-2 text-start text-sm text-[var(--text)] transition hover-fill disabled:opacity-50"
 														>
 															{isHidden ? <EyeFilled className="me-2 h-4 w-4 opacity-70" /> : <EyeOffFilled className="me-2 h-4 w-4 opacity-70" />}

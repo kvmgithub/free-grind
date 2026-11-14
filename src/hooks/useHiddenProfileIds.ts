@@ -1,29 +1,42 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "../contexts/useAuth";
-import * as chatDb from "../services/chatDb";
-import { GRID_HIDE_STATE_EVENT, type GridHideStateChangeDetail } from "../services/profileHide";
+import { useApiFunctions } from "./useApiFunctions";
+import {
+	GRID_HIDE_STATE_EVENT,
+	invalidateHiddenProfilesCache,
+	listHiddenProfileIds,
+	type GridHideStateChangeDetail,
+} from "../services/profileHide";
+import { useProfileHideMode } from "../services/profileHideMode";
 
 /**
- * Profiles the user hid (local-only, like the chat inbox's hidden-conversation
- * flag). Reloaded whenever the active account's chatDb becomes ready
- * (settingsReady), so switching accounts also switches which profiles are
- * hidden instead of leaking the previous account's set; kept in sync with
+ * Profiles the user hid, from whichever hide mode is active (the /v1/hides
+ * API or the local chatDb flag, see profileHideMode.ts). Reloaded whenever
+ * the active account's chatDb becomes ready (settingsReady) or the mode
+ * changes, so switching accounts also switches which profiles are hidden
+ * instead of leaking the previous account's set; kept in sync with
  * hide/unhide anywhere in the app through GRID_HIDE_STATE_EVENT.
  */
 export function useHiddenProfileIds(): Set<string> {
 	const { userId, settingsReady } = useAuth();
+	const apiFunctions = useApiFunctions();
+	const hideMode = useProfileHideMode();
 	const [hiddenProfileIds, setHiddenProfileIds] = useState<Set<string>>(() => new Set());
+
+	useEffect(() => {
+		invalidateHiddenProfilesCache();
+	}, [userId]);
 
 	useEffect(() => {
 		if (!settingsReady) return;
 		let cancelled = false;
-		void chatDb.listHiddenProfileIds().then((ids) => {
+		void listHiddenProfileIds(apiFunctions).then((ids) => {
 			if (!cancelled) setHiddenProfileIds(new Set(ids));
 		});
 		return () => {
 			cancelled = true;
 		};
-	}, [userId, settingsReady]);
+	}, [userId, settingsReady, hideMode, apiFunctions]);
 
 	useEffect(() => {
 		const onHideStateChange = (event: Event) => {

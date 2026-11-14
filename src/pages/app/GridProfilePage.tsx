@@ -32,10 +32,10 @@ import {
 	getBlockStatesByProfileIds,
 	getProfileSnapshot,
 	insertSystemMessage,
-	listHiddenProfileIds,
 } from "../../services/chatDb";
 import { profileDetailItemSchema } from "../../types/grid";
-import { hideProfile as hideProfileLocally, unhideProfile as unhideProfileLocally } from "../../services/profileHide";
+import { hideProfile, listHiddenProfileIds, unhideProfile } from "../../services/profileHide";
+import { useProfileHideMode } from "../../services/profileHideMode";
 import { unarchiveConversation, claimBlockStateTransition } from "../../services/conversationArchive";
 import { appLog } from "../../utils/logger";
 import { consumeSelfBlockAction } from "../../utils/selfBlockActions";
@@ -88,6 +88,7 @@ export function GridProfilePage() {
 	const params = useParams();
 	const [searchParams] = useSearchParams();
 	const apiFunctions = useApiFunctions();
+	const hideMode = useProfileHideMode();
 
 	const { data: managedGenders } = useManagedGenders();
 	const { data: managedPronouns } = useManagedPronouns();
@@ -166,13 +167,13 @@ export function GridProfilePage() {
 			return;
 		}
 		let cancelled = false;
-		void listHiddenProfileIds().then((ids) => {
+		void listHiddenProfileIds(apiFunctions).then((ids) => {
 			if (!cancelled) setIsHidden(ids.includes(profileId));
 		});
 		return () => {
 			cancelled = true;
 		};
-	}, [profileId]);
+	}, [profileId, apiFunctions, hideMode]);
 
 	useEffect(() => {
 		if (!profileId) {
@@ -534,15 +535,25 @@ export function GridProfilePage() {
 	};
 
 	const handleHideProfile = (targetProfileId: string) => {
-		void hideProfileLocally(targetProfileId, activeProfile?.displayName ?? null, activeProfile?.profileImageMediaHash ?? null);
-		setIsHidden(true);
-		toast.success(t("profile_details.hide_success"));
+		void hideProfile(apiFunctions, targetProfileId, activeProfile?.displayName ?? null, activeProfile?.profileImageMediaHash ?? null).then((ok) => {
+			if (!ok) {
+				toast.error(t("profile_details.hide_failed", { defaultValue: "Failed to hide profile." }));
+				return;
+			}
+			setIsHidden(true);
+			toast.success(t("profile_details.hide_success"));
+		});
 	};
 
 	const handleUnhideProfile = (targetProfileId: string) => {
-		void unhideProfileLocally(targetProfileId);
-		setIsHidden(false);
-		toast.success(t("profile_details.unhide_success"));
+		void unhideProfile(apiFunctions, targetProfileId).then((ok) => {
+			if (!ok) {
+				toast.error(t("profile_details.unhide_failed", { defaultValue: "Failed to unhide profile." }));
+				return;
+			}
+			setIsHidden(false);
+			toast.success(t("profile_details.unhide_success"));
+		});
 	};
 
 	const handleToggleFavoriteProfile = async (
