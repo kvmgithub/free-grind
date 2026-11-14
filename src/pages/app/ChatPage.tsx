@@ -1096,7 +1096,9 @@ export function ChatPage() {
 	}, [selectedConversation, userId, targetProfileId]);
 
 	const isSelectedConversationArchived = Boolean(
-		selectedConversationId && archivedConversations.has(selectedConversationId),
+		selectedConversationId &&
+			archivedConversations.has(selectedConversationId) &&
+			!inviteEntries.some((entry) => entry.data.conversationId === selectedConversationId),
 	);
 
 	const isSelectedConversationBlockedBySelf = useMemo(() => {
@@ -3016,7 +3018,12 @@ export function ChatPage() {
 									conversation.data.lastActivityTimestamp ?? 0,
 									newest.timestamp,
 								),
-								preview: buildPreviewFromMessage(bestPreviewMessage, t),
+								// A group we left / were removed from keeps that line as its preview.
+								preview:
+									conversation.data.preview?.type === "SystemGroupLeft" ||
+									conversation.data.preview?.type === "SystemGroupRemoved"
+										? conversation.data.preview
+										: buildPreviewFromMessage(bestPreviewMessage, t),
 							},
 						}));
 					}
@@ -4531,10 +4538,13 @@ export function ChatPage() {
 		);
 	}, [replyTargetMessageId, threadMessages]);
 
-	const archivedConversationIds = useMemo(
-		() => new Set(archivedConversations.keys()),
-		[archivedConversations],
-	);
+	// An open re-invite to a group we'd left isn't archived while it's pending:
+	// its row and thread are the invite (Join / Decline), not the old archive.
+	const archivedConversationIds = useMemo(() => {
+		const ids = new Set(archivedConversations.keys());
+		for (const entry of inviteEntries) ids.delete(entry.data.conversationId);
+		return ids;
+	}, [archivedConversations, inviteEntries]);
 
 	// A block_state-only placeholder (see chatDb.isPlaceholderConversationEntry)
 	// can still land in this page's state through a direct chatDb lookup — e.g.

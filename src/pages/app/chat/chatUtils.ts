@@ -592,6 +592,9 @@ const SELF_EXPLANATORY_PREVIEW_TYPES = new Set([
 	"NonExpiringVideo",
 	"Location",
 	"ProfileLink",
+	// Local group lines ("You left the group"): described by type alone.
+	"SystemGroupLeft",
+	"SystemGroupRemoved",
 ]);
 
 /**
