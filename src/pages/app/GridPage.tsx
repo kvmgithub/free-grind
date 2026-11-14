@@ -656,24 +656,38 @@ export function GridPage() {
 		[t],
 	);
 	const [mapCards, setMapCards] = useState<MapCard[]>([]);
-	// Explore mode on the map: a pin the user drops anywhere by tapping the
-	// map. Starts at the explore place, but moving it doesn't change that place
-	// (the location picker's choice stays as it is). Outside explore mode the
-	// map shows the cascade around the user's own location.
-	const [explorePin, setExplorePin] = useState<{ lat: number; lon: number } | null>(null);
-	useEffect(() => {
-		if (!exploreLocation) {
-			setExplorePin(null);
-			return;
-		}
+	// Explore mode on the map: a tap anywhere drops the pin there and makes
+	// that spot the explore location, so the pill, the location picker and the
+	// grid all follow the pin. Outside explore mode the map shows the cascade
+	// around the user's own location.
+	const explorePin = useMemo<{ lat: number; lon: number } | null>(() => {
+		if (!exploreLocation) return null;
 		try {
 			const { lat, lon } = decodeGeohash(exploreLocation.geohash);
-			setExplorePin({ lat: (lat[0] + lat[1]) / 2, lon: (lon[0] + lon[1]) / 2 });
+			return { lat: (lat[0] + lat[1]) / 2, lon: (lon[0] + lon[1]) / 2 };
 		} catch {
-			setExplorePin(null);
+			return null;
 		}
 	}, [exploreLocation]);
-	const explorePinGeohash = explorePin ? encodeGeohash(explorePin.lat, explorePin.lon) : null;
+	const pinGeocodeRequestRef = useRef(0);
+	const handlePlaceExplorePin = useCallback(
+		(point: { lat: number; lon: number }) => {
+			const pinGeohash = encodeGeohash(point.lat, point.lon);
+			const request = ++pinGeocodeRequestRef.current;
+			setExploreLocation({
+				geohash: pinGeohash,
+				label: t("browse_location.lat_lon_label", { lat: point.lat.toFixed(4), lon: point.lon.toFixed(4) }),
+			});
+			void reverseGeocodeGeohash(pinGeohash)
+				.catch(() => null)
+				.then((label) => {
+					// A newer pin (or another explore pick) supersedes this lookup.
+					if (!label || request !== pinGeocodeRequestRef.current) return;
+					setExploreLocation({ geohash: pinGeohash, label });
+				});
+		},
+		[setExploreLocation, t],
+	);
 	useEffect(() => {
 		if (!showGridMap || !geohash) return;
 		let cancelled = false;
@@ -683,7 +697,7 @@ export function GridPage() {
 				// profiles that share one, so cards without fuzzedLat/Lon stay off the map.
 				const parsed = await getBrowseCardsWithTimeout({
 					geohash,
-					exploreGeohash: exploreLocation ? (explorePinGeohash ?? exploreLocation.geohash) : undefined,
+					exploreGeohash: exploreLocation?.geohash,
 					page: 1,
 					filters: browseRequestFilters,
 				});
@@ -697,7 +711,7 @@ export function GridPage() {
 		return () => {
 			cancelled = true;
 		};
-	}, [showGridMap, geohash, explorePinGeohash, exploreLocation, browseRequestFilters, getBrowseCardsWithTimeout]);
+	}, [showGridMap, geohash, exploreLocation, browseRequestFilters, getBrowseCardsWithTimeout]);
 
 	const refreshLocation = useCallback(async () => {
 		if (!useAutoLocation || !("geolocation" in navigator)) {
@@ -2132,7 +2146,7 @@ export function GridPage() {
 								if (profileId) setActiveProfileId(profileId);
 							}}
 							explorePin={exploreLocation ? explorePin : null}
-							onPlacePin={exploreLocation ? setExplorePin : undefined}
+							onPlacePin={exploreLocation ? handlePlaceExplorePin : undefined}
 							topInset={headerBottom}
 							leftInset={railWidth}
 						/>

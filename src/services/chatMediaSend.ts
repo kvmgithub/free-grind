@@ -8,6 +8,7 @@
  * the same), so sending one image to several chats uploads it only once.
  */
 
+import type { ChatSendTarget } from "../utils/groupChat";
 import type { UploadProgress } from "./stagedVideoUpload";
 import toast from "react-hot-toast";
 
@@ -88,7 +89,7 @@ export async function uploadChatMediaFile(
 }
 
 /**
- * Sends already-uploaded media to `targetProfileId` and captures it into
+ * Sends already-uploaded media to `sendTo` and captures it into
  * chatDb right away — otherwise the send has no media_files row until the
  * next reload, so it's missing from the "Sent" media tab and the full-screen
  * carousel until then.
@@ -96,7 +97,8 @@ export async function uploadChatMediaFile(
 export async function sendUploadedChatMedia(
 	api: Pick<ApiFunctions, "sendMessage">,
 	uploaded: UploadedChatMedia,
-	targetProfileId: number | string,
+	/** A profile id (direct chat) or an explicit target (groups). */
+	sendTo: number | string | ChatSendTarget,
 	options: { maxViews: number; replyToMessageId?: string | null },
 ): Promise<Message> {
 	const { isVideo } = uploaded;
@@ -109,7 +111,7 @@ export async function sendUploadedChatMedia(
 	const messageType = isVideo ? video.type : isOnceImage ? "ExpiringImage" : "Image";
 	const sentMessage = await api.sendMessage({
 		type: messageType,
-		target: { type: "Direct", targetId: Number(targetProfileId) },
+		target: typeof sendTo === "object" ? sendTo : { type: "Direct", targetId: Number(sendTo) },
 		body: {
 			mediaId: uploaded.mediaId,
 			width: null,

@@ -33,7 +33,7 @@ type Props = {
 	onSelectProfile: (profileId: string | null) => void;
 	/**
 	 * Explore mode: the pin the cascade is loaded around. A tap anywhere on the
-	 * map moves it (onPlacePin); independent of the location picker's place.
+	 * map moves it (onPlacePin), which also makes that spot the explore location.
 	 */
 	explorePin?: { lat: number; lon: number } | null;
 	onPlacePin?: (point: { lat: number; lon: number }) => void;
@@ -97,8 +97,8 @@ function buildMarker(card: MapCard, label: string, privacy: ProfilePhotoPrivacy,
 
 function buildPinMarker(): HTMLDivElement {
 	const el = document.createElement("div");
-	el.style.cssText = "width:34px;height:44px;pointer-events:none;filter:drop-shadow(0 4px 8px rgba(0,0,0,0.45));";
-	el.innerHTML = `<svg viewBox="0 0 24 32" width="34" height="44"><path d="M12 0C5.4 0 0 5.2 0 11.7 0 20.5 12 32 12 32s12-11.5 12-20.3C24 5.2 18.6 0 12 0Z" fill="var(--explore, #8b5cf6)"/><circle cx="12" cy="11.5" r="4.5" fill="#fff"/></svg>`;
+	el.style.cssText = "width:24px;height:32px;pointer-events:none;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.45));";
+	el.innerHTML = `<svg viewBox="0 0 24 32" width="24" height="32"><path d="M12 0C5.4 0 0 5.2 0 11.7 0 20.5 12 32 12 32s12-11.5 12-20.3C24 5.2 18.6 0 12 0Z" fill="var(--explore, #8b5cf6)"/><circle cx="12" cy="11.5" r="4.5" fill="#fff"/></svg>`;
 	return el;
 }
 

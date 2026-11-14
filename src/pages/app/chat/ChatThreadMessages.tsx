@@ -1,5 +1,5 @@
 import { MapPinFilled } from "../../../components/icons/FilledIcons";
-import { Album, Ban, CircleAlert, Copy, Download, Eye, History, ImagePlay, Images, Languages, Loader2, Lock, MessageCircleQuestion, MessageSquarePlus, Mic, MoreVertical, PhoneOff, Play, Repeat2, Reply, RotateCw, ShieldCheck, Trash2, Undo2, UserRound, Video, VideoOff, ImageOff } from "lucide-react";
+import { Album, Ban, CircleAlert, Copy, Download, Eye, History, ImagePlay, Images, Languages, Loader2, Lock, MessageCircleQuestion, MessageSquarePlus, Mic, MoreVertical, PhoneOff, Play, Repeat2, Reply, RotateCw, ShieldCheck, Trash2, Undo2, UserRound, UsersRound, Video, VideoOff, ImageOff } from "lucide-react";
 import { sentMediaEcho } from "./sentMediaEchoes";
 import { TakenOnGrindrBadge } from "./TakenOnGrindrBadge";
 import { createPortal } from "react-dom";
@@ -50,6 +50,7 @@ import {
 } from "../../../utils/blockConfirm";
 import { formatRelativeTime } from "../../../utils/relativeTime";
 import {
+	getParticipantAvatarUrl,
 	formatDateHeader,
 	formatDateTime24,
 	formatFullDateTime,
@@ -83,6 +84,10 @@ import { menuTransitionStyle, usePresence } from "../../../hooks/usePresence";
 import { proxyMediaUrl } from "../../../utils/mediaProxy";
 import { getHeroRectFromElement, type HeroRect } from "../../../components/PhotoViewer";
 import { RightNowRequestBubble } from "./RightNowRequestBubble";
+import { getGroupEventLabel } from "./groups/groupLabels";
+import { useGroupMemberNames } from "./groups/useGroupMemberNames";
+import { resolveAvatarSrc } from "../../../services/avatarStore";
+import { isGroupConversationId } from "../../../utils/groupChat";
 import { AlbumExpirationCountdown, getAlbumShareDurationKey } from "./AlbumExpirationCountdown";
 
 type ChatThreadMessagesProps = {
@@ -111,6 +116,8 @@ type ChatThreadMessagesProps = {
 	openViewLimitedMedia: (message: UiMessage, heroRect?: HeroRect | null) => void | Promise<void>;
 	openAlbumViewerById: (albumId: number, isOwnAlbum?: boolean, targetContentId?: number) => void | Promise<void>;
 	openProfilePhotos: (mediaHash: string, isPartnerProfile: boolean, heroRect?: HeroRect | null) => void;
+	/** Groups: tapping a sender's name opens their profile. */
+	onOpenSenderProfile?: (profileId: number) => void;
 	/** Opens the profile a ProfileLink message shares. */
 	onOpenSharedProfile?: (profileId: number) => void;
 	onJumpToMessage: (messageId: string) => void;
@@ -372,6 +379,7 @@ export function ChatThreadMessages({
 	openViewLimitedMedia,
 	openAlbumViewerById,
 	openProfilePhotos,
+	onOpenSenderProfile,
 	onOpenSharedProfile,
 	onJumpToMessage,
 	highlightedMessageId,
@@ -397,6 +405,10 @@ export function ChatThreadMessages({
 	localUploadProgress = null,
 }: ChatThreadMessagesProps) {
 	const { t } = useTranslation();
+	const isGroupThread = isGroupConversationId(selectedConversation.data.conversationId);
+	const groupMembers = useGroupMemberNames(isGroupThread ? selectedConversation : null, threadMessages, userId);
+	const isVisibleGroupMember = groupMembers.isActiveMember;
+	const groupNameOf = groupMembers.nameOf;
 	useLocalMediaCache();
 	useAlbumCache();
 	useAvatarCache();
@@ -1241,7 +1253,19 @@ export function ChatThreadMessages({
                     <div key={`${group.header}-${groupIndex}`} className="relative">
                         {renderDateSeparator(group.header)}
                         <div className="flex flex-col gap-2">
-                        {group.messages.map((message) => {
+                        {group.messages.map((message, messageIndex) => {
+
+                    if (message.type === "GroupEvent") {
+                        return (
+                            <Fragment key={message.messageId}>
+                                {renderEventPill(
+                                    <UsersRound className="h-3.5 w-3.5 shrink-0" />,
+                                    getGroupEventLabel(message, t, groupNameOf),
+                                    message.timestamp,
+                                )}
+                            </Fragment>
+                        );
+                    }
 
                     if (
                         message.type === "SystemBlocked" ||
@@ -1272,6 +1296,20 @@ export function ChatThreadMessages({
                                         <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
                                     ),
                                     label,
+                                    message.timestamp,
+                                )}
+                            </Fragment>
+                        );
+                    }
+
+                    if (message.type === "SystemGroupRemoved" || message.type === "SystemGroupLeft") {
+                        return (
+                            <Fragment key={message.messageId}>
+                                {renderEventPill(
+                                    <UsersRound className="h-3.5 w-3.5 shrink-0" />,
+                                    message.type === "SystemGroupLeft"
+                                        ? t("group_chat.system_left", { defaultValue: "You left the group" })
+                                        : t("group_chat.system_removed", { defaultValue: "You're no longer in this group" }),
                                     message.timestamp,
                                 )}
                             </Fragment>
@@ -1312,6 +1350,14 @@ export function ChatThreadMessages({
 
                     const mine =
                         userId != null && Number(message.senderId) === Number(userId);
+                    // Groups: the sender's name under the last of their consecutive messages.
+                    const nextMessage = group.messages[messageIndex + 1];
+                    const showGroupSender =
+                        isGroupThread &&
+                        !mine &&
+                        (nextMessage == null ||
+                            Number(nextMessage.senderId) !== Number(message.senderId) ||
+                            nextMessage.type === "GroupEvent");
                     const failed = message.clientState === "failed";
                     const pending = message.clientState === "pending";
                     const uploadProgress = localUploadProgress?.messageId === message.messageId ? localUploadProgress.progress : null;
@@ -2844,6 +2890,33 @@ export function ChatThreadMessages({
                                         </span>
                                     </div>
                                 )}
+                                {showGroupSender && (() => {
+                                    const senderId = Number(message.senderId);
+                                    const name = groupNameOf(senderId);
+                                    const avatarHash = groupMembers.avatarOf(senderId);
+                                    // Quiet attribution under the bubble: mini photo + muted name.
+                                    const content = (
+                                        <>
+                                            <span className="h-4 w-4 shrink-0 overflow-hidden rounded-full bg-[var(--surface-2)]">
+                                                <ProfileImage src={resolveAvatarSrc(avatarHash, getParticipantAvatarUrl(avatarHash))} alt="" iconClassName="h-2.5 w-2.5" />
+                                            </span>
+                                            <span className="truncate">{name}</span>
+                                        </>
+                                    );
+                                    const className = "mt-1 flex max-w-full items-center gap-1.5 text-[11px] font-medium text-[var(--text-muted)]";
+                                    // Members still in the group (and not blocked) open their profile.
+                                    return onOpenSenderProfile && isVisibleGroupMember(senderId) ? (
+                                        <button
+                                            type="button"
+                                            onClick={() => onOpenSenderProfile(senderId)}
+                                            className={`${className} transition hover:text-[var(--text)] active:opacity-70`}
+                                        >
+                                            {content}
+                                        </button>
+                                    ) : (
+                                        <span className={className}>{content}</span>
+                                    );
+                                })()}
                             </div>
                         </div>
                         </Fragment>

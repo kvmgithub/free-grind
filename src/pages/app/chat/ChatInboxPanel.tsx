@@ -1,4 +1,4 @@
-import { Archive, BellOff, Check, CheckCheck, CornerUpRight, EyeOff, ListFilter, Loader2, MessageCircle, PencilLine, Pin, Share2, Star, Trash2 } from "lucide-react";
+import { Archive, BellOff, Check, CheckCheck, CornerUpRight, EyeOff, ListFilter, Loader2, LogOut, MessageCircle, PencilLine, Pin, Share2, Star, Trash2 } from "lucide-react";
 import { BellOffFilled, EyeOffFilled, HomeFilled, LocateFixedFilled, Trash2Filled } from "../../../components/icons/FilledIcons";
 import { RightNowIcon } from "../../../components/icons/RightNowIcon";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactElement, type ReactNode, type RefObject } from "react";
@@ -9,6 +9,7 @@ import { ChatSearchPanel } from "./ChatSearchPanel";
 import { DrawerEmptyState } from "./drawerUi";
 import { FeedErrorState } from "../../../components/ui/states";
 import { ChatInboxHeader, type ChatInboxHeaderProps } from "./ChatInboxHeader";
+import { GroupAvatar } from "./groups/GroupAvatar";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { SheetActionList, afterSheetClose } from "../../../components/ui/action-sheet";
@@ -24,6 +25,7 @@ import { PullToRefreshContainer } from "../components/PullToRefreshContainer";
 import {
 	formatConversationTime,
 	getOtherParticipant,
+	isGroupConversation,
 	getParticipantAvatarUrl,
 	getParticipantOnlineMeta,
 	getPreviewText,
@@ -136,6 +138,8 @@ type ChatInboxPanelProps = ChatInboxHeaderProps & {
 	onSelectConversation: (conversation: ConversationEntry) => void;
 	onOpenConversationById: (conversationId: string) => void;
 	onViewProfile: (profileId: number) => void;
+	/** Group chats: leave (asks first; the chat stays as an archive). */
+	onLeaveGroup?: (conversationId: string) => void;
 	typingConversationIds?: Set<string>;
 	onTogglePinConversation: (conversationId: string, isPinned: boolean) => void | Promise<void>;
 	onToggleMuteConversation: (conversationId: string, isMuted: boolean) => void | Promise<void>;
@@ -182,6 +186,8 @@ type ConversationActionHandlers = {
 	/** Only set while the per-chat read-receipts toggle is enabled in Privacy settings. */
 	onToggleReadReceipts?: () => void;
 	onDelete: () => void;
+	/** Group chats we're still in: leave (above delete). */
+	onLeaveGroup?: () => void;
 	/** Only set where profiles can be shared into chats (our server, see profileShare). */
 	onShare?: () => void;
 	/** Only set while the optional Locate feature is enabled. */
@@ -210,12 +216,15 @@ function buildConversationActions(
 				onSelect: handlers.onTogglePin,
 			}]
 			: []),
-		{
-			key: "mute",
-			label: isMuted ? t("chat.unmute") : t("chat.mute"),
-			icon: isMuted ? <BellOffFilled className="h-4 w-4" /> : <BellOff className="h-4 w-4" />,
-			onSelect: handlers.onToggleMute,
-		},
+		// Muting is server-side: an archived chat no longer exists there.
+		...(!isArchived
+			? [{
+				key: "mute",
+				label: isMuted ? t("chat.unmute") : t("chat.mute"),
+				icon: isMuted ? <BellOffFilled className="h-4 w-4" /> : <BellOff className="h-4 w-4" />,
+				onSelect: handlers.onToggleMute,
+			}]
+			: []),
 		{
 			key: "hide",
 			label: isHidden
@@ -249,6 +258,15 @@ function buildConversationActions(
 				label: handlers.locateLabel ?? t("profile_details.locate"),
 				icon: <LocateFixedFilled className="h-4 w-4" />,
 				onSelect: handlers.onLocate,
+			}]
+			: []),
+		...(handlers.onLeaveGroup
+			? [{
+				key: "leave-group",
+				label: t("group_chat.leave", { defaultValue: "Leave group" }),
+				icon: <LogOut className="h-4 w-4" />,
+				onSelect: handlers.onLeaveGroup,
+				destructive: true,
 			}]
 			: []),
 		{
@@ -309,6 +327,7 @@ function ConversationContextMenu({
 	onToggleHide,
 	onToggleReadReceipts,
 	onDelete,
+	onLeaveGroup,
 	onShare,
 	onLocate,
 	locateLabel,
@@ -325,6 +344,7 @@ function ConversationContextMenu({
 	onToggleHide: () => void;
 	onToggleReadReceipts?: () => void;
 	onDelete: () => void;
+	onLeaveGroup?: () => void;
 	onShare?: () => void;
 	onLocate?: () => void;
 	locateLabel?: string;
@@ -369,6 +389,7 @@ function ConversationContextMenu({
 		onToggleHide,
 		onToggleReadReceipts,
 		onDelete,
+		onLeaveGroup,
 		onShare,
 		onLocate,
 		locateLabel,
@@ -385,9 +406,10 @@ function ConversationContextMenu({
 			style={{ top: position.top, left: position.left, ...menuTransitionStyle(visible, "top left") }}
 			className="fixed z-[70] flex min-w-[190px] flex-col gap-1 rounded-lg menu-surface p-2"
 		>
-			{actions.map((action) => (
+			{actions.map((action, index) => (
 				<Fragment key={action.key}>
-					{action.destructive && <div className="-mx-2 mt-1 border-t border-[var(--border)] pt-1" />}
+					{/* One divider before the destructive group, not between its items. */}
+					{action.destructive && !actions[index - 1]?.destructive && <div className="-mx-2 mt-1 border-t border-[var(--border)] pt-1" />}
 					<button
 						type="button"
 						onClick={action.onSelect}
@@ -588,6 +610,8 @@ function ChatConversationRow({
 	};
 
 	const otherParticipant = getOtherParticipant(conversation, userId);
+	const isGroup = isGroupConversation(conversation);
+	const isGroupInvite = conversation.data.group?.invited === true;
 	const otherProfileId = otherParticipant?.profileId ? String(otherParticipant.profileId) : null;
 	const localNickname = otherProfileId ? localNicknamesByProfileId[otherProfileId] : null;
 	const displayName = localNickname || conversation.data.name || t("common.unknown_display_name");
@@ -633,11 +657,12 @@ function ChatConversationRow({
 			<div
 				ref={contentRef}
 				onClick={handleClick}
-				onContextMenu={handleContextMenu}
-				onTouchStart={handleTouchStart}
-				onTouchEnd={handleTouchEnd}
-				onTouchMove={handleTouchMove}
-				onTouchCancel={handleTouchCancel}
+				// An open group invite has no pin/delete/menu: it's answered in its thread.
+				onContextMenu={isGroupInvite ? undefined : handleContextMenu}
+				onTouchStart={isGroupInvite ? undefined : handleTouchStart}
+				onTouchEnd={isGroupInvite ? undefined : handleTouchEnd}
+				onTouchMove={isGroupInvite ? undefined : handleTouchMove}
+				onTouchCancel={isGroupInvite ? undefined : handleTouchCancel}
 				style={{ touchAction: "pan-y" }}
 				className={`group/reveal no-touch-callout relative flex cursor-pointer items-center gap-4 text-start transition ${
 					isDesktop
@@ -651,19 +676,25 @@ function ChatConversationRow({
 						aria-label={displayName}
 						onClick={(e) => {
 							e.stopPropagation();
-							if (otherParticipant?.profileId) onViewProfile(otherParticipant.profileId);
+							// A group has no profile: the avatar opens the chat like the row.
+							if (isGroup) onSelectConversation(conversation);
+							else if (otherParticipant?.profileId) onViewProfile(otherParticipant.profileId);
 						}}
 						className="relative shrink-0 disabled:cursor-default disabled:opacity-80"
 					>
 						<div className={`${isDesktop ? "h-13 w-13" : "h-15 w-15"} rounded-full overflow-hidden bg-[var(--surface-2)] drop-shadow-sm`}>
-							<ProfileImage
-								src={resolveAvatarSrc(
-									otherParticipant?.primaryMediaHash,
-									getParticipantAvatarUrl(otherParticipant?.primaryMediaHash),
-								)}
-								alt={displayName}
-								className={isArchived ? "grayscale" : undefined}
-							/>
+							{isGroup ? (
+								<GroupAvatar alt={displayName} className={isArchived ? "grayscale" : undefined} />
+							) : (
+								<ProfileImage
+									src={resolveAvatarSrc(
+										otherParticipant?.primaryMediaHash,
+										getParticipantAvatarUrl(otherParticipant?.primaryMediaHash),
+									)}
+									alt={displayName}
+									className={isArchived ? "grayscale" : undefined}
+								/>
+							)}
 						</div>
 						{isArchived ? (
 							<span
@@ -813,6 +844,9 @@ export function ChatInboxPanel({
 	onDeleteConversation,
 	onDeleteConversationLocal,
 	isDeletingConversationId,
+	onCreateGroup,
+	groupInviteCount,
+	onLeaveGroup,
 }: ChatInboxPanelProps) {
 	const { t } = useTranslation();
 	useReadReceiptsChanged();
@@ -882,6 +916,14 @@ export function ChatInboxPanel({
 			close();
 			requestDeleteConversation(conversation, isArchived);
 		},
+		...(onLeaveGroup && !isArchived && isGroupConversation(conversation) && !conversation.data.group?.invited
+			? {
+				onLeaveGroup: () => {
+					close();
+					onLeaveGroup(conversation.data.conversationId);
+				},
+			}
+			: {}),
 		...(() => {
 			const otherParticipant = getOtherParticipant(conversation, userId);
 			// An archived chat's profile may well be gone; nothing to share then.
@@ -1161,6 +1203,8 @@ export function ChatInboxPanel({
 					archivedFilter={archivedFilter}
 					hiddenFilter={hiddenFilter}
 					needsReplyOnly={needsReplyOnly}
+					onCreateGroup={onCreateGroup}
+					groupInviteCount={groupInviteCount}
 				/>
 			)}
 

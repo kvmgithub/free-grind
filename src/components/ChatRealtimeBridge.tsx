@@ -44,6 +44,8 @@ import {
 	clearUnreadCountForProfile,
 } from "../services/chatContactIndex";
 import {
+	archiveRemovedGroup,
+	restoreRejoinedGroup,
 	toggleArchiveOnConversationDelete,
 	reconcileArchivedConversationForProfile,
 	reconcileBlockStateWithBlockedList,
@@ -65,7 +67,9 @@ import { fetchAndStoreMedia } from "../services/mediaStore";
 import { captureAlbumsForMessages } from "../services/albumStore";
 import { captureReplyPreviewsForMessages } from "../services/replyMediaStore";
 import { getConversation, getDisplayName } from "../services/conversationDirectory";
-import { hasMessage, saveProfileSnapshot } from "../services/chatDb";
+import { deleteConversationCascade, hasMessage, saveProfileSnapshot } from "../services/chatDb";
+import { GROUP_REMOVED_EVENT, type GroupRemovedDetail, applyGroupRealtimeEvent } from "../services/groupChatStore";
+import { isGroupConversationId } from "../utils/groupChat";
 import { runAutomationRulesForSender } from "../utils/automationRules";
 import { getTapEmoji } from "../pages/app/interest/interestUtils";
 import { looksLikeMessageUpdate } from "../utils/messageUpdates";
@@ -619,12 +623,17 @@ export function ChatRealtimeBridge() {
 			if (!isChatNotificationsEnabled()) return;
 
 			const conv = getConversation(m.conversationId);
+			// Groups: "<group>" as title, "<sender>: <text>" as body, the sender's photo.
+			const groupSender = isGroupConversationId(m.conversationId)
+				? conv?.data.participants.find((p) => p.profileId === Number(m.senderId)) ?? null
+				: null;
 			const senderName = conv?.data.name?.trim() || tRef.current("common.unknown_display_name");
-			const bodyText = getNotificationBodyLabel(m, tRef.current);
+			const label = getNotificationBodyLabel(m, tRef.current);
+			const bodyText = groupSender?.displayName ? `${groupSender.displayName}: ${label}` : label;
 
 			if (isAppForeground()) {
 				if (!isForegroundNotificationsEnabled()) return;
-				const other = conv ? getOtherParticipant(conv, userIdRef.current) : null;
+				const other = groupSender ?? (conv ? getOtherParticipant(conv, userIdRef.current) : null);
 				const avatarUrl = getParticipantAvatarUrl(other?.primaryMediaHash);
 				const chatPath = `/chat/${encodeURIComponent(m.conversationId)}`;
 				toast(
@@ -716,6 +725,7 @@ export function ChatRealtimeBridge() {
 		};
 
 		const manager = new ChatRealtimeManager({
+			getOwnProfileId: () => userIdRef.current,
 			onStatusChange: (status) => {
 				dispatchStatus(status);
 			},
@@ -842,6 +852,30 @@ export function ChatRealtimeBridge() {
 					}
 				}
 
+				// Group chats (Free Grind server): invites, changes, and being out of a group.
+				if (typeof envelope.type === "string" && envelope.type.startsWith("chat.v1.group.")) {
+					const removed = applyGroupRealtimeEvent(envelope.type, envelope.payload);
+					// Back in a group we'd left (re-invited and joined, maybe elsewhere): live again.
+					const updated = (envelope.payload as { group?: { conversationId?: string; myStatus?: string } } | undefined)?.group;
+					if (envelope.type === "chat.v1.group.updated" && updated?.myStatus === "ACTIVE" && updated.conversationId) {
+						await restoreRejoinedGroup(updated.conversationId);
+					}
+					if (removed) {
+						void clearChatNotifications(removed.conversationId).catch(() => {});
+						if (removed.reason === "declined") {
+							// Only an invite: there's no conversation to keep.
+							await deleteConversationCascade(removed.conversationId).catch((error: unknown) => {
+								appLog.warn("[chat-ws:bridge] dropping group conversation failed", error);
+							});
+						} else {
+							// Left (maybe on another device), removed or the group is gone:
+							// it stays readable but archived until the user deletes it.
+							await archiveRemovedGroup(removed.conversationId, removed.reason === "left" ? "left" : "removed");
+						}
+						window.dispatchEvent(new CustomEvent<GroupRemovedDetail>(GROUP_REMOVED_EVENT, { detail: removed }));
+					}
+				}
+
 				if (envelope.type === "chat.v1.typing_status") {
 					const record = envelope.payload as Record<string, unknown> | undefined;
 					if (record) {
@@ -948,8 +982,10 @@ export function ChatRealtimeBridge() {
 						// reacted to, re-delivering the original message (same
 						// messageId). Reacting to their message would otherwise look
 						// like a new incoming one — notification + unread bump.
+						// Group membership lines (joined, left, …) are stored but never
+						// notify or count as unread (the server doesn't count them either).
 						const isIncoming =
-							fromOther && !(await isMessageUpdate(m, userIdRef.current));
+							fromOther && m.type !== "GroupEvent" && !(await isMessageUpdate(m, userIdRef.current));
 
 						// --- CUSTOM AUTOMATION RULES ---
 						if (isIncoming && m.senderId) {
@@ -999,13 +1035,17 @@ export function ChatRealtimeBridge() {
 							const isViewingThisChat =
 								isAppForeground() && isChatOpen(m.conversationId, m.senderId);
 							if (!isViewingThisChat) {
-								await incrementUnreadCountForProfile(
-									String(m.senderId),
-									m.conversationId,
-									m.timestamp,
-								).catch((err) => {
-									appLog.warn("[chat-ws:bridge] failed to increment unread", err);
-								});
+								// The per-profile index is for 1:1 chats; a group's
+								// unread count comes from its inbox entry.
+								if (!isGroupConversationId(m.conversationId)) {
+									await incrementUnreadCountForProfile(
+										String(m.senderId),
+										m.conversationId,
+										m.timestamp,
+									).catch((err) => {
+										appLog.warn("[chat-ws:bridge] failed to increment unread", err);
+									});
+								}
 								triggerIncomingMessageNotification(m);
 							}
 						}

@@ -11,6 +11,8 @@ import { hourCycleOptions } from "../../../utils/timeFormat";
 import { ONLINE_ENDING_SOON_MINUTES } from "../gridpage/utils";
 import { sanitizeUploadFile } from "../../../services/uploadSanitize";
 import { isFeatureOn } from "../../../services/assignmentsStore";
+import { type ChatSendTarget, groupIdOfConversation, isGroupConversationId } from "../../../utils/groupChat";
+import { getGroupEventLabel } from "./groups/groupLabels";
 
 export type ChatFiltersDraft = {
 	unreadOnly: boolean;
@@ -371,13 +373,43 @@ export function conversationNeedsReply(
  * since "Sent you…" would be wrong there.
  */
 export function getPreviewText(conversation: ConversationEntry, t: TranslateFn, userId?: number | null): string {
+	const text = getPreviewTextBase(conversation, t, userId);
+	const preview = conversation.data.preview;
+	// Groups: "<sender>: <preview>" for other members' messages.
+	if (!preview || !isGroupConversation(conversation) || preview.type === "GroupEvent" || conversation.data.group?.invited) return text;
+	if (preview.senderId == null || userId == null || Number(preview.senderId) === Number(userId)) return text;
+	const sender = conversation.data.participants.find((p) => p.profileId === Number(preview.senderId));
+	const name = sender?.displayName?.trim();
+	return name ? `${name}: ${text}` : text;
+}
+
+function getPreviewTextBase(conversation: ConversationEntry, t: TranslateFn, userId?: number | null): string {
 	const preview = conversation.data.preview;
 	if (!preview) {
 		return t("chat.no_messages_yet");
 	}
+	// Local line written when we left or were removed (the chat is archived then).
+	if (preview.type === "SystemGroupLeft") return t("group_chat.system_left", { defaultValue: "You left the group" });
+	if (preview.type === "SystemGroupRemoved") return t("group_chat.system_removed", { defaultValue: "You're no longer in this group" });
+	// Group membership line: the same text as in the chat ("You joined", "Alex left", …).
+	// Checked before `text`: older local previews stored a generic label there.
+	if (preview.type === "GroupEvent") {
+		if (!preview.groupEvent) return t("group_chat.preview.event", { defaultValue: "Group updated" });
+		const names = new Map(conversation.data.participants.map((p) => [p.profileId, p.displayName?.trim() || null]));
+		const nameOf = (id: number | null | undefined) =>
+			id == null
+				? t("common.unknown_display_name")
+				: userId != null && Number(id) === Number(userId)
+					? t("group_chat.you", { defaultValue: "You" })
+					: names.get(Number(id)) || t("group_chat.former_member", { defaultValue: "Someone" });
+		return getGroupEventLabel({ body: preview.groupEvent, senderId: Number(preview.senderId ?? 0) }, t, nameOf);
+	}
 
 	if (preview.text?.trim()) {
 		return preview.text;
+	}
+	if (preview.type === "GroupEvent") {
+		return t("group_chat.preview.event", { defaultValue: "Group updated" });
 	}
 
 	const isIncoming =
@@ -421,6 +453,7 @@ export function getPreviewText(conversation: ConversationEntry, t: TranslateFn, 
 }
 
 export function getMessagePreviewLabel(message: Message, t: TranslateFn): string {
+	if (message.type === "GroupEvent") return t("group_chat.preview.event", { defaultValue: "Group updated" });
 	if (
 		typeof (message.body as Record<string, unknown> | null)?.text === "string"
 	) {
@@ -597,9 +630,11 @@ export function buildPreviewFromMessage(
 		senderId: message.senderId,
 		type: message.type,
 		chat1Type: message.chat1Type ?? "text",
-		text: getMessagePreviewLabel(message, t),
+		// GroupEvent: no text; the inbox describes it from groupEvent (getPreviewText).
+		text: message.type === "GroupEvent" ? null : getMessagePreviewLabel(message, t),
 		albumId: null,
 		imageHash: null,
+		...(message.type === "GroupEvent" ? { groupEvent: (message.body ?? null) as Record<string, unknown> | null } : {}),
 	};
 }
 
@@ -1457,10 +1492,36 @@ export function getMessageAlbumCoverUrl(message: UiMessage): string | null {
 	return null;
 }
 
+export function isGroupConversation(conversation: ConversationEntry | null | undefined): boolean {
+	return isGroupConversationId(conversation?.data.conversationId);
+}
+
+/**
+ * Where a thread's messages go: the group, or the other participant (a
+ * profile without a conversation yet falls back to `fallbackProfileId`).
+ */
+export function getSendTarget(
+	conversation: ConversationEntry | null | undefined,
+	userId: number | null,
+	fallbackProfileId: number | string | null | undefined,
+): ChatSendTarget | null {
+	const groupId = groupIdOfConversation(conversation?.data.conversationId);
+	if (groupId != null) return { type: "Group", targetId: groupId };
+	const profileId = conversation ? getOtherParticipant(conversation, userId)?.profileId : fallbackProfileId;
+	const n = profileId == null ? NaN : Number(profileId);
+	return Number.isFinite(n) && n > 0 ? { type: "Direct", targetId: n } : null;
+}
+
+/**
+ * The other side of a direct conversation. Null for group conversations: they
+ * have no single other profile, so 1:1 actions (profile, block, call, unread
+ * per profile) skip them.
+ */
 export function getOtherParticipant(
 	conversation: ConversationEntry,
 	userId: number | null,
 ) {
+	if (isGroupConversation(conversation)) return null;
 	return (
 		conversation.data.participants.find(
 			(participant) => participant.profileId !== userId,

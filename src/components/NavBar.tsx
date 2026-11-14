@@ -430,6 +430,8 @@ export function NavBar() {
 					(m) =>
 						userId != null &&
 						Number(m.senderId) !== Number(userId) &&
+						// Group membership lines (joined, left, …) aren't unread messages.
+						m.type !== "GroupEvent" &&
 						!looksLikeMessageUpdate(m, userId) &&
 						!mutedConversationIdsRef.current.has(m.conversationId)
 				);

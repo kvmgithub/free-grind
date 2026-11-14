@@ -28,6 +28,9 @@ import * as chatDb from "../../services/chatDb";
 import type { ArchivedReason } from "../../types/chat-db";
 import {
 	archiveConversation,
+	archiveRemovedGroup,
+	groupSystemPreview,
+	restoreRejoinedGroup,
 	unarchiveConversation,
 	claimBlockStateTransition,
 	deriveOtherProfileIdFromConversationId,
@@ -125,6 +128,7 @@ import {
 	VIEW_LIMITED_LOCK_FLAG,
 	getMessagePreviewLabel,
 	getOtherParticipant,
+	getSendTarget,
 	getParticipantOnlineMeta,
 	isLocalClientMessageId,
 	parseChatFiltersFromLocationState,
@@ -169,6 +173,14 @@ import { removeProfileFromBrowseCache, getCachedProfileDetail, setCachedProfileD
 import type { ProfileDetail } from "../../types/grid";
 import { getProfileImageUrl, getThumbImageUrl, validateMediaHash } from "../../utils/media";
 import { setOpenChat } from "../../services/openChatState";
+import { useFeatureFlag } from "../../services/assignmentsStore";
+import { GROUP_REMOVED_EVENT, type GroupRemovedDetail, clearGroupChatState, forgetGroup, setGroupInvites, upsertGroup, useGroupInvites } from "../../services/groupChatStore";
+import type { ChatGroup } from "../../types/messages";
+import { GROUP_CHATS_FLAG, groupIdOfConversation, isGroupConversationId } from "../../utils/groupChat";
+import { ConfirmDialog } from "../../components/ui/confirm-dialog";
+import { CreateGroupSheet } from "./chat/groups/CreateGroupSheet";
+import { GroupInfoSheet } from "./chat/groups/GroupInfoSheet";
+import { groupInviteEntry } from "./chat/groups/groupInvite";
 
 // Local pagination for archived threads (chatDb has no server to ask, so we
 // page through it ourselves) — a "pageKey" here is this prefix + a cursor
@@ -502,6 +514,18 @@ export function ChatPage() {
 		Map<string, { reason: ArchivedReason; entry: ConversationEntry }>
 	>(() => new Map(getArchivedInboxSnapshot(userId) ?? []));
 	const archivedConversationsRef = useRef(archivedConversations);
+
+	// Group chats (Free Grind server, flag group-chats): open invites show as
+	// inbox rows and open as a thread with Join / Decline.
+	const groupChatsEnabled = useFeatureFlag(GROUP_CHATS_FLAG);
+	const groupInvites = useGroupInvites();
+	const inviteEntries = useMemo(
+		() => (groupChatsEnabled ? groupInvites.map((group) => groupInviteEntry(group, userId, t)) : []),
+		[groupChatsEnabled, groupInvites, userId, t],
+	);
+	const inviteConversationIdsRef = useRef(new Set<string>());
+	inviteConversationIdsRef.current = new Set(inviteEntries.map((e) => e.data.conversationId));
+
 	useEffect(() => {
 		archivedConversationsRef.current = archivedConversations;
 		if (userId != null) {
@@ -1051,9 +1075,12 @@ export function ChatPage() {
 					conversation.data.conversationId === selectedConversationId,
 			) ??
 			(selectedConversationId
-				? archivedConversations.get(selectedConversationId)?.entry ?? null
+				? // An open invite to a group we'd left wins over its old archived chat.
+					inviteEntries.find((entry) => entry.data.conversationId === selectedConversationId) ??
+					archivedConversations.get(selectedConversationId)?.entry ??
+					null
 				: null),
-		[conversations, archivedConversations, selectedConversationId],
+		[conversations, archivedConversations, selectedConversationId, inviteEntries],
 	);
 
 	const selectedConversationOtherProfileId = useMemo(() => {
@@ -1516,6 +1543,20 @@ export function ChatPage() {
 				// even though we have real local history.
 				const withPreviews = await Promise.all(
 					archived.map(async (c) => {
+						// Groups we left / were removed from before the preview was
+						// set on leaving: show that line instead of the last event.
+						const previewType = c.entry.data.preview?.type;
+						if (c.archivedReason === "group_removed" && previewType !== "SystemGroupLeft" && previewType !== "SystemGroupRemoved") {
+							const stored = await chatDb.getMessages(c.conversationId).catch(() => []);
+							const line = stored
+								.filter((m) => m.type === "SystemGroupLeft" || m.type === "SystemGroupRemoved")
+								.sort((a, b) => b.timestamp - a.timestamp)[0];
+							if (line) {
+								const preview = groupSystemPreview(line);
+								void chatDb.setConversationPreview(c.conversationId, preview, line.timestamp).catch(() => undefined);
+								return { ...c, entry: { ...c.entry, data: { ...c.entry.data, preview } } };
+							}
+						}
 						if (!isPreviewUnhelpful(c.entry.data.preview)) {
 							return c;
 						}
@@ -2175,6 +2216,9 @@ export function ChatPage() {
 			older: boolean;
 			silent?: boolean;
 		}) => {
+			// An open group invite has no history to load yet (the server refuses
+			// it until accepted — which must not read as being removed).
+			if (inviteConversationIdsRef.current.has(conversationId)) return;
 			// Already known to be gone server-side (discovered via an earlier 404)
 			// — skip the doomed network call entirely and page through the local
 			// cache instead, mirroring the live path's pageKey/"load older"
@@ -3055,7 +3099,12 @@ export function ChatPage() {
 					void archiveConversation(conversationId, "not_found");
 					archiveConversationsLocally([conversationId], "not_found");
 				}
-				if (apiError?.status === 403 && !archivedConversationsRef.current.has(conversationId)) {
+				if (apiError?.status === 403 && isGroupConversationId(conversationId) && !archivedConversationsRef.current.has(conversationId)) {
+					// Groups: a 403 means we're no longer a member (removed while
+					// offline, or the group is gone) — read-only, like other archives.
+					await archiveRemovedGroup(conversationId);
+					archiveConversationsLocally([conversationId], "group_removed");
+				} else if (apiError?.status === 403 && !archivedConversationsRef.current.has(conversationId)) {
 					// A bare 403 here isn't proof of a block by itself — it can also
 					// be transient (e.g. a stale/mid-reconnect session right after
 					// the app resumes from a backgrounded/suspended state, which is
@@ -3428,7 +3477,8 @@ export function ChatPage() {
 		// Update threadLastReadTimestamp if we receive a message from the other person
 		// in the active chat, because it implies they've read our previous messages.
 		const activeConversationId = selectedConversationIdRef.current;
-		if (activeConversationId) {
+		// Not in groups: one member writing says nothing about who read what.
+		if (activeConversationId && !isGroupConversationId(activeConversationId)) {
 			const otherPersonMessages = messages.filter(
 				(m) =>
 					m.conversationId === activeConversationId &&
@@ -3446,7 +3496,9 @@ export function ChatPage() {
 			if (
 				userId != null &&
 				Number(m.senderId) !== Number(userId) &&
-				m.conversationId !== activeConversationId
+				m.conversationId !== activeConversationId &&
+				// The per-profile index is for 1:1 chats only.
+				!isGroupConversationId(m.conversationId)
 			) {
 				conversationsWithPendingUnreadRef.current.add(m.conversationId);
 
@@ -3521,7 +3573,8 @@ export function ChatPage() {
 							conversation.data.lastActivityTimestamp ?? 0,
 							latestMessage.timestamp,
 						),
-						unreadCount: (isMine || isActive) ? conversation.data.unreadCount : (conversation.data.unreadCount + 1),
+						// Group membership lines don't count as unread (the server agrees).
+						unreadCount: (isMine || isActive || latestMessage.type === "GroupEvent") ? conversation.data.unreadCount : (conversation.data.unreadCount + 1),
 						preview: {
 							conversationId: {
 								value: latestMessage.conversationId,
@@ -3530,9 +3583,11 @@ export function ChatPage() {
 							senderId: latestMessage.senderId,
 							type: latestMessage.type,
 							chat1Type: latestMessage.chat1Type ?? "text",
-							text,
+							// GroupEvent: described from groupEvent in the inbox (getPreviewText).
+							text: latestMessage.type === "GroupEvent" ? null : text,
 							albumId: null,
 							imageHash: null,
+							...(latestMessage.type === "GroupEvent" ? { groupEvent: (latestMessage.body ?? null) as Record<string, unknown> | null } : {}),
 						},
 					},
 				};
@@ -3737,6 +3792,38 @@ export function ChatPage() {
 		const onSystemMessage = (event: Event) => {
 			const messages = (event as CustomEvent<Message[]>).detail;
 			if (!messages?.length) return;
+			// Left / removed from a group: the inbox row's preview becomes that line.
+			const groupLines = new Map(
+				messages
+					.filter((m) => m.type === "SystemGroupLeft" || m.type === "SystemGroupRemoved")
+					.map((m) => [m.conversationId, m] as const),
+			);
+			if (groupLines.size > 0) {
+				const withLine = (entry: ConversationEntry): ConversationEntry => {
+					const line = groupLines.get(entry.data.conversationId);
+					if (!line) return entry;
+					return {
+						...entry,
+						data: {
+							...entry.data,
+							preview: groupSystemPreview(line),
+							lastActivityTimestamp: Math.max(entry.data.lastActivityTimestamp ?? 0, line.timestamp),
+						},
+					};
+				};
+				setConversations((previous) =>
+					previous.some((c) => groupLines.has(c.data.conversationId)) ? previous.map(withLine) : previous,
+				);
+				setArchivedConversations((previous) => {
+					if (![...groupLines.keys()].some((id) => previous.has(id))) return previous;
+					const next = new Map(previous);
+					for (const id of groupLines.keys()) {
+						const archived = next.get(id);
+						if (archived) next.set(id, { ...archived, entry: withLine(archived.entry) });
+					}
+					return next;
+				});
+			}
 			const activeConversationId = selectedConversationIdRef.current;
 			const relevant = messages.filter((m) => m.conversationId === activeConversationId);
 			if (relevant.length === 0) return;
@@ -4489,7 +4576,7 @@ export function ChatPage() {
 			Boolean(activeInboxFilters.onlineNowOnly) ||
 			(activeInboxFilters.positions?.length ?? 0) > 0 ||
 			activeInboxFilters.distanceMeters != null;
-		const archivedEntries = hasUnverifiableServerFilters ? [] : listedArchivedEntries;
+		const archivedEntriesAll = hasUnverifiableServerFilters ? [] : listedArchivedEntries;
 		// Sort by pinned-then-recency instead of tacking archived entries onto
 		// the end, where a single archived chat among many active ones would
 		// be easy to miss without scrolling.
@@ -4499,13 +4586,21 @@ export function ChatPage() {
 			return (b.data.lastActivityTimestamp ?? 0) - (a.data.lastActivityTimestamp ?? 0);
 		};
 
+		// Open group invites sit among the live chats (by invite time) — never
+		// next to the joined conversation itself (store and inbox can overlap
+		// for a moment right after accepting; one id twice breaks the list).
+		// A re-invite to a group we'd left replaces its archived row until answered.
+		const liveIds = new Set(conversations.map((c) => c.data.conversationId));
+		const invites = hasUnverifiableServerFilters ? [] : inviteEntries.filter((e) => !liveIds.has(e.data.conversationId));
+		const invitedIds = new Set(invites.map((e) => e.data.conversationId));
+		const archivedEntries = archivedEntriesAll.filter((e) => !invitedIds.has(e.data.conversationId));
 		let result: ConversationEntry[];
 		if (archivedFilter === "hide") {
-			result = liveConversations;
+			result = [...liveConversations, ...invites].sort(byPinnedThenRecency);
 		} else if (archivedFilter === "only") {
 			result = [...archivedEntries].sort(byPinnedThenRecency);
 		} else {
-			result = [...liveConversations, ...archivedEntries].sort(byPinnedThenRecency);
+			result = [...liveConversations, ...invites, ...archivedEntries].sort(byPinnedThenRecency);
 		}
 
 		if (activeInboxFilters.favoritesOnly) {
@@ -4527,7 +4622,13 @@ export function ChatPage() {
 		if (needsReplyOnly) {
 			result = result.filter((c) => conversationNeedsReply(c, userId));
 		}
-		return result;
+		// One row per conversation id: the list's rows are keyed by it.
+		const seen = new Set<string>();
+		return result.filter((c) => {
+			if (seen.has(c.data.conversationId)) return false;
+			seen.add(c.data.conversationId);
+			return true;
+		});
 	}, [
 		conversations,
 		pinnedFilter,
@@ -4545,6 +4646,7 @@ export function ChatPage() {
 		hiddenConversationIds,
 		needsReplyOnly,
 		userId,
+		inviteEntries,
 	]);
 
 	const handleSelectConversation = (conversation: ConversationEntry) => {
@@ -4642,6 +4744,158 @@ export function ChatPage() {
 		},
 		[location, navigate],
 	);
+
+	// --- Group chats (Free Grind server, flag group-chats) -------------------------
+	const [isCreateGroupOpen, setIsCreateGroupOpen] = useState(false);
+	const [groupInfoId, setGroupInfoId] = useState<number | null>(null);
+
+	// Open invites: loaded per account while the flag is on; events keep them current.
+	useEffect(() => {
+		clearGroupChatState();
+		if (!groupChatsEnabled || userId == null) return;
+		let cancelled = false;
+		service
+			.listGroupInvites()
+			.then((invites) => {
+				if (!cancelled) setGroupInvites(invites);
+			})
+			.catch((error: unknown) => appLog.warn("[ChatPage] loading group invites failed", error));
+		return () => {
+			cancelled = true;
+		};
+	}, [groupChatsEnabled, service, userId]);
+
+	/** A group was created or joined: reload the inbox so it's there, then open it. */
+	const openJoinedGroup = useCallback(
+		async (group: ChatGroup) => {
+			upsertGroup(group);
+			await loadInbox({ page: 1, replace: true, silent: true });
+			openConversationById(group.conversationId);
+		},
+		[loadInbox, openConversationById],
+	);
+
+	// The open invite shown in the thread (Join / Decline in the composer's place).
+	const selectedGroupInvite =
+		groupChatsEnabled && !conversations.some((c) => c.data.conversationId === selectedConversationId)
+			? (groupInvites.find((g) => g.conversationId === selectedConversationId) ?? null)
+			: null;
+	const [isAnsweringGroupInvite, setIsAnsweringGroupInvite] = useState(false);
+
+	// Leave from a menu (thread "…", inbox context menu): asks first.
+	const [leaveGroupConfirmId, setLeaveGroupConfirmId] = useState<string | null>(null);
+	const [isLeavingGroup, setIsLeavingGroup] = useState(false);
+	const confirmLeaveGroup = useCallback(async () => {
+		const conversationId = leaveGroupConfirmId;
+		const groupId = groupIdOfConversation(conversationId);
+		if (!conversationId || groupId == null) return;
+		setIsLeavingGroup(true);
+		try {
+			await service.leaveGroup(groupId);
+			// The chat stays as a read-only archive until it's deleted.
+			await archiveRemovedGroup(conversationId, "left");
+			archiveConversationsLocally([conversationId], "group_removed");
+			setLeaveGroupConfirmId(null);
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : t("group_chat.errors.leave_failed", { defaultValue: "Couldn't leave the group." }));
+		} finally {
+			setIsLeavingGroup(false);
+		}
+	}, [archiveConversationsLocally, leaveGroupConfirmId, service, t]);
+
+	const leaveSelectedThreadIf = useCallback(
+		(conversationId: string) => {
+			if (selectedConversationId !== conversationId) return;
+			setThreadMessages([]);
+			setThreadConversationId(null);
+			if (isDesktop) setSelectedDesktopConversationId(null);
+			else navigate("/chat", { replace: true });
+		},
+		[isDesktop, navigate, selectedConversationId],
+	);
+
+	const acceptSelectedGroupInvite = useCallback(async () => {
+		if (!selectedGroupInvite) return;
+		setIsAnsweringGroupInvite(true);
+		try {
+			const joined = await service.acceptGroupInvite(selectedGroupInvite.groupId);
+			upsertGroup(joined);
+			// Joined a group we'd left before: its archived chat becomes live again.
+			await restoreRejoinedGroup(joined.conversationId);
+			// Now a real conversation: in the inbox, with history from joining on.
+			await loadInbox({ page: 1, replace: true, silent: true });
+			void loadThread({ conversationId: joined.conversationId, older: false });
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : t("group_chat.errors.accept_failed", { defaultValue: "Couldn't join the group." }));
+		} finally {
+			setIsAnsweringGroupInvite(false);
+		}
+	}, [loadInbox, loadThread, selectedGroupInvite, service, t]);
+
+	const declineSelectedGroupInvite = useCallback(async () => {
+		if (!selectedGroupInvite) return;
+		setIsAnsweringGroupInvite(true);
+		try {
+			await service.declineGroupInvite(selectedGroupInvite.groupId);
+			forgetGroup(selectedGroupInvite.groupId);
+			leaveSelectedThreadIf(selectedGroupInvite.conversationId);
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : t("group_chat.errors.update_failed", { defaultValue: "Couldn't update the group." }));
+		} finally {
+			setIsAnsweringGroupInvite(false);
+		}
+	}, [leaveSelectedThreadIf, selectedGroupInvite, service, t]);
+
+	// Left, removed or the group is gone: its conversation leaves the inbox (the
+	// bridge already dropped it from chatDb).
+	useEffect(() => {
+		const onRemoved = (event: Event) => {
+			const { conversationId, reason } = (event as CustomEvent<GroupRemovedDetail>).detail;
+			// Left, removed or group deleted: the chat stays, archived (the bridge
+			// archived it; CHAT_ARCHIVE_STATE_EVENT updates this page). Only a
+			// declined invite has no conversation to keep.
+			if (reason !== "declined") {
+				if (reason === "removed") toast(t("group_chat.removed_toast", { defaultValue: "You were removed from a group." }));
+				return;
+			}
+			setConversations((previous) => previous.filter((c) => c.data.conversationId !== conversationId));
+			leaveSelectedThreadIf(conversationId);
+		};
+		window.addEventListener(GROUP_REMOVED_EVENT, onRemoved);
+		return () => window.removeEventListener(GROUP_REMOVED_EVENT, onRemoved);
+	}, [leaveSelectedThreadIf, t]);
+
+	// Renames and member changes reach the inbox entry right away.
+	useEffect(() => {
+		const onEvent = (event: Event) => {
+			const envelope = (event as CustomEvent<RealtimeEnvelope>).detail;
+			if (envelope?.type !== "chat.v1.group.updated") return;
+			const group = (envelope.payload as { group?: ChatGroup } | undefined)?.group;
+			if (!group || group.myStatus !== "ACTIVE") return;
+			const others = group.members.filter((m) => m.status === "ACTIVE" && m.profileId !== userId && !m.blocked);
+			setConversations((previous) =>
+				previous.map((c) =>
+					c.data.conversationId !== group.conversationId
+						? c
+						: {
+								...c,
+								data: {
+									...c.data,
+									name: group.name,
+									participants: others.map((m) => ({
+										...(c.data.participants.find((p) => p.profileId === m.profileId) ?? { profileId: m.profileId }),
+										displayName: m.displayName ?? null,
+										primaryMediaHash: m.primaryMediaHash ?? null,
+									})),
+									group: { groupId: group.groupId, memberCount: others.length + 1, myRole: group.myRole ?? "MEMBER" },
+								},
+							},
+				),
+			);
+		};
+		window.addEventListener(CHAT_REALTIME_EVENT, onEvent);
+		return () => window.removeEventListener(CHAT_REALTIME_EVENT, onEvent);
+	}, [userId]);
 
 	useEffect(() => {
 		if (!targetProfileId) {
@@ -5455,11 +5709,11 @@ export function ChatPage() {
 				return;
 			}
 
-			const targetProfileIdValue = selectedConversation
-				? (getOtherParticipant(selectedConversation, userId)?.profileId ?? null)
-				: targetProfileId;
+			// Groups send to the group; direct chats to the other participant.
+			const sendTarget = getSendTarget(selectedConversation, userId, targetProfileId);
+			const targetProfileIdValue = sendTarget?.targetId ?? null;
 
-			if (!targetProfileIdValue) {
+			if (!sendTarget || !targetProfileIdValue) {
 				toast.error(t("chat.errors.missing_recipient"));
 				return;
 			}
@@ -5520,9 +5774,10 @@ export function ChatPage() {
 			);
 
 			try {
-				const sentMessage = await service.sendText({
-					targetProfileId: targetProfileIdValue,
-					text: trimmed,
+				const sentMessage = await service.sendMessage({
+					type: "Text",
+					target: sendTarget,
+					body: { text: trimmed },
 					replyToMessageId: selectedReplyMessage?.messageId ?? null,
 				});
 
@@ -5621,11 +5876,11 @@ export function ChatPage() {
 				return;
 			}
 
-			const targetProfileIdValue = selectedConversation
-				? (getOtherParticipant(selectedConversation, userId)?.profileId ?? null)
-				: targetProfileId;
+			// Groups send to the group; direct chats to the other participant.
+			const sendTarget = getSendTarget(selectedConversation, userId, targetProfileId);
+			const targetProfileIdValue = sendTarget?.targetId ?? null;
 
-			if (!targetProfileIdValue) {
+			if (!sendTarget || !targetProfileIdValue) {
 				toast.error(t("chat.errors.missing_recipient"));
 				return;
 			}
@@ -5635,10 +5890,7 @@ export function ChatPage() {
 			try {
 				const sentMessage = await service.sendMessage({
 					type: "Location",
-					target: {
-						type: "Direct",
-						targetId: targetProfileIdValue,
-					},
+					target: sendTarget,
 					body: { lat, lon },
 					replyToMessageId: replyTargetMessageId,
 				});
@@ -5679,11 +5931,11 @@ export function ChatPage() {
 		async (message: { type: "Giphy" | "Gaymoji"; chat1Type: string; body: Record<string, unknown> }) => {
 			if (!userId) return;
 
-			const targetProfileIdValue = selectedConversation
-				? (getOtherParticipant(selectedConversation, userId)?.profileId ?? null)
-				: targetProfileId;
+			// Groups send to the group; direct chats to the other participant.
+			const sendTarget = getSendTarget(selectedConversation, userId, targetProfileId);
+			const targetProfileIdValue = sendTarget?.targetId ?? null;
 
-			if (!targetProfileIdValue) {
+			if (!sendTarget || !targetProfileIdValue) {
 				toast.error(t("chat.errors.missing_recipient"));
 				return;
 			}
@@ -5693,10 +5945,7 @@ export function ChatPage() {
 			try {
 				const sentMessage = await service.sendMessage({
 					type: message.type,
-					target: {
-						type: "Direct",
-						targetId: targetProfileIdValue,
-					},
+					target: sendTarget,
 					body: message.body,
 					replyToMessageId: replyTargetMessageId,
 				});
@@ -5761,17 +6010,17 @@ export function ChatPage() {
 	const sendAlbumContentReaction = useCallback(
 		async (albumId: number, albumContentId: number) => {
 			if (!userId) return;
-			const targetProfileIdValue = selectedConversation
-				? (getOtherParticipant(selectedConversation, userId)?.profileId ?? null)
-				: targetProfileId;
-			if (!targetProfileIdValue) {
+			// Groups send to the group; direct chats to the other participant.
+			const sendTarget = getSendTarget(selectedConversation, userId, targetProfileId);
+			const targetProfileIdValue = sendTarget?.targetId ?? null;
+			if (!sendTarget || !targetProfileIdValue) {
 				toast.error(t("chat.errors.missing_recipient"));
 				return;
 			}
 			try {
 				const sentMessage = await service.sendMessage({
 					type: "AlbumContentReaction",
-					target: { type: "Direct", targetId: targetProfileIdValue },
+					target: sendTarget,
 					body: { albumId, albumContentId },
 				});
 				if (selectedConversation) {
@@ -5789,17 +6038,17 @@ export function ChatPage() {
 	const sendAlbumContentReply = useCallback(
 		async (albumId: number, albumContentId: number, contentType: string | null, text: string) => {
 			if (!userId) return;
-			const targetProfileIdValue = selectedConversation
-				? (getOtherParticipant(selectedConversation, userId)?.profileId ?? null)
-				: targetProfileId;
-			if (!targetProfileIdValue) {
+			// Groups send to the group; direct chats to the other participant.
+			const sendTarget = getSendTarget(selectedConversation, userId, targetProfileId);
+			const targetProfileIdValue = sendTarget?.targetId ?? null;
+			if (!sendTarget || !targetProfileIdValue) {
 				toast.error(t("chat.errors.missing_recipient"));
 				return;
 			}
 			try {
 				const sentMessage = await service.sendMessage({
 					type: "AlbumContentReply",
-					target: { type: "Direct", targetId: targetProfileIdValue },
+					target: sendTarget,
 					body: { albumId, albumContentId, albumContentReply: text, contentType: contentType ?? "image/jpeg" },
 				});
 				if (selectedConversation) {
@@ -5816,17 +6065,17 @@ export function ChatPage() {
 	const sendProfilePhotoReply = useCallback(
 		async (imageHash: string, text: string) => {
 			if (!userId) return;
-			const targetProfileIdValue = selectedConversation
-				? (getOtherParticipant(selectedConversation, userId)?.profileId ?? null)
-				: targetProfileId;
-			if (!targetProfileIdValue) {
+			// Groups send to the group; direct chats to the other participant.
+			const sendTarget = getSendTarget(selectedConversation, userId, targetProfileId);
+			const targetProfileIdValue = sendTarget?.targetId ?? null;
+			if (!sendTarget || !targetProfileIdValue) {
 				toast.error(t("chat.errors.missing_recipient"));
 				return;
 			}
 			try {
 				const sentMessage = await service.sendMessage({
 					type: "ProfilePhotoReply",
-					target: { type: "Direct", targetId: targetProfileIdValue },
+					target: sendTarget,
 					body: { imageHash, photoContentReply: text },
 				});
 				if (selectedConversation) {
@@ -5872,10 +6121,10 @@ export function ChatPage() {
 				return;
 			}
 
-			const targetProfileIdValue = selectedConversation
-				? (getOtherParticipant(selectedConversation, userId)?.profileId ?? null)
-				: targetProfileId;
-			if (!targetProfileIdValue) {
+			// Groups send to the group; direct chats to the other participant.
+			const sendTarget = getSendTarget(selectedConversation, userId, targetProfileId);
+			const targetProfileIdValue = sendTarget?.targetId ?? null;
+			if (!sendTarget || !targetProfileIdValue) {
 				toast.error(t("chat.errors.missing_recipient"));
 				return;
 			}
@@ -5968,7 +6217,7 @@ export function ChatPage() {
 				}
 
 				// Also captures the sent media into chatDb (see chatMediaSend).
-				const sentMessage = await sendUploadedChatMedia(service, uploaded, targetProfileIdValue, {
+				const sentMessage = await sendUploadedChatMedia(service, uploaded, sendTarget, {
 					maxViews: options.maxViews,
 					replyToMessageId,
 				});
@@ -6135,10 +6384,9 @@ export function ChatPage() {
 
 	const sendAudioBlob = useCallback(async (blob: Blob, durationMs: number) => {
 		if (!userId) return;
-		const targetIdValue = selectedConversation
-			? (getOtherParticipant(selectedConversation, userId)?.profileId ?? null)
-			: targetProfileId;
-		if (!targetIdValue) return;
+		const sendTarget = getSendTarget(selectedConversation, userId, targetProfileId);
+		const targetIdValue = sendTarget?.targetId ?? null;
+		if (!sendTarget || !targetIdValue) return;
 		// Auto-sent recordings go through the pending bar too: it stays locked
 		// while the upload runs and keeps the recording for a retry if it fails.
 		setPendingAudioBlob(blob);
@@ -6188,7 +6436,7 @@ export function ChatPage() {
 			setAudioUpload((previous) => previous && { ...previous, progress: 96 });
 			const sentMessage = await service.sendMessage({
 				type: "Audio",
-				target: { type: "Direct", targetId: Number(targetIdValue) },
+				target: sendTarget,
 				body: {
 					mediaId: uploaded.mediaId,
 					mediaHash: uploaded.mediaHash,
@@ -6544,18 +6792,24 @@ export function ChatPage() {
             ? getOtherParticipant(selectedConversation, userId)
             : null;
         const recipientProfileId = targetProfile?.profileId ?? targetProfileId;
+        // Groups: every member gets their own share, one message goes into the group.
+        const groupId = groupIdOfConversation(selectedConversation?.data.conversationId);
 
-        if (!recipientProfileId) {
+        if (!recipientProfileId && groupId == null) {
             toast.error(t("chat.errors.album_share_missing_recipient"));
             return;
         }
 
         setIsSharingAlbum(true);
         try {
-            await service.shareAlbum({
-                albumId: pendingAlbumShare.albumId,
-                profiles: [{ profileId: recipientProfileId, expirationType }],
-            });
+            if (groupId != null) {
+                await service.shareAlbumToGroup(groupId, pendingAlbumShare.albumId, expirationType);
+            } else {
+                await service.shareAlbum({
+                    albumId: pendingAlbumShare.albumId,
+                    profiles: [{ profileId: recipientProfileId!, expirationType }],
+                });
+            }
             toast.success(t("chat.toasts.album_shared"));
             setPendingAlbumShare(null);
             setIsAlbumPickerOpen(false);
@@ -6576,13 +6830,15 @@ export function ChatPage() {
 		const recipientProfileId = selectedConversation
 			? getOtherParticipant(selectedConversation, userId)?.profileId ?? null
 			: targetProfileId;
-		if (!recipientProfileId) {
+		const groupId = groupIdOfConversation(selectedConversation?.data.conversationId);
+		if (!recipientProfileId && groupId == null) {
 			toast.error(t("chat.errors.album_share_missing_recipient"));
 			return;
 		}
 		setIsSharingAlbum(true);
 		try {
-			await service.shareAlbum({ albumId, profiles: [{ profileId: recipientProfileId, expirationType: expirationType as any }] });
+			if (groupId != null) await service.shareAlbumToGroup(groupId, albumId, expirationType);
+			else await service.shareAlbum({ albumId, profiles: [{ profileId: recipientProfileId!, expirationType: expirationType as any }] });
 			toast.success(t("chat.toasts.album_shared"));
 			if (selectedConversation) {
 				void loadThread({ conversationId: selectedConversation.data.conversationId, older: false });
@@ -7128,10 +7384,10 @@ export function ChatPage() {
 				return;
 			}
 
-			const targetProfileIdValue = selectedConversation
-				? getOtherParticipant(selectedConversation, userId)?.profileId ?? null
-				: targetProfileId;
-			if (!targetProfileIdValue) {
+			// Groups send to the group; direct chats to the other participant.
+			const sendTarget = getSendTarget(selectedConversation, userId, targetProfileId);
+			const targetProfileIdValue = sendTarget?.targetId ?? null;
+			if (!sendTarget || !targetProfileIdValue) {
 				toast.error(t("chat.errors.missing_recipient"));
 				return;
 			}
@@ -7198,10 +7454,7 @@ export function ChatPage() {
 					const { mediaId } = item;
 					const sentMessage = await service.sendMessage({
 						type: item.messageType,
-						target: {
-							type: "Direct",
-							targetId: targetProfileIdValue,
-						},
+						target: sendTarget,
 						body: item.body,
 						replyToMessageId: pendingReplyId,
 					});
@@ -7542,6 +7795,7 @@ export function ChatPage() {
 	}, [fullScreenImageUrl]);
 
 	const sharedInboxHeaderProps = {
+		onCreateGroup: groupChatsEnabled ? () => setIsCreateGroupOpen(true) : undefined,
 		userId,
 		realtimeStatusMeta,
 		inboxFilters,
@@ -7584,6 +7838,7 @@ export function ChatPage() {
 			onSelectConversation={handleSelectConversation}
 			onOpenConversationById={openConversationById}
 			onViewProfile={(profileId) => openProfile(profileId, "/chat")}
+			onLeaveGroup={groupChatsEnabled ? setLeaveGroupConfirmId : undefined}
 			typingConversationIds={typingConversationIds}
 			onTogglePinConversation={togglePinConversation}
 			onToggleMuteConversation={toggleMuteConversation}
@@ -7615,6 +7870,15 @@ export function ChatPage() {
 			onDeleteConversation={deleteConversationFromChat}
 			isDeletingConversation={isDeletingConversationId !== null}
 			onBlockProfile={blockProfileFromChat}
+			groupInvite={selectedGroupInvite}
+			onLeaveGroup={selectedConversationId ? () => setLeaveGroupConfirmId(selectedConversationId) : undefined}
+			onAcceptGroupInvite={acceptSelectedGroupInvite}
+			onDeclineGroupInvite={declineSelectedGroupInvite}
+			isAnsweringGroupInvite={isAnsweringGroupInvite}
+			onOpenGroupInfo={() => {
+				const groupId = groupIdOfConversation(selectedConversation?.data.conversationId);
+				if (groupId != null) setGroupInfoId(groupId);
+			}}
 			isBlockingProfile={isBlockingProfileId !== null}
 			onUnblockProfile={unblockProfileFromChat}
 			isUnblockingProfile={isUnblockingProfileId !== null}
@@ -7628,7 +7892,7 @@ export function ChatPage() {
 					? archivedConversations.get(selectedConversationId)?.reason ?? null
 					: null
 			}
-			mergeableConversations={conversations}
+			mergeableConversations={conversations.filter((c) => !isGroupConversationId(c.data.conversationId))}
 			onMergeConversation={mergeConversationFromChat}
 			isMergingConversation={isMergingConversationId !== null}
 			localNickname={
@@ -7769,6 +8033,49 @@ export function ChatPage() {
 					</div>
 				)}
 
+
+			<ConfirmDialog
+				isOpen={leaveGroupConfirmId !== null}
+				title={t("group_chat.leave", { defaultValue: "Leave group" })}
+				message={t("group_chat.leave_confirm", { defaultValue: "You'll no longer get messages from this group. The chat stays as an archive until you delete it." })}
+				confirmLabel={t("group_chat.leave", { defaultValue: "Leave group" })}
+				cancelLabel={t("chat.actions.cancel")}
+				confirmTone="danger"
+				isProcessing={isLeavingGroup}
+				onConfirm={confirmLeaveGroup}
+				onCancel={() => setLeaveGroupConfirmId(null)}
+			/>
+
+			{isCreateGroupOpen && (
+				<CreateGroupSheet
+					conversations={conversations}
+					userId={userId}
+					localNicknamesByProfileId={localNicknamesByProfileId}
+					isDesktop={isDesktop}
+					onClose={() => setIsCreateGroupOpen(false)}
+					onCreated={(group) => void openJoinedGroup(group)}
+				/>
+			)}
+
+			{groupInfoId != null && (
+				<GroupInfoSheet
+					groupId={groupInfoId}
+					readOnly={archivedConversations.has(`group:${groupInfoId}`)}
+					entry={conversations.find((c) => c.data.conversationId === `group:${groupInfoId}`) ?? null}
+					userId={userId}
+					conversations={conversations}
+					localNicknamesByProfileId={localNicknamesByProfileId}
+					isDesktop={isDesktop}
+					onClose={() => setGroupInfoId(null)}
+					onLeft={(groupId) => {
+						// Left: the chat stays as a read-only archive until it's deleted.
+						const conversationId = `group:${groupId}`;
+						void archiveRemovedGroup(conversationId, "left");
+						archiveConversationsLocally([conversationId], "group_removed");
+					}}
+					onOpenProfile={(profileId) => openProfile(profileId, getProfileReturnToChatPath(profileId), true)}
+				/>
+			)}
 
 			{chatIsFiltersOpen && (
 				<ChatFiltersOverlay

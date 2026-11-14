@@ -19,6 +19,7 @@
  * for the same reason (no real BLOB write path from JS).
  */
 
+import { isGroupConversationId } from "../utils/groupChat";
 import Database from "@tauri-apps/plugin-sql";
 import { BaseDirectory, exists, rename } from "@tauri-apps/plugin-fs";
 import type { ConversationEntry, Message } from "../types/messages";
@@ -56,7 +57,7 @@ const LEGACY_CHAT_DB = `sqlite:${LEGACY_CHAT_DB_FILENAME}`;
 // on it. BUMP THIS whenever initChatDbSchema changes (new table, index,
 // column or data fix) — otherwise existing installs skip the setup and never
 // get the change; only fresh installs would.
-const CHAT_DB_SCHEMA_VERSION = 5;
+const CHAT_DB_SCHEMA_VERSION = 6;
 const SLOW_DB_OPEN_MS = 2_000;
 const SQLITE_LOCK_RETRY_DELAYS_MS = [30, 80, 180, 350] as const;
 
@@ -111,6 +112,7 @@ type ConversationRow = {
 	block_state: string | null;
 	last_seen_in_inbox_at: number | null;
 	messages_synced_activity_timestamp: number | null;
+	group_json: string | null;
 	created_at: number;
 	updated_at: number;
 };
@@ -299,6 +301,13 @@ async function initChatDbSchema(db: Database): Promise<void> {
 		// this only affects the client-side filteredConversations view.
 		try {
 			await db.execute("ALTER TABLE conversations ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0");
+		} catch {
+			// already migrated
+		}
+		// Added later: group chats (Free Grind server) — the inbox entry's
+		// `group` summary (groupId, memberCount, myRole); NULL for direct chats.
+		try {
+			await db.execute("ALTER TABLE conversations ADD COLUMN group_json TEXT");
 		} catch {
 			// already migrated
 		}
@@ -833,6 +842,7 @@ function rowToStoredConversation(row: ConversationRow): StoredConversation {
 			muted: Boolean(row.muted),
 			pinned: Boolean(row.pinned),
 			favorite: Boolean(row.favorite),
+			group: row.group_json ? (JSON.parse(row.group_json) as ConversationEntry["data"]["group"]) : null,
 		},
 	};
 
@@ -854,8 +864,10 @@ function rowToStoredConversation(row: ConversationRow): StoredConversation {
 
 export async function upsertConversation(
 	entry: ConversationEntry,
-	otherProfileId: string | null,
+	otherProfileIdInput: string | null,
 ): Promise<void> {
+	// Groups have no single other profile (block/archive logic keys on it).
+	const otherProfileId = isGroupConversationId(entry.data.conversationId) ? null : otherProfileIdInput;
 	const db = await getDb();
 	const now = Date.now();
 
@@ -866,9 +878,10 @@ export async function upsertConversation(
 				conversation_id, other_profile_id, name, participants_json,
 				last_activity_timestamp, unread_count, pinned, muted, favorite,
 				preview_json, archived, archived_reason, archived_at,
-				last_seen_in_inbox_at, created_at, updated_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, NULL, NULL, NULL, $11, $11)
+				last_seen_in_inbox_at, group_json, created_at, updated_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, NULL, NULL, NULL, $12, $11, $11)
 			ON CONFLICT(conversation_id) DO UPDATE SET
+				group_json = excluded.group_json,
 				other_profile_id = excluded.other_profile_id,
 				name = excluded.name,
 				participants_json = excluded.participants_json,
@@ -892,7 +905,23 @@ export async function upsertConversation(
 				entry.data.favorite ? 1 : 0,
 				entry.data.preview ? JSON.stringify(entry.data.preview) : null,
 				now,
+				entry.data.group ? JSON.stringify(entry.data.group) : null,
 			],
+		);
+	});
+}
+
+/** Sets a conversation's inbox preview and last activity (e.g. a local system line). */
+export async function setConversationPreview(
+	conversationId: string,
+	preview: NonNullable<ConversationEntry["data"]["preview"]>,
+	activityTimestamp: number,
+): Promise<void> {
+	const db = await getDb();
+	await executeWithLockRetry(db, "set-conversation-preview", async () => {
+		await db.execute(
+			"UPDATE conversations SET preview_json = $1, last_activity_timestamp = MAX(COALESCE(last_activity_timestamp, 0), $2), updated_at = $3 WHERE conversation_id = $4",
+			[JSON.stringify(preview), activityTimestamp, Date.now(), conversationId],
 		);
 	});
 }
@@ -1763,6 +1792,10 @@ export type SystemMessageType =
 	| "SystemUnblocked"
 	| "SystemBlockedBySelf"
 	| "SystemUnblockedBySelf"
+	// We were removed from a group chat, or it was deleted (groupChatStore).
+	| "SystemGroupRemoved"
+	// We left a group chat; it stays as an archive until deleted.
+	| "SystemGroupLeft"
 	// Inserted by the backup restore (backup.rs insert_restored_markers), never
 	// here: ends a conversation restored from another profile's backup.
 	| "SystemRestored";

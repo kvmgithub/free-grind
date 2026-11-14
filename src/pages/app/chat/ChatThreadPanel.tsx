@@ -31,6 +31,7 @@ import {
 	Undo2,
 	X,
 	BellOff,
+	LogOut,
 } from "lucide-react";
 import { useFeatureFlag } from "../../../services/assignmentsStore";
 import { MediaEditSheet } from "./MediaEditSheet";
@@ -50,7 +51,7 @@ import {
 	useModalClose,
 } from "../../../hooks/useModalClose";
 import type { AlbumListItem, AlbumMediaCount, LocalUploadProgress, UiMessage } from "../../../types/chat-page";
-import type { ConversationEntry, Message } from "../../../types/messages";
+import type { ChatGroup, ConversationEntry, Message } from "../../../types/messages";
 import type { ProfileDetail } from "../../../types/grid";
 import type { DrawerMedia } from "./ChatDrawerPanel";
 import { ChatDrawerPanel } from "./ChatDrawerPanel";
@@ -58,6 +59,8 @@ import { EncounterLogSheet } from "../sexual-health/EncounterLogSheet";
 import { isSexualHealthEnabled } from "../../../utils/optionalFeatures";
 import { decodeGeohash } from "../../../utils/geohash";
 import { ShareLocationSheet } from "./ShareLocationSheet";
+import { GroupAvatar } from "./groups/GroupAvatar";
+import { GroupInviteCard } from "./groups/GroupInviteCard";
 import { loadSavedLocations } from "../../../services/savedLocations";
 import { usePreferences } from "../../../contexts/PreferencesContext";
 import { useEffectiveColorScheme } from "../../../hooks/useEffectiveColorScheme";
@@ -66,6 +69,7 @@ import {
 	getMessageLocation,
 	getMessagePreviewLabel,
 	getOtherParticipant,
+	isGroupConversation,
 	getParticipantAvatarUrl,
 	getParticipantOnlineMeta,
 	getMessageImageUrl,
@@ -96,7 +100,7 @@ import { getShowReadReceiptToggle, isReadReceiptsHidden, toggleReadReceiptsHidde
 import { toggleAutoTranslate } from "../../../utils/autoTranslate";
 import { useMessageTranslations } from "../../../hooks/useMessageTranslations";
 import { SheetSearchInput } from "../../../components/ui/sheet-section";
-import { BottomSheet, SheetClose, SheetCloseButton } from "../../../components/ui/bottom-sheet";
+import { BottomSheet, SheetClose, SheetCloseButton, sheetButtonClass } from "../../../components/ui/bottom-sheet";
 import { NATIVE_SHEET_BG, SheetActionList } from "../../../components/ui/action-sheet";
 import {
 	DndContext,
@@ -178,6 +182,15 @@ type ChatThreadPanelProps = {
 	onDeleteConversation?: (conversationId: string) => void | Promise<void>;
 	isDeletingConversation?: boolean;
 	onBlockProfile?: (profileId: number) => void | Promise<void>;
+	/** Group chats: the header (avatar, name, menu) opens the group's details. */
+	onOpenGroupInfo?: () => void;
+	/** An open group invite: the thread shows it with Join / Decline instead of messages and composer. */
+	groupInvite?: ChatGroup | null;
+	/** Group chats: leave (asks first; the chat stays as an archive). */
+	onLeaveGroup?: () => void;
+	onAcceptGroupInvite?: () => void | Promise<void>;
+	onDeclineGroupInvite?: () => void | Promise<void>;
+	isAnsweringGroupInvite?: boolean;
 	isBlockingProfile?: boolean;
 	onUnblockProfile?: (profileId: number) => void | Promise<void>;
 	isUnblockingProfile?: boolean;
@@ -747,6 +760,12 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 		onDeleteConversation,
 		isDeletingConversation = false,
 		onBlockProfile,
+		onOpenGroupInfo,
+		groupInvite = null,
+		onLeaveGroup,
+		onAcceptGroupInvite,
+		onDeclineGroupInvite,
+		isAnsweringGroupInvite = false,
 		isBlockingProfile = false,
 		onUnblockProfile,
 		isUnblockingProfile = false,
@@ -1410,6 +1429,8 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 				const otherParticipant = selectedConversation
 					? getOtherParticipant(selectedConversation, userId)
 					: null;
+				const isGroup = isGroupConversation(selectedConversation);
+				const groupMemberCount = selectedConversation?.data.group?.memberCount ?? (selectedConversation?.data.participants.length ?? 0) + 1;
 				const profileId = selectedConversation
 					? otherParticipant?.profileId ?? null
 					: targetProfileId;
@@ -1443,9 +1464,14 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 				// the existing-conversation case keys off isArchived. There's no
 				// conversation to archive yet in the new-chat case, so key off
 				// isBlockedBySelf directly there instead.
-				const showBlockGroup = selectedConversation ? !isArchived : !isBlockedBySelf;
+				// Groups: blocking is per profile (from the member list), never the whole chat.
+				const showBlockGroup = isGroup ? false : selectedConversation ? !isArchived : !isBlockedBySelf;
 				// Avatar, name and status line all open the profile (like the album viewer's header).
 				const openHeaderProfile = () => {
+					if (isGroup) {
+						onOpenGroupInfo?.();
+						return;
+					}
 					if (profileId == null) return;
 					openProfile(profileId, getProfileReturnToChatPath(profileId), true);
 				};
@@ -1546,9 +1572,9 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 								<button
 									type="button"
 									onClick={openHeaderProfile}
-									disabled={profileId == null}
-									aria-label={t("push_notifications.open_profile")}
-									title={onlineMeta.label}
+									disabled={profileId == null && !isGroup}
+									aria-label={isGroup ? t("group_chat.info", { defaultValue: "Group info" }) : t("push_notifications.open_profile")}
+									title={isGroup ? undefined : onlineMeta.label}
 									className={`header-back-adjacent h-10 w-10 shrink-0 overflow-hidden rounded-full border-2 bg-[var(--surface-2)] transition disabled:cursor-default disabled:opacity-80 ${
 										isOnline
 											? onlineMeta.isEndingSoon
@@ -1557,19 +1583,23 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 											: "border-[var(--border)] hover:border-[var(--accent)]"
 									}`}
 								>
-									<ProfileImage
-										src={resolveAvatarSrc(
-											avatarHash,
-											getParticipantAvatarUrl(avatarHash),
-										)}
-										alt={displayName}
-										className={isArchived ? "grayscale" : undefined}
-									/>
+									{isGroup ? (
+										<GroupAvatar alt={displayName} />
+									) : (
+										<ProfileImage
+											src={resolveAvatarSrc(
+												avatarHash,
+												getParticipantAvatarUrl(avatarHash),
+											)}
+											alt={displayName}
+											className={isArchived ? "grayscale" : undefined}
+										/>
+									)}
 								</button>
 								<button
 									type="button"
 									onClick={openHeaderProfile}
-									disabled={profileId == null}
+									disabled={profileId == null && !isGroup}
 									className="min-w-0 text-start transition active:opacity-70 disabled:cursor-default disabled:active:opacity-100"
 								>
 									<span className="flex items-center gap-1.5 min-w-0">
@@ -1581,12 +1611,14 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 									    status line text-xs); leading-tight keeps the block within the
 									    40px avatar height, so the row sits like the profile / photo viewer. */}
 									<span className="block text-xs leading-tight text-[var(--text-muted)]">
-										{[
-											onlineMeta.label,
-											distanceLabel,
-										]
-											.filter(Boolean)
-											.join(" · ")}
+										{isGroup
+											? t("group_chat.member_count", { defaultValue: "{{count}} members", count: groupMemberCount })
+											: [
+													onlineMeta.label,
+													distanceLabel,
+												]
+													.filter(Boolean)
+													.join(" · ")}
 									</span>
 								</button>
 							</div>
@@ -1660,7 +1692,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
                 </button>
             )}
 
-								{isDesktop && onOpenMediaSheet && (
+								{isDesktop && onOpenMediaSheet && !groupInvite && (
 									<button
 										type="button"
 										onClick={onOpenMediaSheet}
@@ -1672,6 +1704,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 									</button>
 								)}
 
+								{!groupInvite && (
 								<div
 									ref={headerActionsMenuRef}
 									className={`relative ${!isDesktop ? "pe-0" : ""}`}
@@ -1704,14 +1737,13 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 												type="button"
 												onClick={() => {
 													setIsHeaderActionsMenuOpen(false);
-													if (profileId == null) return;
-													openProfile(profileId, getProfileReturnToChatPath(profileId), true);
+													openHeaderProfile();
 												}}
-												disabled={profileId == null}
+												disabled={profileId == null && !isGroup}
 												className="flex items-center rounded-sm px-2 py-2 text-start text-sm text-[var(--text)] transition hover-fill disabled:opacity-60"
 											>
 												<UserFilled className="me-2 h-4 w-4 opacity-70" />
-												{t("chat.view_profile")}
+												{isGroup ? t("group_chat.info", { defaultValue: "Group info" }) : t("chat.view_profile")}
 											</button>
 											)}
 											{!isArchived && profileId != null && showSexualHealth && (
@@ -1781,7 +1813,8 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 													{t("chat.received_media")}
 												</button>
 											)}
-											{messageTranslations.available && (
+											{/* Nothing new arrives in an archived chat to auto-translate. */}
+											{messageTranslations.available && !isArchived && (
 											<button
 												type="button"
 												onClick={() => {
@@ -1830,6 +1863,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 													</span>
 												</button>
 											)}
+											{!isGroup && (
 											<button
 												type="button"
 												onClick={() => {
@@ -1848,7 +1882,9 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 													previousName={nicknameNameChange.previousName}
 												/>
 											</button>
-											{isArchived && onMergeConversation && (
+											)}
+											{/* Merging joins two chats with one person; groups have no such counterpart. */}
+											{isArchived && !isGroup && onMergeConversation && (
 												<button
 													type="button"
 													onClick={() => {
@@ -1934,7 +1970,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 											)}
 											</div>
 											{/* — Keyword banning — */}
-											{!isArchived && actualProfileName && (
+											{!isArchived && actualProfileName && !isGroup && (
 												<div className="flex shrink-0 flex-col gap-1 border-t border-[var(--border)] px-2 pt-2">
 												<button
 													type="button"
@@ -1986,6 +2022,19 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 													{t("profile_details.report.menu_item")}
 												</button>
 											)}
+											{isGroup && !isArchived && onLeaveGroup && (
+												<button
+													type="button"
+													onClick={() => {
+														setIsHeaderActionsMenuOpen(false);
+														onLeaveGroup();
+													}}
+													className="flex items-center rounded-sm px-2 py-2 text-start text-sm text-red-400 transition hover:bg-red-500/10"
+												>
+													<LogOut className="me-2 h-4 w-4 opacity-70" />
+													{t("group_chat.leave", { defaultValue: "Leave group" })}
+												</button>
+											)}
 											<button
 												type="button"
 												onClick={requestDeleteConversation}
@@ -1999,6 +2048,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 										</div>
 									) : null}
 								</div>
+								)}
 							</div>
 						</div>
 
@@ -2116,7 +2166,9 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 				);
 			})()}
 
-			{selectedConversation ? (
+			{groupInvite ? (
+				<GroupInviteCard group={groupInvite} userId={userId} />
+			) : selectedConversation ? (
 				isLoadingThread &&
 				threadConversationId !== selectedConversation.data.conversationId ? (
 				<div className="flex flex-1 items-center justify-center text-[var(--text-muted)]">
@@ -2141,6 +2193,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 			) : (
 				<ChatThreadMessages
 						isDesktop={isDesktop}
+						onOpenSenderProfile={(profileId) => openProfile(profileId, getProfileReturnToChatPath(profileId), true)}
 						bottomInset={!isDesktop ? composerHeight : 0}
 						topInset={!isDesktop ? headerHeight : 0}
 						selectedConversation={selectedConversation}
@@ -2200,7 +2253,37 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 				</div>
 			)}
 
-					{isArchived ? (
+					{groupInvite ? (
+						<div
+							className={`${!isDesktop ? `shrink-0 px-[var(--app-px)] py-3 ${mobileComposerBg}` : "mt-3 pt-3 -mx-3 sm:-mx-4 px-3 sm:px-4 border-t border-[var(--border)]"}`}
+							style={
+								!isDesktop
+									? { paddingBottom: mobileKeyboardInset > 0 ? "12px" : "max(12px, var(--safe-area-bottom))" }
+									: undefined
+							}
+						>
+							<div className="flex gap-2.5">
+								<button
+									type="button"
+									onClick={() => void onDeclineGroupInvite?.()}
+									disabled={isAnsweringGroupInvite}
+									className={sheetButtonClass("secondary")}
+								>
+									<X className="h-4 w-4" />
+									<span className="truncate">{t("group_chat.decline", { defaultValue: "Decline" })}</span>
+								</button>
+								<button
+									type="button"
+									onClick={() => void onAcceptGroupInvite?.()}
+									disabled={isAnsweringGroupInvite}
+									className={sheetButtonClass()}
+								>
+									<Check className="h-4 w-4" />
+									<span className="truncate">{t("group_chat.accept", { defaultValue: "Join" })}</span>
+								</button>
+							</div>
+						</div>
+					) : isArchived ? (
 						<div
 					className={`${!isDesktop ? `shrink-0 px-[var(--app-px)] py-3 ${mobileComposerBg}` : "mt-3 pt-3 -mx-3 sm:-mx-4 px-3 sm:px-4 border-t border-[var(--border)]"}`}
 							style={
@@ -2218,7 +2301,11 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 										{t("chat.archived.title", { defaultValue: "Conversation archived" })}
 									</p>
 									<p className="text-xs text-[var(--text-muted)]">
-										{archivedReason === "not_found"
+										{archivedReason === "group_removed"
+											? t("group_chat.archived", {
+													defaultValue: "You're no longer in this group. You can still read the history, but can't send messages.",
+												})
+											: archivedReason === "not_found"
 											? t("chat.archived.not_found", {
 													defaultValue: "This conversation is no longer available. You can still read the history.",
 												})

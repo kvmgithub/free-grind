@@ -484,6 +484,8 @@ export function createChatService(
 		},
 
 		async markRead(conversationId: string, messageId: string): Promise<void> {
+			// An open group invite's inbox row (messageId "invite:<groupId>") has nothing to read yet.
+			if (messageId.startsWith("invite:")) return;
  		// --- READ RECEIPTS CHECK ---
  		if (isReadReceiptsHidden(conversationId) || getIncognitoMode()) {
  			// Silently do nothing server-side. They will never know you read it!
