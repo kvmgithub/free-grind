@@ -22,6 +22,7 @@ import { useExploreMode } from "../../contexts/ExploreModeContext";
 import { type BrowseCard, type ProfileDetail } from "./GridPage.types";
 import { BrowseGrid } from "./gridpage/components/BrowseGrid";
 import { GridTileContextMenu } from "./gridpage/components/GridTileContextMenu";
+import { useCanBlockProfile } from "../../grindr-workarounds";
 import { getDisplayName, mergeBrowseCardImages } from "./gridpage/utils";
 import { FeedScrollContainer } from "../../components/ui/FeedScrollContainer";
 import { ProfileDetailsModal } from "./gridpage/components/ProfileDetailsModal";
@@ -634,6 +635,7 @@ export function GridPage() {
 	// Grid map view (experiment "cascade-browse": treatment / treatment-2)
 	const isMapFlagOn = useIsBrowseMapEnabled();
 	const canShareProfiles = useCanShareProfiles();
+	const canBlockProfile = useCanBlockProfile();
 	const [gridViewMode, setGridViewMode] = useState<GridViewMode>(() => readGridViewMode(userId));
 	useEffect(() => {
 		setGridViewMode(readGridViewMode(userId));
@@ -2236,7 +2238,7 @@ export function GridPage() {
 					}
 					onEditNickname={() => setNicknamePromptCard(renderedTileMenu.card)}
 					onHide={() => handleHideProfile(renderedTileMenu.card.profileId)}
-					onBlock={() => void handleBlockProfile(renderedTileMenu.card.profileId)}
+					onBlock={canBlockProfile(renderedTileMenu.card.isBlockable) ? () => void handleBlockProfile(renderedTileMenu.card.profileId) : undefined}
 					onShare={canShareProfiles ? () => requestProfileShare({
 						profileId: Number(renderedTileMenu.card.profileId),
 						name: getDisplayName(renderedTileMenu.card) || null,

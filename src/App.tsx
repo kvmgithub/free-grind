@@ -51,7 +51,7 @@ import { TokenExpiredGate } from "./components/TokenExpiredPrompt";
 import { AccountStatusGate } from "./components/AccountStatusPrompt";
 import { EmailVerificationGate } from "./components/EmailVerificationGate";
 import { UnsupportedVersionGate } from "./components/UnsupportedVersionPrompt";
-import { EntitlementBypassPrompt } from "./components/EntitlementBypassPrompt";
+import { GrindrWorkaroundBridges, GrindrWorkaroundOverlays } from "./grindr-workarounds";
 import { AgeVerificationRegionPrompt } from "./components/AgeVerificationRegionPrompt";
 import { LocateProfileHost } from "./pages/app/gridpage/hooks/useLocateProfile";
 import { PushNotificationBridge } from "./components/PushNotificationBridge";
@@ -66,7 +66,6 @@ import { KeepScreenOnBridge } from "./components/KeepScreenOnBridge";
 import { EntitlementsBridge } from "./components/EntitlementsBridge";
 import { RightNowSessionBridge } from "./components/RightNowSessionBridge";
 import { AssignmentsBridge } from "./components/AssignmentsBridge";
-import { HondurasRecoveryBridge } from "./components/HondurasRecoveryBridge";
 import { LgbtqRiskCountryWarning } from "./components/LgbtqRiskCountryWarning";
 import { ManagedOptionsCacheBridge } from "./components/ManagedOptionsCacheBridge";
 import { SplashReadyBridge } from "./components/SplashReadyBridge";
@@ -228,7 +227,7 @@ export default function App() {
 				<SinModeUnlockOverlay />
 				<HalloweenOverlay />
 				<RightNowStartedOverlay />
-				<EntitlementBypassPrompt />
+				<GrindrWorkaroundOverlays />
 				<AgeVerificationRegionPrompt />
 				<LocateProfileHost />
 				<SmoothScroll>
@@ -264,7 +263,7 @@ export default function App() {
 						<>
 							<EntitlementsBridge />
 							<RightNowSessionBridge />
-							<HondurasRecoveryBridge />
+							<GrindrWorkaroundBridges />
 						</>
 					)}
 					<Routes location={backgroundLocation ?? location}>

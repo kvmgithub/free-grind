@@ -23,7 +23,8 @@ type GridTileContextMenuProps = {
 	onToggleFavorite: () => void;
 	onEditNickname: () => void;
 	onHide: () => void;
-	onBlock: () => void;
+	/** Omitted where the profile can't be blocked: hiding is then the way to get rid of it. */
+	onBlock?: () => void;
 	/** Only passed where profiles can be shared into chats (our server, see profileShare). */
 	onShare?: () => void;
 	/** Only passed while the optional Locate feature is enabled. */
@@ -122,13 +123,15 @@ export function GridTileContextMenu({
 			label: t("profile_details.hide"),
 			onClick: onHide,
 		},
-		{
-			key: "block",
-			icon: <Ban className={isDesktop ? "h-4 w-4" : "h-3.5 w-3.5"} />,
-			label: t("profile_details.block"),
-			onClick: onBlock,
-			danger: true,
-		},
+		...(onBlock
+			? [{
+				key: "block",
+				icon: <Ban className={isDesktop ? "h-4 w-4" : "h-3.5 w-3.5"} />,
+				label: t("profile_details.block"),
+				onClick: onBlock,
+				danger: true,
+			}]
+			: []),
 	];
 
 	if (!isDesktop) {

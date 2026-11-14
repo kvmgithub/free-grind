@@ -1,23 +1,23 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
-import { useAuth } from "../contexts/useAuth";
-import { usePreferences } from "../contexts/PreferencesContext";
-import { ConfirmDialog } from "./ui/confirm-dialog";
+import { useAuth } from "../../contexts/useAuth";
+import { usePreferences } from "../../contexts/PreferencesContext";
+import { ConfirmDialog } from "../../components/ui/confirm-dialog";
 import {
 	configureEntitlementBypass,
 	dismissEntitlementBypass,
 	getEntitlementBypassState,
 	runEntitlementBypass,
 	subscribeEntitlementBypass,
-} from "../services/entitlementBypass";
+} from "./bypass";
 
 /**
- * "Paid feature" prompt for the Honduras entitlement bypass (see
- * services/entitlementBypass.ts). Also keeps the service in sync with the
- * location to come back to, and drops anything still queued when the account
- * changes.
+ * "Paid feature" prompt for the Honduras entitlement bypass (see bypass.ts).
+ * Also keeps the bypass in sync with the location to come back to, and drops
+ * anything still queued when the account changes or the prompt unmounts
+ * (switching to a Free Grind server).
  */
-export function EntitlementBypassPrompt() {
+export function BypassPrompt() {
 	const { t } = useTranslation();
 	const { geohash } = usePreferences();
 	const { userId } = useAuth();
@@ -32,6 +32,7 @@ export function EntitlementBypassPrompt() {
 
 	useEffect(() => {
 		dismissEntitlementBypass();
+		return dismissEntitlementBypass;
 	}, [userId]);
 
 	const explanation = t("entitlement_bypass.prompt_message", {

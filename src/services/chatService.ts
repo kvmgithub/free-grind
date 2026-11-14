@@ -50,7 +50,8 @@ import { ApiFunctionError, assertSuccess, mediaUploadErrorToApiFunctionError, pa
 import { sendViaRealtime } from "./chatRealtime";
 import { MAX_CHAT_MEDIA_BYTES, uploadStagedVideo } from "./stagedVideoUpload";
 import { assertUploadFits, stagedEdit, uploadProgressReporter } from "./videoReencode";
-import { isPaywallError, withEntitlementBypass } from "./entitlementBypass";
+import { isPaywallError } from "./paywall";
+import { retryPaidAction } from "../grindr-workarounds";
 import { expiringKindOfMessage, markExpiringAllowanceStale } from "./expiringAllowance";
 
 export { ApiFunctionError as ChatApiError };
@@ -413,7 +414,7 @@ export function createChatService(
 						: t("entitlement_bypass.reason_message", {
 								defaultValue: "Sending this message requires a Grindr subscription.",
 							});
-			const sent = withEntitlementBypass(reason, send);
+			const sent = retryPaidAction(reason, send);
 			// Sent or refused, the counters shown next to the expiry toggles changed.
 			if (expiringKind) void sent.then(() => markExpiringAllowanceStale(expiringKind), () => markExpiringAllowanceStale(expiringKind));
 			return sent;
@@ -502,7 +503,7 @@ export function createChatService(
 		async unsendMessage(payload: ChatMessageMutation) {
 			const safePayload = chatMessageMutationSchema.parse(payload);
 			try {
-				await withEntitlementBypass(
+				await retryPaidAction(
 					t("entitlement_bypass.reason_unsend", {
 						defaultValue: "Unsending a message requires a Grindr subscription.",
 					}),
@@ -775,10 +776,9 @@ export function createChatService(
 				);
 				await assertSuccess(response, t("chat.errors.album_share_failed"));
 			};
-			// Sharing an *expiring* album is paid-only and the Honduras handover
-			// doesn't unlock it, so don't offer the bypass for that — show a clear
-			// paid-only message instead. Non-expiring (INDEFINITE) shares can
-			// still be bypassed.
+			// Sharing an *expiring* album is paid-only and no Grindr workaround
+			// unlocks it, so don't offer a retry for that — show a clear paid-only
+			// message instead. Non-expiring (INDEFINITE) shares can be retried.
 			const isExpiringShare = safePayload.profiles.some(
 				(profile) => profile.expirationType !== "INDEFINITE" && profile.expirationType !== 0,
 			);
@@ -796,7 +796,7 @@ export function createChatService(
 				});
 				return;
 			}
-			await withEntitlementBypass(
+			await retryPaidAction(
 				t("entitlement_bypass.reason_album_share", {
 					defaultValue: "Sharing this album requires a Grindr subscription.",
 				}),

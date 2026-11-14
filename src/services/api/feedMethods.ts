@@ -1,7 +1,7 @@
 import type { RestFetcher } from "../../types/chat-service";
 import { appLog } from "../../utils/logger";
 import { assertSuccess, parseJsonSafe } from "../apiHelpers";
-import { awaitEntitlementGrant } from "../entitlementBypass";
+import { awaitHomeLocation } from "../../grindr-workarounds";
 import { coarsenGeohash } from "../../utils/geohash";
 import { getIncognitoMode } from "../../utils/privacy";
 import {
@@ -289,8 +289,8 @@ export function createFeedMethods(fetchRest: RestFetcher, t: (key: string, defau
 			if (typeof params.ageMax === "number") queryParams.set("ageMax", String(params.ageMax));
 			if (params.sexualPositions) queryParams.set("sexualPositions", params.sexualPositions);
 
-			// Never report a location while the bypass has it parked in Honduras.
-			await awaitEntitlementGrant();
+			// Never report a location while a Grindr workaround has the server-side one elsewhere.
+			await awaitHomeLocation();
 			// Incognito never reports a location: storing one updates the account's
 			// server-side location and marks it online (see AssignmentsBridge).
 			if (params.geohash && !getIncognitoMode()) {

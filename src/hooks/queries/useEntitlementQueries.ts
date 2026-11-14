@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useApiFunctions } from "../useApiFunctions";
 import { useAuth } from "../../contexts/useAuth";
 import { useServerInfo } from "../../services/serverConfig";
+import { useCanBypassExpiringLimit } from "../../grindr-workarounds";
 import {
 	isAllowanceExhausted,
 	isUnlimitedAllowance,
@@ -59,19 +60,17 @@ export type ExpiringAllowanceInfo = {
 	/** Known and capped: worth showing a counter. */
 	limited: boolean;
 	exhausted: boolean;
-	/** Used up and nothing gets past it: the Free Grind server, or expiring albums anywhere. */
+	/** Used up and nothing gets past it. */
 	blocked: boolean;
-	/** Used up on Grindr, where the Honduras bypass is offered on send. */
+	/** Used up, but a Grindr workaround offers a way past it on send. */
 	needsBypass: boolean;
 };
 
 export function useExpiringAllowanceInfo(kind: ExpiringMediaKind, enabled = true): ExpiringAllowanceInfo {
 	const { data } = useExpiringAllowance(kind, enabled);
-	const { kind: serverKind } = useServerInfo();
+	const bypassable = useCanBypassExpiringLimit(kind);
 	const allowance = enabled ? data ?? null : null;
 	const limited = allowance !== null && !isUnlimitedAllowance(allowance);
 	const exhausted = allowance !== null && isAllowanceExhausted(allowance);
-	// Grindr refuses expiring album shares with no bypass (see chatService's shareAlbum).
-	const bypassable = serverKind === "official" && kind !== "albums";
 	return { allowance, limited, exhausted, blocked: exhausted && !bypassable, needsBypass: exhausted && bypassable };
 }

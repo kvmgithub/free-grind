@@ -7,7 +7,6 @@ import {
 	ArchiveRestoreFilled,
 	BellFilled,
 	BugFilled,
-	EyeFilled,
 	FileUpFilled,
 	FlaskConicalFilled,
 	GhostFilled,
@@ -49,7 +48,6 @@ import { showAccountWarningsPrompt } from "../../utils/accountWarningsDebug";
 import { showSharePickerDebug } from "../../utils/sharePickerDebug";
 import { showLgbtqRiskCountryWarning } from "../../utils/lgbtqRiskCountryDebug";
 import { resetGridGesturesIntro } from "./gridpage/components/GridGesturesIntro";
-import { resetInterestOnboarding } from "./interest/InterestOnboardingModal";
 import { FingerprintCheckSheet } from "./settings-dev/DiagnosticsSheets";
 import { SeasonalOverlaysSheet } from "./settings-dev/SeasonalOverlaysSheet";
 
@@ -345,15 +343,6 @@ export function DeveloperPage() {
 						onClick={() => {
 							resetGridGesturesIntro();
 							navigate("/");
-						}}
-					/>
-					<DevRow
-						icon={EyeFilled}
-						label="Profile Views Intro"
-						description="The one-time intro on the Interest page's Views tab."
-						onClick={() => {
-							resetInterestOnboarding();
-							navigate("/interest?tab=views");
 						}}
 					/>
 					<DevRow icon={FileUpFilled} label="Restore Offer" description="The first-login backup restore dialog." onClick={replayRestoreOffer} />

@@ -2,6 +2,7 @@ import { TapFlyBurst, tapFlyBurstDuration, createTapFlyBurst, mutualTapIdFor, ta
 import { isChatArchiveEnabled } from "../../../../services/chatArchiveMode";
 import { Album, AlertTriangle, Ban, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, CircleUserRound, Clock, EllipsisVertical, Flag, Flame, Images, Loader2, LockKeyhole, MessageCircle, Pencil, Phone, Plus, Share2, ShieldCheck, Star, Trash2, X } from "lucide-react";
 import { BananaFilled, EyeFilled, HomeFilled, MapPinFilled, StickyNoteFilled, EyeOffFilled, LocateFixedFilled, PencilLineFilled, SendHorizontalFilled } from "../../../../components/icons/FilledIcons";
+import { useCanBlockProfile } from "../../../../grindr-workarounds";
 import { RightNowIcon } from "../../../../components/icons/RightNowIcon";
 import toast from "react-hot-toast";
 import { Fragment, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -679,6 +680,14 @@ export function ProfileDetailsModal({
 	const isTapActive = effectiveTapVisualState !== "none";
 	const isBarTapMutual = effectiveTapVisualState === "mutual";
 	const isProfileUnavailable = isBlocked || isSnapshotProfile;
+	const canBlockProfile = useCanBlockProfile();
+	// A profile that can't be blocked (and isn't already): the block button hides it instead.
+	const blockBecomesHide = !isBlocked && !isOwnProfile && !canBlockProfile(activeProfile?.isBlockable ?? selectedBrowseCard?.isBlockable);
+	const toggleHidden = () => {
+		if (!messageProfileId || isProfileUnavailable) return;
+		if (isHidden) onUnhideProfile?.(String(messageProfileId));
+		else onHideProfile?.(String(messageProfileId));
+	};
 	const isTapDisabled = isOwnProfile || !onTapProfile || isTappingProfile || isTapBlocked || isProfileUnavailable;
 	const isTriangleDisabled =
 		!onTriangleProfile || !messageProfileId || isProfileUnavailable;
@@ -2121,7 +2130,7 @@ export function ProfileDetailsModal({
 			isOpen={isReportDialogOpen}
 			profileId={String(messageProfileId)}
 			onClose={closeReportDialog}
-			onBlock={onBlockProfile && !isBlocked ? () => onBlockProfile(String(messageProfileId)) : undefined}
+			onBlock={onBlockProfile && !isBlocked && !blockBecomesHide ? () => onBlockProfile(String(messageProfileId)) : undefined}
 		/>
 	) : null;
 
@@ -2670,7 +2679,17 @@ export function ProfileDetailsModal({
 									<Star className={`h-4 w-4 ${isFavorite ? "fill-current" : ""}`} />
 								</button>
 							)}
-							{(onBlockProfile || onUnblockProfile) && !isBlockedByOther && (isBlocked || !isSnapshotProfile) && (
+							{blockBecomesHide && (onHideProfile || onUnhideProfile) && !isProfileUnavailable && (
+								<button
+									type="button"
+									onClick={toggleHidden}
+									className={`header-icon-btn inline-flex shrink-0 items-center justify-center rounded-xl border p-2 transition-colors ${inlineScrolled ? "border-[var(--border)] bg-[var(--surface-2)] text-[var(--text-muted)] hover:text-[var(--text)]" : "border-white/45 bg-transparent text-white shadow-[0_10px_28px_-18px_rgba(0,0,0,0.95)] backdrop-blur-md drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)]"}`}
+									aria-label={isHidden ? t("profile_details.unhide") : t("profile_details.hide")}
+								>
+									{isHidden ? <EyeFilled className="h-4 w-4" /> : <EyeOffFilled className="h-4 w-4" />}
+								</button>
+							)}
+							{!blockBecomesHide && (onBlockProfile || onUnblockProfile) && !isBlockedByOther && (isBlocked || !isSnapshotProfile) && (
 								<button
 									type="button"
 									onClick={() => isBlocked ? onUnblockProfile?.(String(messageProfileId)) : (messageProfileId && onBlockProfile?.(String(messageProfileId)))}
@@ -2711,7 +2730,7 @@ export function ProfileDetailsModal({
 											{locateLabel ?? t("profile_details.locate")}
 										</button>
 										)}
-										{(onHideProfile || onUnhideProfile) && (
+										{!blockBecomesHide && (onHideProfile || onUnhideProfile) && (
 										<button
 											type="button"
 											disabled={isProfileUnavailable}
@@ -3153,7 +3172,14 @@ export function ProfileDetailsModal({
 													<Star className={`h-4 w-4 ${isFavorite ? "fill-current" : ""}`} />
 												</button>
 											)}
-											{(onBlockProfile || onUnblockProfile) && !isBlockedByOther && (isBlocked || !isSnapshotProfile) && (
+											{blockBecomesHide && (onHideProfile || onUnhideProfile) && !isProfileUnavailable && (
+												<button type="button" onClick={toggleHidden}
+													className="header-icon-btn shrink-0 rounded-xl text-[var(--text-muted)] transition-colors hover:text-[var(--text)]"
+													aria-label={isHidden ? t("profile_details.unhide") : t("profile_details.hide")}>
+													{isHidden ? <EyeFilled className="h-4 w-4" /> : <EyeOffFilled className="h-4 w-4" />}
+												</button>
+											)}
+											{!blockBecomesHide && (onBlockProfile || onUnblockProfile) && !isBlockedByOther && (isBlocked || !isSnapshotProfile) && (
 												<button type="button" onClick={() => isBlocked ? onUnblockProfile?.(String(messageProfileId)) : (messageProfileId && onBlockProfile?.(String(messageProfileId)))} disabled={isBlockingProfile}
 													className={`header-icon-btn shrink-0 rounded-xl transition-colors disabled:opacity-60 ${isBlocked ? "text-emerald-500" : "text-red-500"}`}
 													aria-label={isBlocked ? t("profile_details.unblock") : t("profile_details.block")}>
@@ -3179,7 +3205,7 @@ export function ProfileDetailsModal({
 															{locateLabel ?? t("profile_details.locate")}
 														</button>
 														)}
-														{(onHideProfile || onUnhideProfile) && (
+														{!blockBecomesHide && (onHideProfile || onUnhideProfile) && (
 														<button
 															type="button"
 															disabled={isProfileUnavailable}

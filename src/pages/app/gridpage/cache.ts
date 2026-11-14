@@ -4,7 +4,7 @@ import type {
 } from "../GridPage.types";
 import type { CacheEntry } from "../../../types/grid-cache";
 import { extractMediaHashFromUrl } from "../../../utils/media";
-import { interestIdentityStore } from "../../../services/interestIdentityStore";
+import { onBrowseCards } from "../../../grindr-workarounds";
 
 const PROFILE_CACHE_TTL_MS = 5 * 60 * 1000;
 const BROWSE_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -69,15 +69,7 @@ export function setCachedBrowseCards(
 	nextPage: string | null,
 ) {
 	setInCache(browseCache, cacheKey, { cards, nextPage }, BROWSE_CACHE_TTL_MS);
-	// The browse cache is memory-only; persist the photo → profile pairs so
-	// locked view previews can still be recovered after a restart.
-	void interestIdentityStore.rememberHashes(
-		cards.map((card) => ({
-			hash: card.primaryImageUrl ? extractMediaHashFromUrl(card.primaryImageUrl) : null,
-			profileId: card.profileId,
-			displayName: card.displayName ?? null,
-		})),
-	);
+	onBrowseCards(cards);
 }
 
 /**

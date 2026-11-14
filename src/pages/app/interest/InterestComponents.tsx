@@ -15,6 +15,7 @@ import { TILE_HOVER_ZOOM_CLASS, useProfilePhotoPrivacy } from "../../../hooks/us
 import type { BrowseCard } from "../GridPage.types";
 import { IconTabs, type IconTabConfig } from "../../../components/ui/icon-tabs";
 import { useTileMenuPress } from "../gridpage/hooks/useTileMenuPress";
+import { useShowLockedPreviewPhotos } from "../../../grindr-workarounds";
 
 export type InterestTabConfig = IconTabConfig<InterestTab>;
 
@@ -34,6 +35,17 @@ function menuOpenerFor(item: InterestItem, isBlocked: boolean, onOpenMenu: Inter
 		!item.profileId.startsWith(PREVIEW_ID_PREFIX);
 	if (!onOpenMenu || !isKnownProfile || isBlocked) return null;
 	return (x: number, y: number) => onOpenMenu(item, x, y);
+}
+
+/**
+ * Locked previews: blurred like the official app does, also while hovered
+ * (overrides the privacy hover-reveal), unless a Grindr workaround shows them.
+ */
+const LOCKED_PREVIEW_BLUR_CLASS =
+	"blur-xl scale-125 hover:blur-xl hover:scale-125 group-hover/reveal:blur-xl group-hover/reveal:scale-125";
+
+function useBlurLockedPreviews(): boolean {
+	return !useShowLockedPreviewPhotos();
 }
 
 export const InterestTabs = memo(IconTabs<InterestTab>);
@@ -107,6 +119,7 @@ export const InterestRow = memo(function InterestRow({
 	const { unitsPreset } = usePreferences();
 	const { pressHandlers, consumeLongPress } = useTileMenuPress(menuOpenerFor(item, isBlocked, onOpenMenu));
 	const { ref, revealClass } = useRevealOnScroll();
+	const blurLockedPreviews = useBlurLockedPreviews();
 	const imageSrc = item.imageHash ? getThumbImageUrl(item.imageHash, "320x320") : null;
 
 	const isPrivate = !item.canOpenProfile;
@@ -143,6 +156,7 @@ export const InterestRow = memo(function InterestRow({
 					<ProfileImage
 						src={imageSrc}
 						alt={displayName}
+						className={isPrivate && blurLockedPreviews ? LOCKED_PREVIEW_BLUR_CLASS : undefined}
 					/>
 				</div>
 				{isOnline && (
@@ -285,6 +299,7 @@ export const InterestViewTile = memo(function InterestViewTile({
 	const { pressHandlers, consumeLongPress } = useTileMenuPress(menuOpenerFor(item, isBlocked, onOpenMenu));
 	const tapColor = emojiColorMap[item.tapType ?? -1] || "255, 200, 0";
 	const photoPrivacy = useProfilePhotoPrivacy("grid");
+	const blurLockedPreviews = useBlurLockedPreviews();
 	const { ref, revealClass } = useRevealOnScroll();
 	const imageSrc = item.imageHash ? getThumbImageUrl(item.imageHash, "320x320") : null;
 
@@ -344,10 +359,10 @@ export const InterestViewTile = memo(function InterestViewTile({
 							placeholder="silhouette"
 							className={cn(
 								// Blocked tiles keep their light blur, also while hovered;
-								// locked previews show their photo as is.
+								// locked previews are blurred unless a Grindr workaround shows them.
 								isBlocked
 									? (photoPrivacy === "blur" ? "hover:blur-[3px] hover:scale-105 group-hover/reveal:blur-[3px] group-hover/reveal:scale-105" : "blur-[3px] scale-105")
-									: isPrivate ? undefined : TILE_HOVER_ZOOM_CLASS,
+									: isPrivate ? (blurLockedPreviews ? LOCKED_PREVIEW_BLUR_CLASS : undefined) : TILE_HOVER_ZOOM_CLASS,
 							)}
 						/>
 

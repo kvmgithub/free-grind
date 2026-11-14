@@ -27,7 +27,7 @@ import {
 import { appLog } from "../utils/logger";
 import { setActiveChatDbUser } from "../services/chatDb";
 import { setActiveChatContactIndexAccount } from "../services/chatContactIndex";
-import { setActiveInterestStoreUser } from "../services/interestViewsStore";
+import { beforeSignOut, setActiveUser as setWorkaroundsUser } from "../grindr-workarounds";
 import { clearAllCaches } from "../pages/app/gridpage/cache";
 import { loadAutomationCache } from "../utils/autoblock";
 import { loadAutomationRulesCache } from "../utils/automationRules";
@@ -44,7 +44,6 @@ import { runTapsAutomationSync } from "../services/tapsSync";
 import { syncSavedPhrasesFromServer } from "../services/savedPhrases";
 import { mintRecaptchaToken, RecaptchaError, type RecaptchaFailure } from "../services/recaptcha";
 import { getParkedAccount, isCustomServer, loadServerConfig, setParkedAccount } from "../services/serverConfig";
-import { restoreStrandedLocation } from "../services/entitlementBypass";
 import i18n from "../i18n";
 
 const AUTH_USER_ID_STORAGE_KEY = "fg-user-id";
@@ -642,9 +641,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	const logout = async () => {
 		try {
 			dispatch({ type: "SET_LOADING", payload: true });
-			// Repair a location left parked in Honduras before the session goes
-			// away, so the account isn't stranded there after sign-out (#446).
-			await restoreStrandedLocation();
+			// Lets Grindr workarounds clean up while the session still exists
+			// (e.g. a location left elsewhere).
+			await beforeSignOut();
 			// Unregister this device's push token while the session still
 			// exists, so the signed-out account stops notifying here. Best
 			// effort: a failure must not block the logout.
@@ -751,7 +750,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		}
 
 		dispatch({ type: "SET_SETTINGS_READY", payload: false });
-		setActiveInterestStoreUser(state.userId);
+		setWorkaroundsUser(state.userId);
 		setActiveChatContactIndexAccount(state.userId);
 
 		void (async () => {

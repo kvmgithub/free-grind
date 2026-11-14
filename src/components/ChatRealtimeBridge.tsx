@@ -74,7 +74,7 @@ import { useApiFunctions } from "../hooks/useApiFunctions";
 import { useBlockedProfileIds } from "../hooks/queries/useProfileQueries";
 import { isReadReceiptsHidden } from "../utils/privacy";
 import { classifyProfileAccess } from "../utils/profileAccessStatus";
-import { interestIdentityStore } from "../services/interestIdentityStore";
+import { onViewReceived } from "../grindr-workarounds";
 import {
 	isChatNotificationsEnabled,
 	isForegroundNotificationsEnabled,
@@ -768,13 +768,8 @@ export function ChatRealtimeBridge() {
 					const view = parseViewPayload(envelope.payload);
 					if (view) {
 						appLog.debug(`[chat-ws:bridge] Incoming view received. Total views: ${view.viewedCount}`);
-						// The event names the real viewer even when the views list only
-						// returns a locked preview — persist it before the refetch the
-						// event triggers, so that refetch can already recover it.
-						void Promise.all([
-							interestIdentityStore.rememberViewEvent(view),
-							interestIdentityStore.rememberHashes([{ hash: view.imageHash, profileId: view.profileId }]),
-						])
+						// Grindr workarounds see the event before the refetch it triggers.
+						void onViewReceived(view)
 							.catch(() => {})
 							.finally(() => {
 								window.dispatchEvent(

@@ -1,5 +1,5 @@
-import { appLog } from "../utils/logger";
-import { setActiveIdentityStoreUser } from "./interestIdentityStore";
+import { appLog } from "../../utils/logger";
+import { setActiveIdentityStoreUser } from "./identityStore";
 
 type StoredInterestView = {
 	profileId: string;

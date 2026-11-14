@@ -14,22 +14,10 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import toast from "react-hot-toast";
-import { ApiFunctionError } from "./apiHelpers";
-import { coarsenGeohash, encodeGeohash } from "../utils/geohash";
-import { appLog } from "../utils/logger";
-import i18n from "../i18n";
-import { isCustomServer } from "./serverConfig";
-
-const PAYWALL_URNS = new Set(["urn:gr:err:entitlement_limit", "urn:gr:err:tiered_feature"]);
-
-/** Whether Grindr refused the call because it needs a subscription. */
-export function isPaywallError(error: unknown): boolean {
-	if (!(error instanceof ApiFunctionError)) return false;
-	const payload = error.payload;
-	if (!payload || typeof payload !== "object") return false;
-	const type = (payload as { type?: unknown }).type;
-	return typeof type === "string" && PAYWALL_URNS.has(type);
-}
+import { coarsenGeohash, encodeGeohash } from "../../utils/geohash";
+import { appLog } from "../../utils/logger";
+import i18n from "../../i18n";
+import { isPaywallError } from "../../services/paywall";
 
 // --- Honduras location ---
 
@@ -62,7 +50,7 @@ function randomHondurasGeohash(): string {
 	);
 }
 
-// --- configuration, synced from React by EntitlementBypassPrompt ---
+// --- configuration, synced from React by BypassPrompt ---
 
 let homeGeohash: string | null = null;
 
@@ -117,9 +105,6 @@ function syncPromptToQueue(): void {
 export function withEntitlementBypass<T>(reason: string, action: () => Promise<T>): Promise<T> {
 	return action().catch((error: unknown) => {
 		if (!isPaywallError(error)) throw error;
-		// A self-hosted server's limits are its own policy: no Honduras handover
-		// there, the 402 surfaces as a plain limit error.
-		if (isCustomServer()) throw error;
 		return new Promise<T>((resolve, reject) => {
 			blocked.push({
 				reason,

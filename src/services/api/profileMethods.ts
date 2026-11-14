@@ -29,7 +29,7 @@ import {
 	parseBannedTerms,
 	parseJsonSafe,
 } from "../apiHelpers";
-import { awaitEntitlementGrant } from "../entitlementBypass";
+import { awaitHomeLocation } from "../../grindr-workarounds";
 import { rememberProfileSnapshot } from "../profileSnapshotPrefetch";
 import { getIncognitoMode, isRecordProfileViewsEnabled } from "../../utils/privacy";
 import { appLog } from "../../utils/logger";
@@ -317,8 +317,8 @@ export function createProfileMethods(fetchRest: RestFetcher, t: (key: string, op
 			if (params.filters?.tags) queryParams.set("tags", params.filters.tags);
 
 			const url = `/v4/cascade?${queryParams.toString()}`;
-			// Not while an entitlement bypass has the server-side location parked in Honduras.
-			await awaitEntitlementGrant();
+			// Not while a Grindr workaround has the server-side location elsewhere.
+			await awaitHomeLocation();
 			const response = await fetchRest(url);
 			await assertSuccess(response, t("api.errors.load_browse_profiles"));
 			const parsed = cascadeResponseSchema.parse(await parseJsonSafe(response));

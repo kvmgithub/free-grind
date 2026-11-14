@@ -1,4 +1,4 @@
-import { appLog } from "../utils/logger";
+import { appLog } from "../../utils/logger";
 
 /**
  * interestIdentityStore — persistent, per-account identity hints used to
@@ -11,7 +11,7 @@ import { appLog } from "../utils/logger";
  *   the most recent viewer (real profile ID + timestamp) even when the views
  *   list itself only returns a locked preview — matched later by timestamp.
  *
- * Stays on-device, split per account like interestViewsStore.
+ * Stays on-device, split per account like historyStore.
  */
 
 export type IdentityHashEntry = {

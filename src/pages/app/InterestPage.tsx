@@ -18,7 +18,7 @@ import { InterestTabs, InterestRow, type InterestTabConfig } from "./interest/In
 import { InterestViewsGrid, useViewsGridLayout } from "./interest/InterestViewsGrid";
 import { InterestProfileMenu, type InterestMenuTarget } from "./interest/InterestProfileMenu";
 import { getAllCachedBrowseCardsById } from "./gridpage/cache";
-import { INTEREST_ONBOARDING_SEEN_KEY, InterestOnboardingModal } from "./interest/InterestOnboardingModal";
+import { ViewsIntro } from "../../grindr-workarounds";
 import {
 	SCROLL_RESTORATION_TIMEOUT_MS,
 } from "../../config/ui-constants";
@@ -27,8 +27,6 @@ import { useDesktopBreakpoint } from "../../hooks/useDesktopBreakpoint";
 import { PageHeaderBackground } from "../../components/ui/PageHeaderBackground";
 import { FeedScrollContainer } from "../../components/ui/FeedScrollContainer";
 import { usePreferences } from "../../contexts/PreferencesContext";
-
-const ONBOARDING_KEY = INTEREST_ONBOARDING_SEEN_KEY;
 
 const TAB_ICONS: Record<InterestTab, ComponentType<{ className?: string }>> = { views: EyeFilled, taps: FlameFilled, sent: SendFilled };
 
@@ -385,27 +383,12 @@ export function InterestPage() {
 		return max;
 	}, [views, taps]);
 
-	const [showOnboarding, setShowOnboarding] = useState(() => {
-		return !localStorage.getItem(ONBOARDING_KEY);
-	});
 	const touchStartRef = useRef<{ x: number; y: number } | null>(null);
 
 	const loadMoreTriggerRef = useRef<HTMLDivElement | null>(null);
 	const feedContainerRef = useRef<HTMLDivElement | null>(null);
 	const [hasRestoredScroll, setHasRestoredScroll] = useState(false);
 	const prevTabRef = useRef<InterestTab>(activeTab);
-
-	// Re-activate onboarding when switching back to views tab if not yet acknowledged
-	useEffect(() => {
-		if (activeTab === "views" && !localStorage.getItem(ONBOARDING_KEY)) {
-			setShowOnboarding(true);
-		}
-	}, [activeTab]);
-
-	const handleAcknowledgeOnboarding = useCallback(() => {
-		setShowOnboarding(false);
-		localStorage.setItem(ONBOARDING_KEY, "true");
-	}, []);
 
 	const ITEMS_PER_PAGE = 30;
 	const [limits, setLimits] = useState<Record<InterestTab, number>>(() => ({
@@ -798,9 +781,7 @@ export function InterestPage() {
 			onClose={handleCloseMenu}
 			onFavoriteChanged={handleFavoriteChanged}
 		/>
-		{showOnboarding && activeTab === "views" && (
-			<InterestOnboardingModal onConfirm={handleAcknowledgeOnboarding} />
-		)}
+		<ViewsIntro visible={activeTab === "views"} />
 	</>
 	);
 }

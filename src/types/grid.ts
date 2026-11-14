@@ -45,6 +45,8 @@ export const browseCardSchema = z.object({
 	favorite: z.boolean().optional(),
 	chatted: z.boolean().optional(),
 	rightNow: z.string().nullable().optional(),
+	/** False: the server offers no block for this profile (see useCanBlockProfile). */
+	isBlockable: z.boolean().nullable().optional(),
 	// Map position as the server obfuscated it (upstream field names, as on the
 	// carousel items). Never the real location, and no fuzz radius either (that
 	// would narrow down the real one).

@@ -1,19 +1,40 @@
+import { useCallback, useEffect, useState } from "react";
 import { History, Eye, Sparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { FullscreenPrompt, fullscreenPrimaryButtonClass, fullscreenCardClass } from "../../../components/FullscreenPrompt";
+import { FullscreenPrompt, fullscreenPrimaryButtonClass, fullscreenCardClass } from "../../components/FullscreenPrompt";
 
-export const INTEREST_ONBOARDING_SEEN_KEY = "fg-interest-onboarding-seen";
+const SEEN_KEY = "fg-interest-onboarding-seen";
 
-/** Clears the seen flag so the Views tab shows the intro again on its next mount (dev tool). */
-export function resetInterestOnboarding(): void {
+function hasSeen(): boolean {
 	try {
-		window.localStorage.removeItem(INTEREST_ONBOARDING_SEEN_KEY);
+		return window.localStorage.getItem(SEEN_KEY) !== null;
 	} catch {
-		// ignore storage errors
+		return true;
 	}
 }
 
-export function InterestOnboardingModal({ onConfirm }: { onConfirm: () => void }) {
+/** One-time intro on the Views tab: Grindr's visitor paywall and how Free Grind recovers locked previews. */
+export function ViewsIntro({ visible }: { visible: boolean }) {
+	const [show, setShow] = useState(() => !hasSeen());
+
+	// Shown again when coming back to the Views tab without having acknowledged it.
+	useEffect(() => {
+		if (visible && !hasSeen()) setShow(true);
+	}, [visible]);
+
+	const acknowledge = useCallback(() => {
+		setShow(false);
+		try {
+			window.localStorage.setItem(SEEN_KEY, "true");
+		} catch {
+			// ignore storage errors
+		}
+	}, []);
+
+	return show && visible ? <ViewsIntroPrompt onConfirm={acknowledge} /> : null;
+}
+
+function ViewsIntroPrompt({ onConfirm }: { onConfirm: () => void }) {
 	const { t } = useTranslation();
 
 	return (
