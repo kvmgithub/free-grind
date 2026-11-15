@@ -64,8 +64,10 @@ if (flavor.windows?.wixUpgradeCode) {
 // 2a. LiveKit: WebSocket plus the same host over HTTPS (LiveKit uses it to
 // diagnose failed connections).
 const rtc = env("FG_RTC_URL").split(/[\s,]+/).filter(Boolean);
-if (rtc.length) {
-	const extra = [];
+// The release feed when it isn't GitHub's (already allowed): the update check fetches it.
+const feedOrigin = flavor.updates?.feedUrl ? new URL(flavor.updates.feedUrl).origin : null;
+if (rtc.length || feedOrigin) {
+	const extra = feedOrigin ? [feedOrigin] : [];
 	for (const origin of rtc) {
 		const url = new URL(origin);
 		if (url.protocol !== "wss:" && url.protocol !== "ws:") throw new Error(`FG_RTC_URL: expected wss:// (or ws:// for local tests), got ${origin}`);

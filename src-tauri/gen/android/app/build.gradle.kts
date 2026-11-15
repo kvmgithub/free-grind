@@ -96,6 +96,11 @@ val flavorManifest = groovy.json.JsonSlurper().parse(flavorDir.resolve("flavor.j
 val flavorApplicationId = (flavorManifest["android"] as Map<String, Any?>)["applicationId"] as String
 val flavorAppSlug = flavorManifest["appSlug"] as String
 val flavorGithub = flavorManifest["github"] as String
+// APKs the in-app updater may install: the flavor's own download location
+// (manifest updates.downloadUrl), or its GitHub releases.
+@Suppress("UNCHECKED_CAST")
+val flavorDownloadUrl = ((flavorManifest["updates"] as Map<String, Any?>?)?.get("downloadUrl") as String?)
+    ?: "https://github.com/$flavorGithub/releases/download/"
 
 // Without the keystore (ci/build/android.sh) the release APK comes out
 // unsigned; CI signs it once two independent builds produced the same bytes.
@@ -115,7 +120,7 @@ android {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = flavorApplicationId
         // ApkUpdater only installs APKs downloaded from this repository's releases.
-        buildConfigField("String", "RELEASES_DOWNLOAD_URL", "\"https://github.com/$flavorGithub/releases/download/\"")
+        buildConfigField("String", "RELEASES_DOWNLOAD_URL", "\"$flavorDownloadUrl\"")
         // GeckoView (Google sign-in, see GoogleOAuthActivity.kt) needs Android 8.0.
         minSdk = 26
         targetSdk = 36

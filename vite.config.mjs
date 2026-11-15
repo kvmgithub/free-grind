@@ -95,6 +95,9 @@ export default defineConfig(async () => ({
 		__GITHUB_REPO__: JSON.stringify(flavor.github),
 		__REPO_URL__: JSON.stringify(flavor.repoUrl),
 		__WEBSITE_URL__: JSON.stringify(flavor.websiteUrl),
+		// Release feed and page when releases aren't on GitHub (manifest updates).
+		__RELEASES_FEED_URL__: JSON.stringify(flavor.updates?.feedUrl ?? ""),
+		__RELEASES_PAGE_URL__: JSON.stringify(flavor.updates?.pageUrl ?? ""),
 	},
 	build: {
 		outDir: "dist",

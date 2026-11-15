@@ -11,7 +11,7 @@ import { areUpdateChecksEnabled } from "../services/updateChecks";
 import { formatRelativeTime } from "../utils/relativeTime";
 import { VersionCompare } from "./ui/version-compare";
 import { VersionChangesLink } from "./VersionChangesSheet";
-import { RELEASES_URL, REPO_API_URL } from "../config/links-config";
+import { RELEASES_FEED_URL, RELEASES_URL } from "../config/links-config";
 
 const DEFAULT_RELEASES_URL = RELEASES_URL;
 // Used when the release lookup fails: assume the running version is current,
@@ -129,7 +129,7 @@ function parseReleaseCommit(release: GitHubRelease): string | undefined {
  */
 export async function fetchLatestRelease(signal: AbortSignal, includePrerelease: boolean): Promise<ReleaseInfo> {
     const response = await fetch(
-        `${REPO_API_URL}/releases?per_page=30`,
+        RELEASES_FEED_URL,
         {
             headers: {
                 Accept: "application/vnd.github+json",
@@ -139,7 +139,7 @@ export async function fetchLatestRelease(signal: AbortSignal, includePrerelease:
     );
 
     if (!response.ok) {
-        throw new Error(`GitHub release lookup failed (${response.status})`);
+        throw new Error(`Release lookup failed (${response.status})`);
     }
 
     const releases = (await response.json()) as GitHubRelease[];

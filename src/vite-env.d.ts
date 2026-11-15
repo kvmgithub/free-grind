@@ -21,6 +21,10 @@ declare const __APP_BINARY__: string;
 declare const __GITHUB_REPO__: string;
 declare const __REPO_URL__: string;
 declare const __WEBSITE_URL__: string;
+/** Release feed (GitHub releases API format) when releases aren't on GitHub; "" otherwise. */
+declare const __RELEASES_FEED_URL__: string;
+/** Page listing the releases when they aren't on GitHub; "" otherwise. */
+declare const __RELEASES_PAGE_URL__: string;
 
 interface ImportMeta {
 	readonly env: ImportMetaEnv;
