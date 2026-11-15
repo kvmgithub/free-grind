@@ -15,11 +15,11 @@ const channels = [
 		link: "https://t.me/freegrind",
 	},
 	{
-		icon: "i-github",
-		name: "GitHub",
-		text: "Read the code, open issues and send pull requests. Everything is public.",
+		icon: "i-gitlab",
+		name: "GitLab",
+		text: "Read the code, open issues and send merge requests. Everything is public.",
 		action: "View the source",
-		link: "https://github.com/fdev8975/free-grind",
+		link: "https://gitlab.com/hookrapp/free-grind",
 	},
 ];
 </script>

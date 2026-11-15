@@ -17,10 +17,10 @@ On top of that, **Settings → Privacy** gives you control over what other peopl
 
 ## Network requests
 
-Besides Grindr, Free Grind only contacts GitHub to check for updates. Turn off **Check Automatically** in **Settings** to stop that, and check manually instead. Translation and GIFs contact their providers only when you use them.
+Besides Grindr, Free Grind only contacts GitLab to check for updates. Turn off **Check Automatically** in **Settings** to stop that, and check manually instead. Translation and GIFs contact their providers only when you use them.
 
 ## Account safety
 
 - Using any unofficial client technically violates [Grindr's terms of service](https://www.grindr.com/terms-of-service). The risk is low, but it exists.
 - Never share sign-in codes from **Sign in on another device**. Anyone with the code can sign in to your account.
-- Only download Free Grind from the [official releases page](https://github.com/fdev8975/free-grind/releases).
+- Only download Free Grind from the [official releases page](https://gitlab.com/hookrapp/free-grind/-/releases).

@@ -23,7 +23,7 @@ The flavor sets the app's identity. Product features are switched by the server'
 | `repository` | The source repository's https URL (GitLab, also self-hosted, or GitHub): links in the app (source, issues, license, commits), the release lookup and commit comparisons go to its web pages and API |
 | `websiteUrl` | About page |
 | `ota.endpoint`, `ota.pubkey` | Frontend OTA updates (hotswap); each flavor needs its own key. A surge.sh endpoint is deployed to by `scripts/publish-ota.mjs`; any other (`https://…/ota/{{channel}}/latest.json`) gets its files in `OTA_OUT_DIR` to upload |
-| `updates.feedUrl`, `updates.downloadUrl`, `updates.pageUrl` | Optional; for releases that aren't on GitHub: a feed in the GitHub releases API format (newest first), the URL prefix APKs are downloaded from (Android updater), and the page people download from. Default: the repository's releases (GitLab: release links into its generic package registry) |
+| `updates.feedUrl`, `updates.downloadUrl`, `updates.pageUrl` | Optional; for releases that aren't in the repository: a feed in the GitHub releases API format (newest first), the URL prefix APKs are downloaded from (Android updater), and the page people download from. Default: the repository's releases (GitLab: release links into its generic package registry) |
 | `android.applicationId` | Android package ID |
 | `ios.bundleId` | iOS bundle ID |
 | `windows.wixUpgradeCode` | Optional; pins MSI upgrades (Tauri derives it from the name otherwise) |

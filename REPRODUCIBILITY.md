@@ -15,9 +15,9 @@ The OTA bundle matters as much as the apps: it replaces the whole user interface
 
 ## How releases are built
 
-CI ([release.yml](.github/workflows/release.yml), [ota-branches.yml](.github/workflows/ota-branches.yml)) runs the commands from this page:
+CI ([.gitlab-ci.yml](.gitlab-ci.yml)) runs the commands from this page:
 
-1. Two separate runners each build the APK, the Windows installer and exe, the Linux packages and the OTA bundle inside the pinned container from [ci/build/Dockerfile](ci/build/Dockerfile), and two macOS runners each build the iOS IPA and the macOS zip with [ci/build/ios.sh](ci/build/ios.sh) and [ci/build/macos.sh](ci/build/macos.sh).
+1. Two separate jobs, each in a fresh checkout, build the APK, the Windows installer and exe, the Linux packages and the OTA bundle inside the pinned container from [ci/build/Dockerfile](ci/build/Dockerfile), and two jobs on a macOS runner (when one is set up) build the iOS IPA and the macOS zip with [ci/build/ios.sh](ci/build/ios.sh) and [ci/build/macos.sh](ci/build/macos.sh).
 2. [ci/compare.sh](ci/compare.sh) checks that both builds are byte-identical. If they differ, nothing is published.
 3. Only then is the APK signed and the OTA bundle signed and uploaded. CI checks that the signed APK is exactly the unsigned build plus a signature, using the same `apksigcopier` check you run below.
 
@@ -37,7 +37,7 @@ Every release lists what it was built from in two assets:
 As a reference, on a 3-core machine with 11 GB of RAM the Rust part of the Linux build took 6½ minutes, the Windows build 7 minutes from scratch, the Android build 12 minutes from scratch, and the OTA bundle under a minute. Building the container image the first time adds a few minutes.
 
 ```bash
-git clone https://github.com/fdev8975/free-grind.git
+git clone https://gitlab.com/hookrapp/free-grind.git
 cd free-grind
 git checkout <commit from BUILDINFO.txt>
 ```
@@ -183,4 +183,4 @@ For anyone changing the build. Each of these was needed to get identical bytes:
 
 ## Not covered
 
-- The **manual "Build Artifacts" workflow** produces test builds on the runner images; they aren't releases.
+- **Test builds** (Run pipeline with `DEV_BUILD=true`) are built once and unsigned; they aren't releases.

@@ -10,7 +10,7 @@ type IconSpec = {
 
 const ACTIONS: Record<string, IconSpec> = {
 	"i-download": { icon: "lucide:download" },
-	"i-github": { icon: "simple-icons:github" },
+	"i-gitlab": { icon: "simple-icons:gitlab" },
 	"i-discord": { icon: "simple-icons:discord" },
 	"i-telegram": { icon: "simple-icons:telegram" },
 };

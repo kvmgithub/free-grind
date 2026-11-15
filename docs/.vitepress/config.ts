@@ -5,7 +5,7 @@ import type { StaticSidebarPages } from "../scripts/generator/sidebar";
 import { buildSidebar } from "../scripts/generator/sidebar";
 import { icons } from "./icons";
 
-// GitHub Pages serves project sites under /<repo>/; the deploy workflow passes
+// GitLab Pages serves project sites under /<project>/; the pages job passes
 // the actual base path (empty with a custom domain) via DOCS_BASE.
 const base = `${process.env.DOCS_BASE ?? ""}/`;
 
@@ -149,7 +149,7 @@ export default defineConfig({
 		},
 
 		socialLinks: [
-			{ icon: "github", link: "https://github.com/fdev8975/free-grind" },
+			{ icon: "gitlab", link: "https://gitlab.com/hookrapp/free-grind" },
 			{ icon: "discord", link: "https://discord.gg/cJqTaWPMFF" },
 			{
 				icon: {

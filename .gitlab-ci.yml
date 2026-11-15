@@ -1,0 +1,343 @@
+# CI of the Free Grind client (the grindr flavor), on gitlab.com/hookrapp/free-grind.
+# Replaces the former GitHub workflows (release, ota-branches, build-artifacts,
+# build-ios/-macos, the reproducibility checks, deploy-docs, repo-guard).
+#
+# Runners: our own (tag hookr-build: Linux, shell executor with Docker, set up
+# with ci/runner/setup.sh in the Hookr repository). iOS and macOS builds need a
+# Mac runner (tag macos, Xcode 26.6); they only run when the CI/CD variable
+# MACOS_RUNNER is "true".
+#
+# What runs:
+#   every pipeline        repo-guard
+#   push main             release (always), OTA main (unless [skip ota])
+#   push development      release (only for a pre-release version bump that
+#                         changes native code, or with [skip ota]),
+#                         OTA development (unless [skip ota]), docs (docs/ changed)
+#   Run pipeline (web)    release; OTA_CHANNEL=<channel> publishes that OTA;
+#                         DEV_BUILD=true builds unsigned test artifacts
+#
+# Release: Linux, Android, Windows and the OTA frontend are built twice in the
+# pinned container (ci/build) and only published when both builds are
+# byte-identical (REPRODUCIBILITY.md). Files go to the project's generic
+# package registry (free-grind/<version>/), the GitLab release links them;
+# the in-app updater reads the releases API.
+#
+# CI/CD variables (protected + masked; main and development are protected):
+#   ANDROID_KEYSTORE (file)            APK signing key (alias/passwords: KEYS.md)
+#   HOTSWAP_PRIVATE_KEY (file), HOTSWAP_PRIVATE_KEY_PASSWORD   OTA + SHA256SUMS
+#   SURGE_LOGIN, SURGE_TOKEN           OTA hosting (surge.sh)
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && $CI_PIPELINE_SOURCE == "push"
+      when: never
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+variables:
+  # Full history: SOURCE_DATE_EPOCH, min-binary-version.mjs and the release check read it.
+  GIT_DEPTH: 0
+  FG_CONTAINER_ENGINE: docker
+  # Builds from main ship on the stable update channel, every other branch on development.
+  FG_CHANNEL: development
+  PACKAGE_REGISTRY: ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/free-grind
+
+stages: [check, build, verify, publish]
+
+default:
+  tags: [hookr-build]
+
+.on_main: &on_main
+  if: $CI_COMMIT_BRANCH == "main"
+  variables:
+    FG_CHANNEL: main
+
+# --- check ---------------------------------------------------------------------
+
+repo-guard:
+  stage: check
+  script:
+    # The server flavor's code, branding and backend live in the private Hookr
+    # repository (checked out at server/, gitignored here).
+    - |
+      tracked="$(git ls-files -- server flavors/server)"
+      if [ -n "$tracked" ]; then
+        echo "Files of the private server repository are tracked here:"; echo "$tracked"; exit 1
+      fi
+
+# main releases on every push. development only releases when a push changes
+# the version to a pre-release (`bun run set-version beta`) AND native code
+# changed since the last binary: frontend-only versions reach every installed
+# app over OTA, so a new APK would add nothing, unless the commit says
+# [skip ota]: then there's no OTA, and the release carries it all.
+release-check:
+  stage: check
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "web" && $DEV_BUILD != "true" && $OTA_CHANNEL == null
+    - if: $CI_PIPELINE_SOURCE == "push" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "development")
+  script:
+    - |
+      version=$(jq -r '.version' package.json)
+      if [ "$CI_PIPELINE_SOURCE" != "push" ] || [ "$CI_COMMIT_BRANCH" = main ]; then
+        should_release=true
+      elif [ "${version#*-}" = "$version" ]; then
+        echo "$version is not a pre-release, skipping"; should_release=false
+      else
+        previous=$(git show "$CI_COMMIT_BEFORE_SHA:package.json" 2>/dev/null | jq -r '.version' || true)
+        if [ "$previous" = "$version" ]; then
+          echo "Version unchanged ($version), skipping"; should_release=false
+        else
+          echo "Version changed ${previous:-none} -> $version"
+          min_binary=$(node scripts/min-binary-version.mjs)
+          case "$CI_COMMIT_MESSAGE" in
+            *"[skip ota]"*) echo "[skip ota]: releasing binaries instead"; should_release=true ;;
+            *) if [ "$min_binary" = "$version" ]; then
+                 echo "Native code changed since the last binary, releasing"; should_release=true
+               else
+                 echo "Frontend-only since $min_binary, OTA covers it"; should_release=false
+               fi ;;
+          esac
+        fi
+      fi
+      echo "SHOULD_RELEASE=$should_release" > release.env
+  artifacts:
+    reports:
+      dotenv: release.env
+
+# --- build ---------------------------------------------------------------------
+
+.release_rules: &release_rules
+  rules:
+    - <<: *on_main
+    - if: $CI_PIPELINE_SOURCE == "web" && $DEV_BUILD != "true" && $OTA_CHANNEL == null
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "development"
+
+build:
+  stage: build
+  needs: [release-check]
+  timeout: 2h
+  <<: *release_rules
+  parallel:
+    matrix:
+      - ARTIFACT: [linux, android, windows, frontend]
+        BUILDER: ["1", "2"]
+  script:
+    - '[ "$SHOULD_RELEASE" = true ] || { echo "No release for this push"; exit 0; }'
+    - sh ci/build/run.sh "$ARTIFACT"
+    - mkdir -p "builds/$ARTIFACT-$BUILDER" && cp -r "out/$ARTIFACT/." "builds/$ARTIFACT-$BUILDER/"
+  artifacts:
+    paths: [builds/]
+    expire_in: 3 days
+
+.macos: &macos
+  stage: build
+  needs: [release-check]
+  timeout: 2h
+  tags: [macos]
+  rules:
+    - if: $MACOS_RUNNER != "true"
+      when: never
+    - <<: *on_main
+    - if: $CI_PIPELINE_SOURCE == "web" && $DEV_BUILD != "true" && $OTA_CHANNEL == null
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "development"
+  parallel:
+    matrix:
+      - BUILDER: ["1", "2"]
+  artifacts:
+    paths: [builds/]
+    expire_in: 3 days
+
+build-ios:
+  <<: *macos
+  script:
+    - '[ "$SHOULD_RELEASE" = true ] || { echo "No release for this push"; exit 0; }'
+    - bash ci/build/ios.sh
+    - mkdir -p "builds/ios-$BUILDER" && cp -r out/ios/. "builds/ios-$BUILDER/"
+
+build-macos:
+  <<: *macos
+  script:
+    - '[ "$SHOULD_RELEASE" = true ] || { echo "No release for this push"; exit 0; }'
+    - bash ci/build/macos.sh
+    - mkdir -p "builds/macos-$BUILDER" && cp -r out/macos/. "builds/macos-$BUILDER/"
+
+# --- verify --------------------------------------------------------------------
+
+verify:
+  stage: verify
+  <<: *release_rules
+  needs:
+    - release-check
+    - build
+    - job: build-ios
+      optional: true
+    - job: build-macos
+      optional: true
+  script:
+    - '[ "$SHOULD_RELEASE" = true ] || { echo "No release for this push"; exit 0; }'
+    - |
+      for artifact in linux android windows frontend; do
+        sh ci/compare.sh "verified/$artifact" "builds/$artifact-1" "builds/$artifact-2"
+      done
+      for artifact in ios macos; do
+        if [ -d "builds/$artifact-1" ]; then
+          sh ci/compare.sh "verified/$artifact" "builds/$artifact-1" "builds/$artifact-2"
+        fi
+      done
+  artifacts:
+    paths: [verified/]
+    expire_in: 3 days
+
+# --- publish -------------------------------------------------------------------
+
+publish-release:
+  stage: publish
+  <<: *release_rules
+  needs: [release-check, verify]
+  script:
+    - '[ "$SHOULD_RELEASE" = true ] || { echo "No release for this push"; exit 0; }'
+    - bun install --frozen-lockfile
+    - version=$(jq -r '.version' package.json)
+    - short=$(echo "$CI_COMMIT_SHA" | cut -c1-7)
+    - rm -rf release && mkdir release
+    # APK: the release signature added to the reproducible build (v2 only, as
+    # Gradle's signing config produces); the in-app updater looks for this name.
+    - |
+      unsigned="verified/android/free-grind-v$version-android-arm64-unsigned.apk"
+      signed="release/free-grind-v$version.apk"
+      apksigner sign --ks "$ANDROID_KEYSTORE" --ks-key-alias "${ANDROID_KEY_ALIAS:-opengrind}" \
+        --ks-pass "pass:${ANDROID_KEYSTORE_PASSWORD:-opengrind}" --key-pass "pass:${ANDROID_KEYSTORE_PASSWORD:-opengrind}" \
+        --v1-signing-enabled false --v2-signing-enabled true --v3-signing-enabled false --v4-signing-enabled false \
+        --alignment-preserved --out "$signed" "$unsigned"
+      apksigner verify --print-certs "$signed"
+      # What REPRODUCIBILITY.md tells users to run.
+      apksigcopier copy "$signed" "$unsigned" check.apk && cmp check.apk "$signed" && rm check.apk
+    - |
+      cp verified/linux/* release/
+      [ -d verified/ios ] && cp verified/ios/*.ipa release/
+      [ -d verified/macos ] && cp verified/macos/*.zip release/
+      cp "verified/windows/free-grind-v$version-windows-x64-setup.exe" release/
+      # The app picks its runtime mode from its file name (manager vs client/child).
+      for role in manager client child; do
+        cp "verified/windows/free-grind-v$version-windows-x64.exe" "release/free-grind-$role-v$version-windows-x64.exe"
+      done
+      {
+        echo "commit: $CI_COMMIT_SHA"
+        echo "FG_CHANNEL: $FG_CHANNEL"
+        echo "SOURCE_DATE_EPOCH: $(git log -1 --pretty=%ct)"
+        echo
+        echo "Rebuild the reproducible files with:"
+        echo "  git checkout $CI_COMMIT_SHA"
+        echo "  FG_CHANNEL=$FG_CHANNEL sh ci/build/run.sh <linux|android|windows|frontend>"
+        echo "  FG_CHANNEL=$FG_CHANNEL bash ci/build/<ios|macos>.sh   # on macOS with Xcode 26.6"
+        echo "See REPRODUCIBILITY.md for comparing them with this release."
+      } > release/BUILDINFO.txt
+      (cd verified && find . -type f | LC_ALL=C sort | xargs -d '\n' sha256sum | sed 's|  \./[a-z]*/|  |') > release/SHA256SUMS
+      (cd release && sha256sum free-grind-v*.apk) >> release/SHA256SUMS
+      cat release/SHA256SUMS
+    # Checksums signed with the OTA key (KEYS.md), checked against the key every app trusts.
+    - |
+      bunx tauri signer sign release/SHA256SUMS -k "$(cat "$HOTSWAP_PRIVATE_KEY")" -p "$HOTSWAP_PRIVATE_KEY_PASSWORD" > /dev/null
+      base64 -d release/SHA256SUMS.sig > release/SHA256SUMS.minisig && rm release/SHA256SUMS.sig
+      minisign -Vm release/SHA256SUMS -x release/SHA256SUMS.minisig -P "$(jq -r '.ota.pubkey' flavors/grindr/flavor.json)"
+    # Files into the package registry, then the release linking them.
+    - |
+      encoded_path=$(printf '%s' "$CI_PROJECT_PATH" | jq -sRr @uri)
+      base="$CI_API_V4_URL/projects/$encoded_path/packages/generic/free-grind/$version"
+      links='[]'
+      for file in release/*; do
+        name=$(basename "$file")
+        curl -fsS --retry 3 -H "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "$file" "$PACKAGE_REGISTRY/$version/$name" > /dev/null
+        echo "uploaded $name"
+        links=$(echo "$links" | jq --arg name "$name" --arg url "$base/$name" '. + [{name: $name, url: $url, link_type: (if ($name | test("\\.(apk|deb|rpm|AppImage|exe|ipa|zip)$")) then "package" else "other" end)}]')
+      done
+      tag="$(echo "$CI_COMMIT_REF_NAME" | tr '/' '-')-$CI_COMMIT_SHA"
+      jq -n --arg name "Free Grind v$version ($short)" --arg tag "$tag" --arg ref "$CI_COMMIT_SHA" \
+        --arg description "Automated release from \`$CI_COMMIT_REF_NAME\`, commit $CI_COMMIT_SHA. Every download and the OTA frontend bundle are reproducible: two independent builds produced identical bytes before this release was published. See [REPRODUCIBILITY.md]($CI_PROJECT_URL/-/blob/$CI_COMMIT_SHA/REPRODUCIBILITY.md) and the SHA256SUMS and BUILDINFO.txt files." \
+        --argjson links "$links" \
+        '{name: $name, tag_name: $tag, ref: $ref, description: $description, assets: {links: $links}}' > release.json
+      curl -fsS -H "JOB-TOKEN: $CI_JOB_TOKEN" -H "Content-Type: application/json" \
+        --data @release.json "$CI_API_V4_URL/projects/$CI_PROJECT_ID/releases" | jq -r '._links.self'
+
+publish-ota-main:
+  stage: publish
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_MESSAGE !~ /\[skip ota\]/
+      variables:
+        FG_CHANNEL: main
+  needs: [release-check, verify]
+  script:
+    - '[ "$SHOULD_RELEASE" = true ] || { echo "No release for this push"; exit 0; }'
+    - bun install --frozen-lockfile
+    - |
+      HOTSWAP_PRIVATE_KEY_PATH="$HOTSWAP_PRIVATE_KEY" OTA_BUNDLE=verified/frontend/frontend.tar.gz \
+        OTA_NOTES="Automated OTA upload for $CI_COMMIT_SHA" bun --no-env-file scripts/publish-ota.mjs --channel main
+
+# OTA for development pushes (and Run pipeline with OTA_CHANNEL): the frontend
+# bundle, built twice, compared, signed and published to surge.sh.
+.ota_rules: &ota_rules
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "web" && $OTA_CHANNEL
+      variables:
+        FG_CHANNEL: $OTA_CHANNEL
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "development" && $CI_COMMIT_MESSAGE !~ /\[skip ota\]/
+
+ota-build:
+  stage: build
+  needs: []
+  timeout: 45m
+  <<: *ota_rules
+  parallel:
+    matrix:
+      - BUILDER: ["1", "2"]
+  script:
+    - sh ci/build/run.sh frontend
+    - mkdir -p "ota/frontend-$BUILDER" && cp out/frontend/frontend.tar.gz "ota/frontend-$BUILDER/"
+  artifacts:
+    paths: [ota/]
+    expire_in: 3 days
+
+ota-publish:
+  stage: publish
+  needs: [ota-build]
+  <<: *ota_rules
+  script:
+    - sh ci/compare.sh ota/verified ota/frontend-1 ota/frontend-2
+    - bun install --frozen-lockfile
+    - |
+      HOTSWAP_PRIVATE_KEY_PATH="$HOTSWAP_PRIVATE_KEY" OTA_BUNDLE=ota/verified/frontend.tar.gz \
+        OTA_NOTES="Automated OTA upload for $CI_COMMIT_SHA" bun --no-env-file scripts/publish-ota.mjs --channel "$FG_CHANNEL"
+
+# Unsigned test builds of any branch (Run pipeline with DEV_BUILD=true).
+dev-build:
+  stage: build
+  needs: []
+  timeout: 2h
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "web" && $DEV_BUILD == "true"
+  parallel:
+    matrix:
+      - ARTIFACT: [linux, android, windows]
+  script:
+    - sh ci/build/run.sh "$ARTIFACT"
+  artifacts:
+    name: "free-grind-$ARTIFACT-$CI_COMMIT_SHORT_SHA"
+    paths: ["out/$ARTIFACT/"]
+    expire_in: 14 days
+
+# Docs site on GitLab Pages (https://hookrapp.gitlab.io/free-grind/).
+pages:
+  stage: publish
+  needs: []
+  rules:
+    - if: $CI_COMMIT_BRANCH == "development" && $CI_PIPELINE_SOURCE == "push"
+      changes: [docs/**/*, .gitlab-ci.yml]
+    - if: $CI_PIPELINE_SOURCE == "web" && $DOCS == "true"
+  script:
+    - cd docs && bun install --frozen-lockfile
+    - DOCS_BASE=/free-grind bun run build
+    - rm -rf "$CI_PROJECT_DIR/public" && mv .vitepress/dist "$CI_PROJECT_DIR/public"
+  artifacts:
+    paths: [public]
+  publish: public

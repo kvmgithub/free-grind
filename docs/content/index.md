@@ -15,6 +15,6 @@ hero:
       link: /guide/download
     - theme: alt
       text: Source code
-      icon: '<span class="vp-icon i-github"></span>'
-      link: https://github.com/fdev8975/free-grind
+      icon: '<span class="vp-icon i-gitlab"></span>'
+      link: https://gitlab.com/hookrapp/free-grind
 ---
