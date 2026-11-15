@@ -21,16 +21,16 @@ rm -rf "$target/bundle" "$out/windows"
 mkdir -p "$out/windows"
 # Free Grind server (optional): FG_API_URL / FG_MEDIA_URL / FG_RTC_URL, see
 # scripts/flavor-config.mjs. Unset → the build has no Free Grind server.
-TAURI_CONFIG="$(bun scripts/flavor-config.mjs windows)"
+TAURI_CONFIG="$(bun --no-env-file scripts/flavor-config.mjs windows)"
 export TAURI_CONFIG
 
 bunx tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis
 
 set -- "$target"/bundle/nsis/*-setup.exe
 [ "$#" -eq 1 ] && [ -f "$1" ] || { echo "expected one installer from tauri, found $#" >&2; exit 1; }
-cp "$1" "$out/windows/free-grind-v$version-windows-x64-setup.exe"
+cp "$1" "$out/windows/$FG_APP_SLUG-v$version-windows-x64-setup.exe"
 # The portable exe; releases also publish it as the manager/client/child copies.
-cp "$target/free-grind.exe" "$out/windows/free-grind-v$version-windows-x64.exe"
+cp "$target/$FG_APP_BINARY.exe" "$out/windows/$FG_APP_SLUG-v$version-windows-x64.exe"
 
 echo
 (cd "$out/windows" && sha256sum -- *)

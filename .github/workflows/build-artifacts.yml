@@ -32,20 +32,6 @@ jobs:
             artifact_suffix: linux-x64
             bundle_dir: src-tauri/target/release/bundle
     runs-on: ${{ matrix.platform }}
-    # "dev" (with the Free Grind variables below) for every branch but main.
-    environment: ${{ github.ref_name != 'main' && 'dev' || '' }}
-    # Free Grind server built into the app, from the "dev" environment's
-    # variables (Settings → Environments → dev); empty on main. Unset ones leave the feature
-    # out: without FG_API_URL/FG_MEDIA_URL there's no Free Grind server, without
-    # all four FG_FCM_* no Free Grind push. See server/DEPLOY.md.
-    env:
-      FG_API_URL: ${{ vars.FG_API_URL }}
-      FG_MEDIA_URL: ${{ vars.FG_MEDIA_URL }}
-      FG_RTC_URL: ${{ vars.FG_RTC_URL }}
-      FG_FCM_PROJECT_ID: ${{ vars.FG_FCM_PROJECT_ID }}
-      FG_FCM_APP_ID: ${{ vars.FG_FCM_APP_ID }}
-      FG_FCM_SENDER_ID: ${{ vars.FG_FCM_SENDER_ID }}
-      FG_FCM_API_KEY: ${{ vars.FG_FCM_API_KEY || secrets.FG_FCM_API_KEY }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -91,16 +77,10 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
-      - name: Free Grind server config
-        # App identity (flavor manifest) plus CSP (LiveKit host) and HTTP scope
-        # (media host) for the Free Grind server, read by the Tauri CLI from TAURI_CONFIG. The Rust side reads
-        # the FG_* variables directly at compile time.
-        shell: bash
-        run: |
-          for v in FG_API_URL FG_MEDIA_URL FG_RTC_URL FG_FCM_PROJECT_ID FG_FCM_APP_ID FG_FCM_SENDER_ID FG_FCM_API_KEY; do
-            if [ -n "${!v}" ]; then echo "$v: set"; else echo "$v: not set"; fi
-          done
-          echo "TAURI_CONFIG=$(bun scripts/flavor-config.mjs)" >> "$GITHUB_ENV"
+      - name: App flavor config
+        # App identity from the flavor manifest (grindr; the server flavor is
+        # built in its own repository), read by the Tauri CLI from TAURI_CONFIG.
+        run: echo "TAURI_CONFIG=$(bun --no-env-file scripts/flavor-config.mjs)" >> "$GITHUB_ENV"
 
       - name: Build desktop artifacts
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
@@ -119,20 +99,6 @@ jobs:
 
   build-android:
     runs-on: ubuntu-24.04
-    # "dev" (with the Free Grind variables below) for every branch but main.
-    environment: ${{ github.ref_name != 'main' && 'dev' || '' }}
-    # Free Grind server built into the app, from the "dev" environment's
-    # variables (Settings → Environments → dev); empty on main. Unset ones leave the feature
-    # out: without FG_API_URL/FG_MEDIA_URL there's no Free Grind server, without
-    # all four FG_FCM_* no Free Grind push. See server/DEPLOY.md.
-    env:
-      FG_API_URL: ${{ vars.FG_API_URL }}
-      FG_MEDIA_URL: ${{ vars.FG_MEDIA_URL }}
-      FG_RTC_URL: ${{ vars.FG_RTC_URL }}
-      FG_FCM_PROJECT_ID: ${{ vars.FG_FCM_PROJECT_ID }}
-      FG_FCM_APP_ID: ${{ vars.FG_FCM_APP_ID }}
-      FG_FCM_SENDER_ID: ${{ vars.FG_FCM_SENDER_ID }}
-      FG_FCM_API_KEY: ${{ vars.FG_FCM_API_KEY || secrets.FG_FCM_API_KEY }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -184,16 +150,10 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
-      - name: Free Grind server config
-        # App identity (flavor manifest) plus CSP (LiveKit host) and HTTP scope
-        # (media host) for the Free Grind server, read by the Tauri CLI from TAURI_CONFIG. The Rust side reads
-        # the FG_* variables directly at compile time.
-        shell: bash
-        run: |
-          for v in FG_API_URL FG_MEDIA_URL FG_RTC_URL FG_FCM_PROJECT_ID FG_FCM_APP_ID FG_FCM_SENDER_ID FG_FCM_API_KEY; do
-            if [ -n "${!v}" ]; then echo "$v: set"; else echo "$v: not set"; fi
-          done
-          echo "TAURI_CONFIG=$(bun scripts/flavor-config.mjs android)" >> "$GITHUB_ENV"
+      - name: App flavor config
+        # App identity from the flavor manifest (grindr; the server flavor is
+        # built in its own repository), read by the Tauri CLI from TAURI_CONFIG.
+        run: echo "TAURI_CONFIG=$(bun --no-env-file scripts/flavor-config.mjs android)" >> "$GITHUB_ENV"
 
       - name: Initialize Android project
         run: bunx tauri android init --ci --skip-targets-install
@@ -270,7 +230,4 @@ jobs:
 
   build-ios:
     uses: ./.github/workflows/build-ios.yml
-    with:
-      # Free Grind server variables from the "dev" environment (not on main), like the jobs above.
-      environment: ${{ github.ref_name != 'main' && 'dev' || '' }}
     secrets: inherit

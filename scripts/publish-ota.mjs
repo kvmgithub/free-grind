@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { resolveAutoMinBinaryVersion } from "./min-binary-version.mjs";
+import { loadFlavor } from "./flavor.mjs";
 
 // Publishes the frontend as a signed OTA bundle to surge.sh.
 //
@@ -19,7 +20,18 @@ import { resolveAutoMinBinaryVersion } from "./min-binary-version.mjs";
 // wipes the main channel. The app reads `https://<domain>/latest.json`
 // (see `plugins.hotswap.endpoint` in src-tauri/tauri.conf.json).
 
-const DEFAULT_DOMAIN_TEMPLATE = "freegrind-ota-{channel}.surge.sh";
+// The app flavor's OTA host (FG_FLAVOR, flavors/README.md): the host of its
+// manifest's ota.endpoint, e.g. https://freegrind-ota-{{channel}}.surge.sh/latest.json.
+// Each flavor has its own endpoint and key, so an update of one never reaches
+// the other app.
+const DEFAULT_DOMAIN_TEMPLATE = (() => {
+  const endpoint = loadFlavor().ota.endpoint.replaceAll("{{channel}}", "{channel}");
+  const host = endpoint.replace(/^https:\/\//, "").split("/")[0];
+  if (!host.endsWith(".surge.sh") || !host.includes("{channel}")) {
+    throw new Error(`flavor ota.endpoint ${endpoint}: expected https://<name>-{{channel}}.surge.sh/…`);
+  }
+  return host;
+})();
 
 function parseCliArgs(argv) {
   let channelOverride;

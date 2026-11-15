@@ -69,11 +69,15 @@ fi
 # cargo would otherwise quietly re-resolve an outdated Cargo.lock.
 cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
 bun install --frozen-lockfile
+# App identity of the flavor being built (FG_FLAVOR, default grindr) and the
+# build variables its manifest brings: FG_APP_NAME, FG_APP_SLUG, FG_APP_BINARY,
+# FG_APP_REPO_URL, … (scripts/flavor-env.mjs). Artifacts are named <slug>-v….
+eval "$(bun --no-env-file scripts/flavor-env.mjs)"
 bun run build
 
 # Free Grind server (optional): FG_API_URL / FG_MEDIA_URL / FG_RTC_URL, see
 # scripts/flavor-config.mjs. Unset → the build has no Free Grind server.
-TAURI_CONFIG="$(bun scripts/flavor-config.mjs ios)"
+TAURI_CONFIG="$(bun --no-env-file scripts/flavor-config.mjs ios)"
 export TAURI_CONFIG
 
 # `tauri ios init` regenerates gen/apple from Tauri's templates, which drops
@@ -197,7 +201,7 @@ app_plist="$tools/Payload/$(basename "$app")/Info.plist"
 plutil -convert binary1 "$app_plist"
 find "$tools/Payload" -exec touch -h -t "$(date -r "$SOURCE_DATE_EPOCH" +%Y%m%d%H%M.%S)" {} +
 mkdir -p "$repo/out/ios"
-ipa="$repo/out/ios/free-grind-v$version-unsigned.ipa"
+ipa="$repo/out/ios/$FG_APP_SLUG-v$version-unsigned.ipa"
 rm -f "$ipa"
 (cd "$tools" && find Payload | LC_ALL=C sort | /usr/bin/zip -qXy "$ipa" -@)
 

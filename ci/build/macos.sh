@@ -50,6 +50,12 @@ fi
 # cargo would otherwise quietly re-resolve an outdated Cargo.lock.
 cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
 bun install --frozen-lockfile
+# App identity of the flavor being built (FG_FLAVOR, default grindr) and the
+# build variables its manifest brings: FG_APP_NAME, FG_APP_SLUG, FG_APP_BINARY,
+# FG_APP_REPO_URL, … (scripts/flavor-env.mjs). Artifacts are named <slug>-v….
+eval "$(bun --no-env-file scripts/flavor-env.mjs)"
+TAURI_CONFIG="$(bun --no-env-file scripts/flavor-config.mjs macos)"
+export TAURI_CONFIG
 
 # Per-target flags rather than RUSTFLAGS, which would drop target.*.rustflags
 # from .cargo/config.toml; aarch64 keeps its -ld_classic from there.
@@ -76,7 +82,7 @@ trap 'rm -rf "$staging"' EXIT
 cp -R "$app" "$staging/"
 find "$staging" -exec touch -h -t "$(date -r "$SOURCE_DATE_EPOCH" +%Y%m%d%H%M.%S)" {} +
 mkdir -p "$repo/out/macos"
-zip_path="$repo/out/macos/free-grind-v$version-macos-universal.zip"
+zip_path="$repo/out/macos/$FG_APP_SLUG-v$version-macos-universal.zip"
 rm -f "$zip_path"
 (cd "$staging" && find "$(basename "$app")" | LC_ALL=C sort | /usr/bin/zip -qXy "$zip_path" -@)
 
