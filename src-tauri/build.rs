@@ -70,6 +70,12 @@ fn embed_flavor() {
             .unwrap_or_else(|| panic!("{manifest}: missing {key}"));
         println!("cargo:rustc-env={env}={value}");
     }
+    // User-Agent product token of an own-identity client (optional).
+    let product = json["clientProduct"].as_str().unwrap_or("grindr3");
+    if product.is_empty() || !product.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+        panic!("{manifest}: clientProduct must be lowercase letters and digits, got {product:?}");
+    }
+    println!("cargo:rustc-env=FG_CLIENT_PRODUCT={product}");
 }
 
 /// Without the GStreamer headers the build still goes through: it leaves an

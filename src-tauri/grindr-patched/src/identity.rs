@@ -3,32 +3,43 @@
 //! By default it imitates the official Android app: its version
 //! ([`crate::APP_VERSION`]), a real Android device profile and okhttp's
 //! fingerprint. With the `own-identity` feature it identifies honestly
-//! instead, in the same header format: the embedding app's own version (set
-//! with [`set_client_version`]) and the real platform, device and time zone
+//! instead, in the same header format: the embedding app's own product name
+//! and version (set with [`set_client_identity`]) and the real platform,
+//! device and time zone
 //! ([`honest_device`]). Values the platform doesn't expose are sent as
 //! obvious placeholders, never invented.
 
 use std::sync::OnceLock;
 
-static CLIENT_VERSION: OnceLock<(String, String)> = OnceLock::new();
+/// The official app's product token in the `User-Agent`.
+pub(crate) const OFFICIAL_PRODUCT: &str = "grindr3";
 
-/// The app version and build number the `own-identity` client puts in its
-/// `User-Agent` (`grindr3/<version>;<build>;…`, the API's format). Call once at
-/// startup, before the first client; later calls are ignored. `version` must be
-/// dotted numbers (`1.2.0`), `build` digits.
-pub fn set_client_version(version: &str, build: &str) {
-	let _ = CLIENT_VERSION.set((version.to_owned(), build.to_owned()));
+static CLIENT_IDENTITY: OnceLock<(String, String, String)> = OnceLock::new();
+
+/// What the `own-identity` client puts at the start of its `User-Agent`:
+/// `<product>/<version>;<build>;…` (the API's format, e.g. `myapp1/1.2.0;45;…`).
+/// Call once at startup, before the first client; later calls are ignored.
+/// `product` is lowercase letters and digits (default: the official
+/// `grindr3`), `version` dotted numbers (`1.2.0`), `build` digits. Without
+/// `own-identity` the client always sends the official app's.
+pub fn set_client_identity(product: &str, version: &str, build: &str) {
+	let product = if !product.is_empty() && product.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+		product
+	} else {
+		OFFICIAL_PRODUCT
+	};
+	let _ = CLIENT_IDENTITY.set((product.to_owned(), version.to_owned(), build.to_owned()));
 }
 
-/// Version and build number for the `User-Agent`.
-pub(crate) fn client_version() -> (&'static str, &'static str) {
+/// Product token, version and build number for the `User-Agent`.
+pub(crate) fn client_identity() -> (&'static str, &'static str, &'static str) {
 	#[cfg(feature = "own-identity")]
-	return CLIENT_VERSION
+	return CLIENT_IDENTITY
 		.get()
-		.map(|(v, b)| (v.as_str(), b.as_str()))
-		.unwrap_or(("0.0.0", "0"));
+		.map(|(p, v, b)| (p.as_str(), v.as_str(), b.as_str()))
+		.unwrap_or((OFFICIAL_PRODUCT, "0.0.0", "0"));
 	#[cfg(not(feature = "own-identity"))]
-	(crate::headers::APP_VERSION, crate::headers::BUILD_NUMBER)
+	(OFFICIAL_PRODUCT, crate::headers::APP_VERSION, crate::headers::BUILD_NUMBER)
 }
 
 /// The `own-identity` device: what this platform really is.
@@ -120,10 +131,10 @@ mod tests {
 	}
 
 	#[test]
-	fn the_user_agent_carries_the_apps_own_version() {
-		super::set_client_version("1.2.3", "45");
+	fn the_user_agent_carries_the_apps_own_product_and_version() {
+		super::set_client_identity("myapp1", "1.2.3", "45");
 		let ua = build_user_agent(&DeviceInfo::generate(), "Free");
-		assert!(ua.starts_with("grindr3/1.2.3;45;Free;"), "{ua}");
+		assert!(ua.starts_with("myapp1/1.2.3;45;Free;"), "{ua}");
 		assert!(!ua.contains(crate::headers::APP_VERSION));
 	}
 

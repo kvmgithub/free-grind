@@ -19,6 +19,7 @@ The flavor sets the app's identity. Product features are switched by the server'
 | `folderName` | Export folder (`Downloads/<folderName>`, iOS `Documents/<folderName>`) |
 | `identifier` | Tauri identifier on desktop and iOS (data directory); not used on Android, see below |
 | `userAgent` | WebView user agent |
+| `clientProduct` | Optional; product token at the start of the API `User-Agent` (`<token>/<version>;…`) for flavors without the official client's identity (cargo feature `flavor-server`). Lowercase letters and digits; default `grindr3`. The server must accept the token. |
 | `github` | `owner/repo` for releases, the in-app updater and links |
 | `websiteUrl` | About page |
 | `ota.endpoint`, `ota.pubkey` | Frontend OTA updates (hotswap); each flavor needs its own key |

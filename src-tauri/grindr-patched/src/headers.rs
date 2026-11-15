@@ -19,17 +19,17 @@ const MEDIA_ACCEPT: &str = "image/webp,image/*;q=0.8";
 
 /// Builds the `User-Agent` the app sends, e.g.
 /// `grindr3/26.24.0.195444;195444;Free;Android 14;Pixel 8;Google`.
-/// With `own-identity`, the version is the embedding app's own
-/// (see [`crate::identity`]).
+/// With `own-identity`, product token and version are the embedding app's
+/// own (see [`crate::identity`]).
 ///
 /// `subscription_tier` is usually `"Free"`.
 pub fn build_user_agent(
 	device: &DeviceInfo,
 	subscription_tier: &str,
 ) -> String {
-	let (version, build) = crate::identity::client_version();
+	let (product, version, build) = crate::identity::client_identity();
 	format!(
-		"grindr3/{version};{build};{subscription_tier};{};{};{}",
+		"{product}/{version};{build};{subscription_tier};{};{};{}",
 		device.os, device.device_model, device.manufacturer
 	)
 }

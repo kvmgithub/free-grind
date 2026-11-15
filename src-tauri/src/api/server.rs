@@ -92,10 +92,12 @@ pub fn apply_flavor_server() {
         }
     }
     grindr::set_server_config(server);
-    // The server flavor's client sends its own version (grindr's own-identity);
-    // the grindr flavor's ignores this and keeps the official app's.
+    // The server flavor's client sends its own product token and version
+    // (grindr's own-identity; the token from the flavor manifest's
+    // clientProduct, see build.rs); the grindr flavor's ignores this and keeps
+    // the official app's.
     let (version, build) = client_version(env!("CARGO_PKG_VERSION"));
-    grindr::set_client_version(&version, &build);
+    grindr::set_client_identity(crate::flavor::CLIENT_PRODUCT, &version, &build);
 }
 
 /// `1.0.0-beta.53` → (`1.0.0`, `53`): the API's `User-Agent` wants dotted
