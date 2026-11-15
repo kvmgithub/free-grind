@@ -61,6 +61,7 @@ import { proxyMediaUrl } from "../../../../utils/mediaProxy";
 import { haptic } from "../../../../utils/haptics";
 import { PRIVACY_BLUR_CLASS, PRIVACY_BLUR_TRANSITION_CLASS, useProfilePhotoPrivacy } from "../../../../hooks/useProfilePhotoPrivacy";
 import { useBlurReveal } from "../../../../hooks/useBlurReveal";
+import { ProfileNetworkSection } from "../../profile-network/ProfileNetworkSection";
 
 type LabelMap = Record<number, string>;
 
@@ -914,6 +915,9 @@ export function ProfileDetailsContent({
 					</div>
 				</div>
 			)}
+
+			{/* Linked profiles + reputation index (Free Grind server, flag profile-reputation). */}
+			<ProfileNetworkSection profileId={String(activeProfile.profileId)} isPreview={isPreview} />
 
 			<div className="px-3">
 				<p className="mb-2 text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">

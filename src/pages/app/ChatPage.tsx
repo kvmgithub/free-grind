@@ -127,6 +127,7 @@ import {
 	toNonArchiveDisplayMessage,
 	VIEW_LIMITED_LOCK_FLAG,
 	getMessagePreviewLabel,
+	getStoredPreviewText,
 	getOtherParticipant,
 	getSendTarget,
 	getParticipantOnlineMeta,
@@ -3536,7 +3537,7 @@ export function ChatPage() {
 					return conversation;
 				}
 
-				const text = getMessagePreviewLabel(latestMessage, t);
+				const text = getStoredPreviewText(latestMessage, t);
 				const isMine = userId != null && Number(latestMessage.senderId) === Number(userId);
 				const isActive = selectedConversationIdRef.current === conversation.data.conversationId;
 
@@ -3591,7 +3592,7 @@ export function ChatPage() {
 							type: latestMessage.type,
 							chat1Type: latestMessage.chat1Type ?? "text",
 							// GroupEvent: described from groupEvent in the inbox (getPreviewText).
-							text: latestMessage.type === "GroupEvent" ? null : text,
+							text,
 							albumId: null,
 							imageHash: null,
 							...(latestMessage.type === "GroupEvent" ? { groupEvent: (latestMessage.body ?? null) as Record<string, unknown> | null } : {}),

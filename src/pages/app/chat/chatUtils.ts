@@ -443,7 +443,12 @@ function getPreviewTextBase(conversation: ConversationEntry, t: TranslateFn, use
 			return t("chat.preview.sent_location");
 		case "ProfileLink":
 			return t("chat.preview.shared_profile");
+		case "ProfileLinkRequest":
+			return t("profile_network.chat.preview_request");
+		case "ProfileLinkEvent":
+			return t("profile_network.chat.preview_accepted");
 		case "RightNowRequest":
+		case "RightNowRequestIncoming":
 			return t("chat.preview.right_now_request", { defaultValue: "Right Now request" });
 		case "VideoCall":
 			return t("chat.preview.video_call");
@@ -484,7 +489,12 @@ export function getMessagePreviewLabel(message: Message, t: TranslateFn): string
 			return t("chat.preview.sent_location");
 		case "ProfileLink":
 			return t("chat.preview.shared_profile");
+		case "ProfileLinkRequest":
+			return t("profile_network.chat.preview_request");
+		case "ProfileLinkEvent":
+			return t("profile_network.chat.preview_accepted");
 		case "RightNowRequest":
+		case "RightNowRequestIncoming":
 			return t("chat.preview.right_now_request", { defaultValue: "Right Now request" });
 		case "VideoCall":
 			return getVideoCallStatusLabel(message, t);
@@ -511,12 +521,15 @@ const NOTIFICATION_BODY_KEYS: Record<string, string> = {
 	AlbumContentReaction: "push_notifications.chat_album_content_reaction_notification_body",
 	// Not a 26.21 push text: our server's own key for shared profiles (see profileShare).
 	ProfileLink: "push_notifications.chat_profile_link_notification_body",
+	// Ours (flag profile-reputation): link requests and their confirmation.
+	ProfileLinkRequest: "push_notifications.chat_profile_link_request_notification_body",
+	ProfileLinkEvent: "push_notifications.chat_profile_link_accepted_notification_body",
 };
 
 // Types that keep their own label even when incoming: the native push has
 // no wording for them, and its generic "Sent you a message" would hide what
 // actually happened.
-const INCOMING_OWN_LABEL_TYPES = new Set(["VideoCall", "RightNowRequest"]);
+const INCOMING_OWN_LABEL_TYPES = new Set(["VideoCall", "RightNowRequest", "RightNowRequestIncoming"]);
 
 /**
  * Wording for a text-less message *from the other person*, matching what the
@@ -592,6 +605,9 @@ const SELF_EXPLANATORY_PREVIEW_TYPES = new Set([
 	"NonExpiringVideo",
 	"Location",
 	"ProfileLink",
+	"ProfileLinkRequest",
+	"ProfileLinkEvent",
+	"RightNowRequestIncoming",
 	// Local group lines ("You left the group"): described by type alone.
 	"SystemGroupLeft",
 	"SystemGroupRemoved",
@@ -623,6 +639,22 @@ export function isPreviewUnhelpful(
  * fallback so the inbox row shows the last real message instead of "no
  * messages yet" on a conversation that clearly has history.
  */
+/**
+ * The `text` to store on a locally built inbox preview: only the message's own
+ * text (or a label that depends on the message body, like a call's outcome).
+ * Media types stay null so getPreviewText derives their label from the type,
+ * the same way it does for the server's preview — storing our generic "Sent an
+ * image" here would override the incoming wording ("Sent you an expiring
+ * image") once the chat loads.
+ */
+export function getStoredPreviewText(message: Message, t: TranslateFn): string | null {
+	if (message.type === "GroupEvent") return null;
+	const text = (message.body as Record<string, unknown> | null)?.text;
+	if (typeof text === "string") return text;
+	if (message.type === "VideoCall") return getVideoCallStatusLabel(message, t);
+	return null;
+}
+
 export function buildPreviewFromMessage(
 	message: Message,
 	t: TranslateFn,
@@ -634,7 +666,7 @@ export function buildPreviewFromMessage(
 		type: message.type,
 		chat1Type: message.chat1Type ?? "text",
 		// GroupEvent: no text; the inbox describes it from groupEvent (getPreviewText).
-		text: message.type === "GroupEvent" ? null : getMessagePreviewLabel(message, t),
+		text: getStoredPreviewText(message, t),
 		albumId: null,
 		imageHash: null,
 		...(message.type === "GroupEvent" ? { groupEvent: (message.body ?? null) as Record<string, unknown> | null } : {}),

@@ -1,5 +1,5 @@
 import { MapPinFilled } from "../../../components/icons/FilledIcons";
-import { Album, Ban, CircleAlert, Copy, Download, Eye, History, ImagePlay, Images, Languages, Loader2, Lock, MessageCircleQuestion, MessageSquarePlus, Mic, MoreVertical, PhoneOff, Play, Repeat2, Reply, RotateCw, ShieldCheck, Trash2, Undo2, UserRound, UsersRound, Video, VideoOff, ImageOff } from "lucide-react";
+import { Album, Ban, CircleAlert, Copy, Download, Eye, History, ImagePlay, Images, Languages, Loader2, Lock, MessageCircleQuestion, MessageSquarePlus, Mic, MoreVertical, PhoneOff, Play, Repeat2, Reply, RotateCw, ShieldCheck, Trash2, Undo2, Link2, UserRound, UsersRound, Video, VideoOff, ImageOff } from "lucide-react";
 import { sentMediaEcho } from "./sentMediaEchoes";
 import { TakenOnGrindrBadge } from "./TakenOnGrindrBadge";
 import { createPortal } from "react-dom";
@@ -83,11 +83,15 @@ import { haptic } from "../../../utils/haptics";
 import { menuTransitionStyle, usePresence } from "../../../hooks/usePresence";
 import { proxyMediaUrl } from "../../../utils/mediaProxy";
 import { getHeroRectFromElement, type HeroRect } from "../../../components/PhotoViewer";
-import { RightNowRequestBubble } from "./RightNowRequestBubble";
+import { RIGHT_NOW_INCOMING_TYPE, RightNowIncomingRequestCard, RightNowRequestCard } from "./RightNowRequestCard";
+import { PROFILE_LINK_EVENT_TYPE, PROFILE_LINK_REQUEST_TYPE, ProfileLinkRequestCard } from "./ProfileLinkRequestCard";
+import { MediaBadge } from "./ChatCoverCard";
+import { useMyOwnProfile } from "../../../hooks/queries/useProfileQueries";
+import { getProfilePhotoHash } from "../profile-editor/profileEditorUtils";
 import { getGroupEventLabel } from "./groups/groupLabels";
 import { useGroupMemberNames } from "./groups/useGroupMemberNames";
 import { resolveAvatarSrc } from "../../../services/avatarStore";
-import { isGroupConversationId } from "../../../utils/groupChat";
+import { directConversationProfiles, isGroupConversationId } from "../../../utils/groupChat";
 import { AlbumExpirationCountdown, getAlbumShareDurationKey } from "./AlbumExpirationCountdown";
 
 type ChatThreadMessagesProps = {
@@ -153,6 +157,8 @@ const KNOWN_REPLY_TYPES = new Set([
     "Audio", "Location", "AlbumContentReply", "AlbumContentReaction",
     "Album", "ExpiringAlbum", "ExpiringAlbumV2", "ProfilePhotoReply", "Text", "Gaymoji",
     "ProfileLink",
+    // Server-made request cards (Right Now; profile links, Free Grind server).
+    "RightNowRequest", "RightNowRequestIncoming", "ProfileLinkRequest", "ProfileLinkEvent",
 ]);
 
 // Same flags that drive the "from local history" badge — a message that
@@ -189,15 +195,6 @@ function ReadStatusRelativeTime({ readAt, t }: { readAt: number; t: any }) {
 const MEDIA_TAP_MAX_MS = 500;
 const MEDIA_TAP_SLOP_PX = 10;
 const MISSING_CLICK_WAIT_MS = 120;
-
-function MediaBadge({ icon, label }: { icon: React.ReactNode; label: React.ReactNode }) {
-	return (
-		<div className="pointer-events-none absolute start-2 top-2 z-20 inline-flex h-6 items-center gap-1.5 whitespace-nowrap rounded-full bg-black/50 ps-1.5 pe-2.5 text-[11px] font-semibold leading-none text-white [&>svg]:h-3.5 [&>svg]:w-3.5 [&>svg]:shrink-0 shadow-[0_2px_8px_rgba(0,0,0,0.3)] backdrop-blur-md">
-			{icon}
-			{label}
-		</div>
-	);
-}
 
 /**
  * Centered upload ring over an optimistic image/video tile; with a `label`
@@ -405,6 +402,19 @@ export function ChatThreadMessages({
 	localUploadProgress = null,
 }: ChatThreadMessagesProps) {
 	const { t } = useTranslation();
+	// The other person of a direct chat (profile link requests act on them).
+	const directPartnerId = useMemo(() => {
+		const pair = directConversationProfiles(selectedConversation.data.conversationId);
+		return pair ? (pair.find((id) => id !== String(userId)) ?? null) : null;
+	}, [selectedConversation.data.conversationId, userId]);
+	// Current photos for link request cards whose message has no snapshot.
+	const hasLinkRequest = useMemo(() => threadMessages.some((m) => m.type === PROFILE_LINK_REQUEST_TYPE), [threadMessages]);
+	const directPartnerImageHash = useMemo(
+		() => selectedConversation.data.participants.find((p) => String(p.profileId) === directPartnerId)?.primaryMediaHash ?? null,
+		[selectedConversation.data.participants, directPartnerId],
+	);
+	const { data: ownProfile } = useMyOwnProfile(hasLinkRequest);
+	const ownImageHash = getProfilePhotoHash(ownProfile);
 	const isGroupThread = isGroupConversationId(selectedConversation.data.conversationId);
 	const groupMembers = useGroupMemberNames(isGroupThread ? selectedConversation : null, threadMessages, userId);
 	const isVisibleGroupMember = groupMembers.isActiveMember;
@@ -1255,6 +1265,20 @@ export function ChatThreadMessages({
                         <div className="flex flex-col gap-2">
                         {group.messages.map((message, messageIndex) => {
 
+                    if (message.type === PROFILE_LINK_EVENT_TYPE) {
+                        return (
+                            <Fragment key={message.messageId}>
+                                {renderEventPill(
+                                    <Link2 className="h-3.5 w-3.5 shrink-0" />,
+                                    String(message.senderId) === String(userId)
+                                        ? t("profile_network.chat.event_accepted_mine")
+                                        : t("profile_network.chat.event_accepted_theirs"),
+                                    message.timestamp,
+                                )}
+                            </Fragment>
+                        );
+                    }
+
                     if (message.type === "GroupEvent") {
                         return (
                             <Fragment key={message.messageId}>
@@ -1636,6 +1660,12 @@ export function ChatThreadMessages({
                                 ? t("chat.thread.reacted_to_image")
                                 : replyTargetType === "ProfileLink"
                                     ? replyProfileLink?.name ?? t("chat.preview.shared_profile")
+                                : replyTargetType === "RightNowRequest" || replyTargetType === RIGHT_NOW_INCOMING_TYPE
+                                    ? t("chat.preview.right_now_request", { defaultValue: "Right Now request" })
+                                : replyTargetType === PROFILE_LINK_REQUEST_TYPE
+                                    ? t("profile_network.chat.preview_request")
+                                : replyTargetType === PROFILE_LINK_EVENT_TYPE
+                                    ? t("profile_network.chat.preview_accepted")
                                 : replyIsAlbum
                                     ? t("chat.preview.shared_album")
                                 : replyIsAudio
@@ -1677,6 +1707,8 @@ export function ChatThreadMessages({
                     const isAlbumReactionBubble = message.type === "AlbumContentReaction";
                     const profileLink = isUnsentWithoutContent ? null : getProfileLink(message);
                     const isProfileLinkBubble = profileLink != null;
+                    // Request cards (Right Now, profile links): cover cards like the shared profile.
+                    const isRequestCardBubble = !message.unsent && (message.type === "RightNowRequest" || message.type === RIGHT_NOW_INCOMING_TYPE || message.type === PROFILE_LINK_REQUEST_TYPE);
                     const msgBody = message.body as any;
                     const isExpiredVideo = !videoUrl && msgBody?._videoExpired === true;
                     const isExpiredImage =
@@ -1709,7 +1741,7 @@ export function ChatThreadMessages({
                     const isViewLimitedUsedUp = viewLimitedViewsLeft === 0;
                     const isMediaOnlyBubble =
                         isViewLimitedLockedMessage ||
-                        isImageOnlyBubble || isVideoOnlyBubble || isAlbumOnlyBubble || isLocationOnlyBubble || isAlbumReactionBubble || isProfileLinkBubble;
+                        isImageOnlyBubble || isVideoOnlyBubble || isAlbumOnlyBubble || isLocationOnlyBubble || isAlbumReactionBubble || isProfileLinkBubble || isRequestCardBubble;
                     const tailCorner = mine ? "rounded-ee-[3px]" : "rounded-es-[3px]";
                     const shouldBlurIncomingMedia =
                         blurIncomingMedia &&
@@ -2336,6 +2368,39 @@ export function ChatThreadMessages({
                                         );
                                     })() : null}
 
+                                    {isRequestCardBubble ? (() => {
+                                        // Same time / menu row as the shared-profile card (color from the card).
+                                        const cardMeta = (
+                                            <div className="flex shrink-0 items-center gap-2">
+                                                {pending ? <span>{t("chat.sending")}</span> : null}
+                                                {failed ? <span>{t("chat.thread.failed")}</span> : null}
+                                                {localOnly ? (
+                                                    <span title={t("chat.thread.from_local_history")}><History className="h-3 w-3 opacity-80" /></span>
+                                                ) : null}
+                                                <span>{formatMessageTime(message.timestamp, nowTimestamp, t)}</span>
+                                                {isDesktop && !pending && !isLocalClientMessageId(message.messageId) ? (
+                                                    <button
+                                                        type="button"
+                                                        onClick={(event) => {
+                                                            event.stopPropagation();
+                                                            setContextMenuState({ messageId: message.messageId, x: event.clientX, y: event.clientY });
+                                                        }}
+                                                        className="rounded-md p-1 hover:bg-[color-mix(in_srgb,currentColor_15%,transparent)]"
+                                                    >
+                                                        <MoreVertical className="h-3.5 w-3.5" />
+                                                    </button>
+                                                ) : null}
+                                            </div>
+                                        );
+                                        return message.type === "RightNowRequest" ? (
+                                            <RightNowRequestCard body={message.body} mine={mine} tailCorner={tailCorner} meta={cardMeta} />
+                                        ) : message.type === RIGHT_NOW_INCOMING_TYPE ? (
+                                            <RightNowIncomingRequestCard body={message.body} tailCorner={tailCorner} meta={cardMeta} />
+                                        ) : (
+                                            <ProfileLinkRequestCard body={message.body} mine={mine} partnerProfileId={directPartnerId} partnerImageHash={directPartnerImageHash} ownImageHash={ownImageHash} tailCorner={tailCorner} meta={cardMeta} />
+                                        );
+                                    })() : null}
+
                                         {gaymojiUrl ? (
                                             <img
                                                 src={proxyMediaUrl(gaymojiUrl)}
@@ -2746,9 +2811,7 @@ export function ChatThreadMessages({
                                     {!isMediaOnlyBubble && !isAudioOnlyBubble && !gaymojiUrl
                                     && !(imageUrl && (messageText === t("chat.thread.shared_image") || messageText === t("chat.thread.shared_gif")))
                                     && !((videoUrl || isExpiredVideo) && messageText === t("chat.thread.shared_video")) ? (
-                                        message.type === "RightNowRequest" ? (
-                                            <RightNowRequestBubble body={message.body} mine={mine} />
-                                        ) : isUnsupportedMessage ? (
+                                        isUnsupportedMessage ? (
                                             <div className={`relative mt-1 flex items-center gap-2.5 overflow-hidden rounded-[6px] p-[13px] text-xs ${mine ? "bg-black/20" : "bg-black/[0.08]"}`}>
                                                 <MessageCircleQuestion className="h-4 w-4 shrink-0 opacity-70" />
                                                 <div className="min-w-0 flex-1">

@@ -548,7 +548,15 @@
         "map_you": "Du",
         "map_no_positions": "Gerade teilt niemand in der Nähe seinen Standort auf der Karte.",
         "not_hosting": "Right Now",
-        "view_grid": "Grid"
+        "view_grid": "Grid",
+        "chat_request": {
+            "text": "Möchte sich wegen deines Right-Now-Posts melden.",
+            "accept": "Annehmen",
+            "reject": "Ablehnen",
+            "status_accepted": "Angenommen – der Chat ist offen",
+            "status_rejected": "Abgelehnt (bleibt für die Person unsichtbar)",
+            "status_expired": "Abgelaufen – dein Post ist beendet"
+        }
     },
     "right_now_filters": {
         "title": "Right now Filter",
@@ -3783,7 +3791,9 @@
         "right_now_request_notification_body": "{{arg1}}-Anfrage erhalten",
         "right_now_request_approved_notification_body": "{{arg1}}-Anfrage angenommen",
         "coupon_auto_applied_title": "Glückwunsch",
-        "coupon_auto_applied_body": "Ein Gratismonat {{arg1}} gehört dir"
+        "coupon_auto_applied_body": "Ein Gratismonat {{arg1}} gehört dir",
+        "chat_profile_link_request_notification_body": "Möchte eure Profile verlinken",
+        "chat_profile_link_accepted_notification_body": "Hat die Verlinkung bestätigt"
     },
     "version_announcement": {
         "title": "Neu in Free Grind",
@@ -3947,5 +3957,76 @@
         "system_left": "Du hast die Gruppe verlassen",
         "invite_thread_hint": "Tritt bei, um neue Nachrichten zu sehen und in der Gruppe zu schreiben. Ältere Nachrichten bleiben verborgen.",
         "invited_section": "Eingeladen"
+    },
+    "profile_network": {
+        "linked_profiles": "Verlinkte Profile",
+        "manage": "Verwalten",
+        "reputation": "Reputation",
+        "your_reputation": "Deine Reputation",
+        "level": {
+            "0": "Noch nicht bestätigt",
+            "1": "Wenig bestätigt",
+            "2": "Bestätigt",
+            "3": "Gut bestätigt",
+            "4": "Sehr gut bestätigt",
+            "5": "Bestens bestätigt"
+        },
+        "known_by_one": "Persönlich bekannt bei {{count}} Profil",
+        "known_by_other": "Persönlich bekannt bei {{count}} Profilen",
+        "known_by_none": "Noch von niemandem als persönlich bekannt markiert",
+        "known_by_vouched_one": "Davon ist {{count}} selbst persönlich bekannt",
+        "known_by_vouched_other": "Davon sind {{count}} selbst persönlich bekannt",
+        "request_link": "Mit meinem Profil verlinken",
+        "request_pending": "Verlinkungsanfrage gesendet",
+        "withdraw": "Zurückziehen",
+        "accept": "Annehmen",
+        "decline": "Ablehnen",
+        "unlink": "Verlinkung entfernen",
+        "unlink_short": "Entfernen",
+        "unlink_confirm_title": "Verlinkung entfernen?",
+        "unlink_confirm_message": "Die Verlinkung mit {{name}} verschwindet aus beiden Profilen.",
+        "open_requests_one": "{{count}} offene Verlinkungsanfrage",
+        "open_requests_other": "{{count}} offene Verlinkungsanfragen",
+        "request_sent_toast": "Verlinkungsanfrage gesendet",
+        "linked_toast": "Profile verlinkt",
+        "page_title": "Verlinkte Profile",
+        "page_subtitle": "Bestätige Anfragen und verwalte, welche Profile in deinem Profil verlinkt sind.",
+        "settings_desc": "Verlinkungen, Anfragen und deine Reputation verwalten.",
+        "refreshing": "Wird aktualisiert…",
+        "requests": "Anfragen",
+        "wants_to_link": "Möchte mit dir verlinkt werden",
+        "linked_count": "Verlinkt ({{count}}/{{max}})",
+        "linked_since": "Verlinkt seit {{date}}",
+        "sent": "Gesendet",
+        "empty": "Keine verlinkten Profile",
+        "empty_hint": "Öffne ein Profil und wähle im Menü (⋮) „Mit meinem Profil verlinken“. Sobald die Person bestätigt, erscheint die Verlinkung in beiden Profilen.",
+        "how_to_link": "Neue Verlinkungen fragst du im Menü (⋮) des jeweiligen Profils an. Verlinkte Profile sind für alle sichtbar, offene Anfragen nur für euch beide.",
+        "errors": {
+            "load_failed": "Laden fehlgeschlagen",
+            "link_failed": "Verlinkung konnte nicht geändert werden",
+            "known_failed": "„Persönlich bekannt“ konnte nicht gespeichert werden"
+        },
+        "level_line": "{{level}} · Index {{score}}",
+        "mark_known": "Persönlich bekannt",
+        "unmark_known": "Nicht mehr persönlich bekannt",
+        "marked_known_toast": "{{name}} als persönlich bekannt markiert",
+        "unmarked_known_toast": "Markierung „persönlich bekannt“ entfernt",
+        "withdraw_request": "Verlinkungsanfrage zurückziehen",
+        "accept_request": "Verlinkung annehmen",
+        "decline_request": "Verlinkung ablehnen",
+        "chat": {
+            "title": "Verlinkungsanfrage",
+            "request_mine": "Du möchtest eure Profile verlinken.",
+            "request_theirs": "Möchte eure Profile verlinken.",
+            "status_waiting": "Wartet auf Bestätigung",
+            "status_accepted": "Angenommen – eure Profile sind verlinkt",
+            "status_declined": "Abgelehnt",
+            "status_withdrawn": "Zurückgezogen",
+            "event_accepted_mine": "Du hast die Verlinkung bestätigt",
+            "event_accepted_theirs": "Verlinkung bestätigt – eure Profile sind verlinkt",
+            "preview_request": "Verlinkungsanfrage",
+            "preview_accepted": "Verlinkung bestätigt",
+            "badge": "Verlinkung"
+        }
     }
 }

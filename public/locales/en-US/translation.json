@@ -548,7 +548,15 @@
     "map_you": "You",
     "map_no_positions": "Nobody nearby is sharing their location on the map right now.",
     "not_hosting": "Right Now",
-    "view_grid": "Grid"
+    "view_grid": "Grid",
+    "chat_request": {
+      "text": "Wants to connect about your Right Now post.",
+      "accept": "Accept",
+      "reject": "Decline",
+      "status_accepted": "Accepted – the chat is open",
+      "status_rejected": "Declined (they won't be told)",
+      "status_expired": "Expired – your post has ended"
+    }
   },
   "right_now_filters": {
     "title": "Right Now Filters",
@@ -3781,7 +3789,9 @@
     "right_now_request_notification_body": "{{arg1}} request received",
     "right_now_request_approved_notification_body": "{{arg1}} request accepted",
     "coupon_auto_applied_title": "Congratulations",
-    "coupon_auto_applied_body": "A free month of {{arg1}} is yours"
+    "coupon_auto_applied_body": "A free month of {{arg1}} is yours",
+    "chat_profile_link_request_notification_body": "Wants to link profiles with you",
+    "chat_profile_link_accepted_notification_body": "Confirmed the profile link"
   },
   "version_announcement": {
     "title": "What's new in Free Grind",
@@ -3945,5 +3955,76 @@
     "system_left": "You left the group",
     "invite_thread_hint": "Join to see new messages and write in the group. Earlier messages stay hidden.",
     "invited_section": "Invited"
+  },
+  "profile_network": {
+    "linked_profiles": "Linked profiles",
+    "manage": "Manage",
+    "reputation": "Reputation",
+    "your_reputation": "Your reputation",
+    "level": {
+      "0": "Not confirmed yet",
+      "1": "Slightly confirmed",
+      "2": "Confirmed",
+      "3": "Well confirmed",
+      "4": "Very well confirmed",
+      "5": "Highly confirmed"
+    },
+    "known_by_one": "Personally known by {{count}} profile",
+    "known_by_other": "Personally known by {{count}} profiles",
+    "known_by_none": "Not marked as personally known by anyone yet",
+    "known_by_vouched_one": "{{count}} of them is personally known by others",
+    "known_by_vouched_other": "{{count}} of them are personally known by others",
+    "request_link": "Link with my profile",
+    "request_pending": "Link request sent",
+    "withdraw": "Withdraw",
+    "accept": "Accept",
+    "decline": "Decline",
+    "unlink": "Remove link",
+    "unlink_short": "Remove",
+    "unlink_confirm_title": "Remove link?",
+    "unlink_confirm_message": "The link with {{name}} disappears from both profiles.",
+    "open_requests_one": "{{count}} open link request",
+    "open_requests_other": "{{count}} open link requests",
+    "request_sent_toast": "Link request sent",
+    "linked_toast": "Profiles linked",
+    "page_title": "Linked profiles",
+    "page_subtitle": "Confirm requests and manage which profiles are linked on your profile.",
+    "settings_desc": "Manage links, requests and your reputation.",
+    "refreshing": "Refreshing…",
+    "requests": "Requests",
+    "wants_to_link": "Wants to link with you",
+    "linked_count": "Linked ({{count}}/{{max}})",
+    "linked_since": "Linked since {{date}}",
+    "sent": "Sent",
+    "empty": "No linked profiles",
+    "empty_hint": "Open a profile and choose “Link with my profile” in its menu (⋮). Once they confirm, the link shows on both profiles.",
+    "how_to_link": "You request new links from the other profile's menu (⋮). Linked profiles are visible to everyone, open requests only to the two of you.",
+    "errors": {
+      "load_failed": "Loading failed",
+      "link_failed": "Couldn't change the link",
+      "known_failed": "Couldn't save “personally known”"
+    },
+    "level_line": "{{level}} · index {{score}}",
+    "mark_known": "Personally known",
+    "unmark_known": "No longer personally known",
+    "marked_known_toast": "Marked {{name}} as personally known",
+    "unmarked_known_toast": "Removed “personally known”",
+    "withdraw_request": "Withdraw link request",
+    "accept_request": "Accept link",
+    "decline_request": "Decline link",
+    "chat": {
+      "title": "Link request",
+      "request_mine": "You'd like to link your profiles.",
+      "request_theirs": "Wants to link your profiles.",
+      "status_waiting": "Waiting for confirmation",
+      "status_accepted": "Accepted – your profiles are linked",
+      "status_declined": "Declined",
+      "status_withdrawn": "Withdrawn",
+      "event_accepted_mine": "You confirmed the link",
+      "event_accepted_theirs": "Link confirmed – your profiles are linked",
+      "preview_request": "Link request",
+      "preview_accepted": "Link confirmed",
+      "badge": "Profile link"
+    }
   }
 }

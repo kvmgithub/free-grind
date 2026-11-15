@@ -23,8 +23,11 @@ import {
 	QrCode,
 	TriangleAlert,
 	ExternalLink,
+	Link2,
 } from "lucide-react";
 import { RELEASES_URL } from "../../config/links-config";
+import { useProfileReputationEnabled } from "../../hooks/queries/useReputationQueries";
+import { LINKED_PROFILES_PATH } from "./profile-network/ProfileNetworkSection";
 import { REPO_DISPLAY_NAME, showRepoMovedInSettings, useNewRepoHasRelease } from "../../components/RepoMovedPrompt";
 import { SlidersHorizontal as PhosphorSlidersHorizontal } from "@phosphor-icons/react";
 import { ArchiveRestoreFilled, BellFilled, BotFilled, BugFilled, ClipboardListFilled, EyeOffFilled, HeartPulseFilled, InfoFilled, MegaphoneFilled, GlobeFilled, PaletteFilled, PuzzleFilled, ShieldFilled, UserPlusFilled, UserXFilled, ZapFilled } from "../../components/icons/FilledIcons";
@@ -286,6 +289,7 @@ export function SettingsPage() {
 	const { t } = useTranslation();
 	const { userId, savedAccounts, switchAccount, removeSavedAccount } = useAuth();
 	useSavedAccountProfiles();
+	const isProfileReputationOn = useProfileReputationEnabled();
 	// A Google/Facebook account's `email` is the vendor's id, often opaque:
 	// without a profile name, the profile id says more.
 	const accountName = (profileId: string, account: SavedAccountMeta | undefined, displayName: string | null | undefined) =>
@@ -917,6 +921,14 @@ export function SettingsPage() {
 										defaultValue: "See who you hid from the grid and unhide them anytime.",
 									}),
 								)}
+								{isProfileReputationOn &&
+									navRow(
+										() => navigate(LINKED_PROFILES_PATH),
+										<Link2 className="h-5 w-5" />,
+										"bg-emerald-500/15 text-emerald-400",
+										t("profile_network.page_title"),
+										t("profile_network.settings_desc"),
+									)}
 								{navRow(
 									() => navigate("/settings/block-history"),
 									<History className="h-5 w-5" />,

@@ -72,6 +72,7 @@ import { useAccountCreationLabel } from "../hooks/useAccountCreationLabel";
 import { OwnProfileEditPanel, type OwnPhotoControls } from "../../profile-editor/OwnProfileEditPanel";
 import { useCarouselSwipe } from "./useCarouselSwipe";
 import { ConfirmDialog } from "../../../../components/ui/confirm-dialog";
+import { useProfileNetworkMenu } from "../../profile-network/useProfileNetworkMenu";
 import { setCachedProfileDetail } from "../cache";
 import type { ChatContactIndexRecord } from "../../../../types/chat-contact-index";
 import { PhotoViewer, type HeroRect, type PhotoViewerMenuAction } from "../../../../components/PhotoViewer";
@@ -2108,6 +2109,22 @@ export function ProfileDetailsModal({
 			</button>
 		) : null;
 
+	// Personally known + profile links (Free Grind server, flag profile-reputation).
+	const profileNetworkMenu = useProfileNetworkMenu({
+		profileId: messageProfileId != null ? String(messageProfileId) : null,
+		profileName: activeProfileName,
+		available: !!activeProfile && !isOwnProfile && !isSnapshotProfile && !isBlocked && !isBlockedByOther,
+		closeMenu: () => setIsActionsMenuOpen(false),
+	});
+
+	// Its own block, right above report / block.
+	const profileNetworkMenuBlock = profileNetworkMenu.items ? (
+		<>
+			<div className="h-px shrink-0 bg-[var(--border)]" />
+			<div className="flex flex-col gap-1 px-2">{profileNetworkMenu.items}</div>
+		</>
+	) : null;
+
 	const [isReportDialogOpen, setIsReportDialogOpen] = useState(false);
 	const closeReportDialog = useCallback(() => setIsReportDialogOpen(false), []);
 
@@ -2772,6 +2789,7 @@ export function ProfileDetailsModal({
 										)}
 										</div>
 										)}
+										{profileNetworkMenuBlock}
 										{reportMenuItem}
 									</div>
 								)}
@@ -2973,6 +2991,7 @@ export function ProfileDetailsModal({
 				{encounterSheet}
 				{nicknamePrompt}
 				{reportDialog}
+				{profileNetworkMenu.dialog}
 				{discardEditsDialog}
 				<PromptDialog
 					isOpen={banBioPrompt !== null}
@@ -3247,6 +3266,7 @@ export function ProfileDetailsModal({
 														)}
 														</div>
 														)}
+														{profileNetworkMenuBlock}
 														{reportMenuItem}
 													</div>
 												)}
@@ -3360,6 +3380,7 @@ export function ProfileDetailsModal({
 			{encounterSheet}
 			{nicknamePrompt}
 			{reportDialog}
+			{profileNetworkMenu.dialog}
 			{discardEditsDialog}
 			<PromptDialog
 				isOpen={banBioPrompt !== null}

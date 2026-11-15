@@ -17,6 +17,7 @@ import { createExploreHeatmapMethods } from "./api/exploreHeatmapMethods";
 import { createSpotifyMethods } from "./api/spotifyMethods";
 import { createPushSettingsMethods } from "./api/pushSettingsMethods";
 import { createGroupMethods } from "./api/groupMethods";
+import { createReputationMethods } from "./api/reputationMethods";
 import type { RightNowFeedItem, RightNowDiscreetFeedItem, RightNowFeedEntry, RightNowCreatePostRequest, RightNowCreatePostMedia, RightNowUpdatePostRequest } from "../types/right-now";
 
 export {
@@ -55,6 +56,7 @@ export function createApiFunctions(fetchRest: RestFetcher, t: (key: string) => s
 		...createSpotifyMethods(fetchRest, t),
 		...createPushSettingsMethods(fetchRest, t),
 		...createGroupMethods(fetchRest, t),
+		...createReputationMethods(fetchRest, t),
 
 		async request(
 			path: string,

@@ -70,6 +70,8 @@ import { getConversation, getDisplayName } from "../services/conversationDirecto
 import { deleteConversationCascade, hasMessage, saveProfileSnapshot } from "../services/chatDb";
 import { GROUP_REMOVED_EVENT, type GroupRemovedDetail, applyGroupRealtimeEvent } from "../services/groupChatStore";
 import { isGroupConversationId } from "../utils/groupChat";
+import { PROFILE_LINK_EVENT } from "../services/api/reputationMethods";
+import { invalidateProfileLinks } from "../hooks/queries/useReputationQueries";
 import { runAutomationRulesForSender } from "../utils/automationRules";
 import { getTapEmoji } from "../pages/app/interest/interestUtils";
 import { looksLikeMessageUpdate } from "../utils/messageUpdates";
@@ -154,7 +156,7 @@ export const VIDEO_CALL_ENDED_EVENT = "fg:video-call-ended";
 // detail is Message[], already persisted to chatLog.
 export const CHAT_DYNAMIC_REFRESH_EVENT = "fg:chat-dynamic-refresh";
 
-const DYNAMIC_MESSAGE_TYPES = new Set(["Album", "ExpiringAlbum", "ExpiringAlbumV2"]);
+const DYNAMIC_MESSAGE_TYPES = new Set(["Album", "ExpiringAlbum", "ExpiringAlbumV2", "ProfileLinkRequest", "RightNowRequestIncoming"]);
 const REFRESH_BATCH_SIZE = 100;
 // Re-exported so existing importers (e.g. ChatPage.tsx) don't need to change
 // where they pull this from — conversationArchive.ts is now the source of
@@ -850,6 +852,14 @@ export function ChatRealtimeBridge() {
 							appLog.warn("[chat-ws:bridge] refresh_dynamic failed", error);
 						}
 					}
+				}
+
+				// Linked profiles (Free Grind server, flag profile-reputation): a link
+				// or request changed. Requests and confirmations arrive as chat
+				// messages (banner + push like any message); this only refreshes
+				// the profile sections and the links page.
+				if (envelope.type === PROFILE_LINK_EVENT) {
+					invalidateProfileLinks(queryClient);
 				}
 
 				// Group chats (Free Grind server): invites, changes, and being out of a group.
