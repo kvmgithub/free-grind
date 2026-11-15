@@ -1,6 +1,7 @@
 package dev.estopia.free_grind
 
 import android.app.Application
+import dev.estopia.free_grind.grindr.R
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager

@@ -174,17 +174,16 @@ class MainActivity : TauriActivity() {
   ) { result ->
     val requestId = pendingRecaptchaRequestId ?: return@registerForActivityResult
     pendingRecaptchaRequestId = null
-    val data = result.data
-    val token = data?.getStringExtra(RecaptchaMintActivity.EXTRA_TOKEN)?.trim().orEmpty()
+    val (rawToken, refusal, detail) = FlavorNative.recaptchaResult(result.data)
+    val token = rawToken?.trim().orEmpty()
     val outcome = JSONObject().put("requestId", requestId)
     if (result.resultCode == RESULT_OK && token.isNotEmpty()) {
       outcome.put("token", token)
     } else {
       // RecaptchaMintActivity names its refusal ("grindr-missing",
       // "mint-failed", ...); no marker means the user backed out.
-      val refusal = data?.getStringExtra(RecaptchaMintActivity.EXTRA_ERROR)
       outcome.put("error", if (refusal.isNullOrEmpty()) "cancelled" else refusal)
-      data?.getStringExtra(RecaptchaMintActivity.EXTRA_ERROR_DETAIL)?.let { outcome.put("detail", it) }
+      detail?.let { outcome.put("detail", it) }
     }
     dispatchRecaptchaResultToWebview(outcome.toString())
   }
@@ -702,16 +701,15 @@ class MainActivity : TauriActivity() {
      */
     @JavascriptInterface
     fun mintRecaptchaToken(action: String, requestId: String): String {
+      // Only the grindr flavor mints tokens (FlavorNative).
+      val intent = FlavorNative.recaptchaIntent(this@MainActivity, action) ?: return "unsupported"
       synchronized(this@MainActivity) {
         if (pendingRecaptchaRequestId != null) return "busy"
         pendingRecaptchaRequestId = requestId
       }
       runOnUiThread {
         try {
-          recaptchaLauncher.launch(
-            Intent(this@MainActivity, RecaptchaMintActivity::class.java)
-              .putExtra(RecaptchaMintActivity.EXTRA_ACTION, action)
-          )
+          recaptchaLauncher.launch(intent)
         } catch (e: Exception) {
           Log.e("Recaptcha", "Failed to launch RecaptchaMintActivity", e)
           pendingRecaptchaRequestId = null

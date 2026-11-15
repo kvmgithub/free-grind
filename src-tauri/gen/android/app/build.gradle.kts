@@ -132,6 +132,8 @@ android {
     }
     sourceSets.getByName("main") {
         res.srcDir(flavorDir.resolve("android/res"))
+        // FlavorNative: the flavor's own native parts (src/flavor-<flavor>).
+        java.srcDir("src/flavor-$flavorId/java")
     }
     buildTypes {
         getByName("debug") {
@@ -220,8 +222,8 @@ dependencies {
     implementation("androidx.core:core-splashscreen:1.0.1")
     implementation("com.google.android.material:material:1.12.0")
     implementation("com.google.firebase:firebase-messaging-ktx:24.1.2")
-    // Proprietary, see RecaptchaMint.java.
-    implementation("com.google.android.recaptcha:recaptcha:18.9.2")
+    // Grindr-only native parts (spoofed Firebase, reCAPTCHA minting).
+    if (flavorId == "grindr") implementation(project(":grindr"))
     // Google sign-in, see GoogleOAuthActivity.kt. ~85 MB of the APK; releases
     // ship arm64-v8a only (see release.yml).
     implementation("org.mozilla.geckoview:geckoview:152.0.20260629141727")

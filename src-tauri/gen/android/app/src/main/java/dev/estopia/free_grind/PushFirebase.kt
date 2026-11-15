@@ -22,18 +22,10 @@ object PushFirebase {
     fun initialize(context: Context) {
         if (initialized) return
         try {
-            val spoofed = SpoofedContext(context.applicationContext)
-            val options = FirebaseOptions.Builder()
-                .setApplicationId(context.getString(R.string.fcm_google_app_id))
-                .setProjectId(context.getString(R.string.fcm_project_id))
-                .setApiKey(context.getString(R.string.fcm_google_api_key))
-                .setGcmSenderId(context.getString(R.string.fcm_gcm_defaultSenderId))
-                .build()
-            if (FirebaseApp.getApps(spoofed).isEmpty()) {
-                FirebaseApp.initializeApp(spoofed, options)
-            }
-            initialized = true
-            Log.d(TAG, "Firebase initialized with spoofed context")
+            // The flavor's default FirebaseApp: Grindr's project in the grindr
+            // flavor, none in the server flavor (its push is selfHostedToken).
+            initialized = FlavorNative.initializeDefaultFirebase(context)
+            Log.d(TAG, if (initialized) "Default Firebase app initialized" else "No default Firebase app in this flavor")
         } catch (t: Throwable) {
             Log.e(TAG, "Firebase initialization failed; continuing without push", t)
         }
