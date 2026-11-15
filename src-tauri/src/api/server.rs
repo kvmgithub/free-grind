@@ -92,6 +92,31 @@ pub fn apply_flavor_server() {
         }
     }
     grindr::set_server_config(server);
+    // The server flavor's client sends its own version (grindr's own-identity);
+    // the grindr flavor's ignores this and keeps the official app's.
+    let (version, build) = client_version(env!("CARGO_PKG_VERSION"));
+    grindr::set_client_version(&version, &build);
+}
+
+/// `1.0.0-beta.53` → (`1.0.0`, `53`): the API's `User-Agent` wants dotted
+/// numbers and a numeric build; the build is the pre-release number, else 0.
+fn client_version(package_version: &str) -> (String, String) {
+    let (core, pre) = package_version.split_once('-').unwrap_or((package_version, ""));
+    let core = core.split('+').next().unwrap_or(core);
+    let build: String = pre.rsplit('.').next().filter(|n| n.chars().all(|c| c.is_ascii_digit()) && !n.is_empty()).unwrap_or("0").to_owned();
+    (core.to_owned(), build)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::client_version;
+
+    #[test]
+    fn client_version_fits_the_user_agent_format() {
+        assert_eq!(client_version("1.0.0-beta.53"), ("1.0.0".to_owned(), "53".to_owned()));
+        assert_eq!(client_version("1.2.3"), ("1.2.3".to_owned(), "0".to_owned()));
+        assert_eq!(client_version("2.0.0-rc"), ("2.0.0".to_owned(), "0".to_owned()));
+    }
 }
 
 /// Firebase client config of the Free Grind server's own project (push on

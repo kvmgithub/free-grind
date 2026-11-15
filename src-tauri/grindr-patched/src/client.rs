@@ -1,3 +1,6 @@
+// With own-identity, the okhttp fingerprint below goes unused.
+#![cfg_attr(feature = "own-identity", allow(dead_code))]
+
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
@@ -182,8 +185,11 @@ pub(crate) struct ClientSetup {
 
 /// Shared `wreq` setup: the emulation profile plus gzip-only encoding.
 fn grindr_client_builder() -> wreq::ClientBuilder {
-	Client::builder()
-		.emulation(grindr_emulation())
+	let builder = Client::builder();
+	// Own identity: plain TLS and HTTP/2, no imitated okhttp fingerprint.
+	#[cfg(not(feature = "own-identity"))]
+	let builder = builder.emulation(grindr_emulation());
+	builder
 		.gzip(true)
 		.no_deflate()
 		.no_brotli()
@@ -230,8 +236,10 @@ pub(crate) fn build_media_client(
 
 fn build_ws_client() -> Result<Client, GrindrError> {
 	// Websocket endpoint is http/1.1
-	grindr_client_builder()
-		.emulation(grindr_ws_emulation())
+	let builder = grindr_client_builder();
+	#[cfg(not(feature = "own-identity"))]
+	let builder = builder.emulation(grindr_ws_emulation());
+	builder
 		.http1_only()
 		.build()
 		.map_err(Into::into)

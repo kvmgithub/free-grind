@@ -1,3 +1,6 @@
+// With own-identity, the imitated identity constants below go unused.
+#![cfg_attr(feature = "own-identity", allow(dead_code))]
+
 use wreq::header::{HeaderName, HeaderValue};
 
 use crate::device::DeviceInfo;
@@ -16,14 +19,17 @@ const MEDIA_ACCEPT: &str = "image/webp,image/*;q=0.8";
 
 /// Builds the `User-Agent` the app sends, e.g.
 /// `grindr3/26.24.0.195444;195444;Free;Android 14;Pixel 8;Google`.
+/// With `own-identity`, the version is the embedding app's own
+/// (see [`crate::identity`]).
 ///
 /// `subscription_tier` is usually `"Free"`.
 pub fn build_user_agent(
 	device: &DeviceInfo,
 	subscription_tier: &str,
 ) -> String {
+	let (version, build) = crate::identity::client_version();
 	format!(
-		"grindr3/{APP_VERSION};{BUILD_NUMBER};{subscription_tier};{};{};{}",
+		"grindr3/{version};{build};{subscription_tier};{};{};{}",
 		device.os, device.device_model, device.manufacturer
 	)
 }
@@ -39,6 +45,10 @@ const VM_VERSION: &str = "2.1.0";
 ///
 /// References <https://opengrind.org/grindr-api/media#cdn-request-headers>
 pub fn build_platform_user_agent(device: &DeviceInfo) -> String {
+	// Own identity: no imitated platform HTTP stack, the app's own agent.
+	#[cfg(feature = "own-identity")]
+	return build_user_agent(device, "Free");
+	#[cfg(not(feature = "own-identity"))]
 	format!(
 		"Dalvik/{VM_VERSION} (Linux; U; {}; {} Build/{})",
 		device.os, device.device_model, device.build_id
@@ -174,13 +184,14 @@ impl GrindrHeaders {
 
 	/// Build the header set a plain OkHttp client sends.
 	pub fn build_plain(range: Option<&str>) -> Result<Self, GrindrError> {
-		let items = vec![
-			range_or_gzip(range)?,
-			(
-				HeaderName::from_static("user-agent"),
-				HeaderValue::from_static(OKHTTP_USER_AGENT),
-			),
-		];
+		#[allow(unused_mut)]
+		let mut items = vec![range_or_gzip(range)?];
+		// Own identity: no imitated OkHttp `User-Agent`.
+		#[cfg(not(feature = "own-identity"))]
+		items.push((
+			HeaderName::from_static("user-agent"),
+			HeaderValue::from_static(OKHTTP_USER_AGENT),
+		));
 		Ok(Self { items })
 	}
 
@@ -233,6 +244,7 @@ mod tests {
 		}
 	}
 
+	#[cfg(not(feature = "own-identity"))] // checks the imitated identity
 	#[test]
 	fn user_agent_format() {
 		let device = test_device();
@@ -243,6 +255,7 @@ mod tests {
         );
 	}
 
+	#[cfg(not(feature = "own-identity"))] // checks the imitated identity
 	#[test]
 	fn platform_user_agent_format() {
 		assert_eq!(

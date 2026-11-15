@@ -33,7 +33,9 @@ custom-protocol = ["tauri/custom-protocol"]
 # App flavor (see scripts/flavor.mjs). Without it the app talks to Grindr's
 # servers; with it only to the Free Grind server (FG_API_URL / FG_MEDIA_URL
 # required). Set by scripts/flavor-config.mjs (build.features) for FG_FLAVOR=server.
-flavor-server = []
+# The grindr crate then identifies honestly (own-identity: own version, real
+# platform, no imitated Android device or okhttp fingerprint).
+flavor-server = ["grindr/own-identity"]
 
 [dependencies]
 # custom-protocol is removed from here and moved to [features].

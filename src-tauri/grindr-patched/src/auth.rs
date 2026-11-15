@@ -1153,6 +1153,7 @@ mod tests {
 			token: "fcm",
 			opt_in: false,
 			session_id: None,
+			invite_code: None,
 		};
 		assert_eq!(
 			serde_json::to_string(&body).unwrap(),

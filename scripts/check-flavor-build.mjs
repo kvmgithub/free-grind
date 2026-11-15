@@ -19,7 +19,11 @@ const FRONTEND_MARKERS = [
 	// reCAPTCHA minting (src/services/recaptcha.ts)
 	"mintRecaptchaToken", "fg:recaptcha-result", "recaptcha_first_party_enabled",
 ];
-const BINARY_MARKERS = ["honduras-hold.data", "[entitlements]"];
+const BINARY_MARKERS = [
+	"honduras-hold.data", "[entitlements]",
+	// The imitated official client (grindr-patched without own-identity).
+	"okhttp/5.5.1", "Dalvik/",
+];
 
 if (flavorId() === "grindr") {
 	console.log("check-flavor-build: grindr flavor, nothing to check");
