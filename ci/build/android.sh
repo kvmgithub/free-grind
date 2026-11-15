@@ -30,8 +30,8 @@ cp ci/build/android/network_security_config.xml "$nsc"
 export GRADLE_USER_HOME=/root/.gradle
 
 # Free Grind server (optional): FG_API_URL / FG_MEDIA_URL / FG_RTC_URL, see
-# scripts/free-grind-config.mjs. Unset → the build has no Free Grind server.
-TAURI_CONFIG="$(bun scripts/free-grind-config.mjs)"
+# scripts/flavor-config.mjs. Unset → the build has no Free Grind server.
+TAURI_CONFIG="$(bun scripts/flavor-config.mjs android)"
 export TAURI_CONFIG
 
 bunx tauri android init --ci --skip-targets-install

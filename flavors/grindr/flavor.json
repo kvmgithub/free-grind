@@ -1,0 +1,24 @@
+{
+	"$comment": "App identity of the Grindr flavor (FG_FLAVOR=grindr, the default). Read by scripts/flavor.mjs. These values are the ones the app shipped with before flavors existed; changing identifier or android.applicationId turns the app into a different one (no in-place update, separate data).",
+	"id": "grindr",
+	"appName": "Free Grind",
+	"appSlug": "free-grind",
+	"identifier": "dev.estopia.free-grind",
+	"userAgent": "FreeGrind/1.0.0 (+https://freegrind.imaoreo.dev/; contact: support@imaoreo.dev)",
+	"github": "fdev8975/free-grind",
+	"websiteUrl": "https://fdev8975.github.io/free-grind/",
+	"ota": {
+		"endpoint": "https://freegrind-ota-{{channel}}.surge.sh/latest.json",
+		"pubkey": "RWQfowNcYziP1BnTEyNrdZk2MymsuGVoCeqqtGE3OfpYfLqnvAvCS9JX"
+	},
+	"android": {
+		"applicationId": "dev.estopia.free_grind"
+	},
+	"ios": {
+		"bundleId": "dev.estopia.free-grind"
+	},
+	"windows": {
+		"$comment": "Tauri derives the default from productName; pinned so a rename doesn't break MSI upgrades (`bunx tauri inspect wix-upgrade-code`).",
+		"wixUpgradeCode": "df3b8f26-c7a0-52d8-9927-ff5599ce35d7"
+	}
+}

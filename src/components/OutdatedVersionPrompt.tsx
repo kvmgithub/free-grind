@@ -11,7 +11,7 @@ import { areUpdateChecksEnabled } from "../services/updateChecks";
 import { formatRelativeTime } from "../utils/relativeTime";
 import { VersionCompare } from "./ui/version-compare";
 import { VersionChangesLink } from "./VersionChangesSheet";
-import { RELEASES_URL } from "../config/links-config";
+import { RELEASES_URL, REPO_API_URL } from "../config/links-config";
 
 const DEFAULT_RELEASES_URL = RELEASES_URL;
 // Used when the release lookup fails: assume the running version is current,
@@ -79,9 +79,9 @@ function buildDismissStorageKey(appVersion: string): string {
 
 /**
  * The main app's APK (arm64-v8a only) is published as
- * `free-grind-v<version>.apk`. Prefers the exact name for this release, then
- * any `free-grind-v<x.y.z[-pre]>.apk` — never some other `.apk` that might
- * get attached to a release later.
+ * `<slug>-v<version>.apk` (slug of the app flavor, e.g. `free-grind`). Prefers
+ * the exact name for this release, then any `<slug>-v<x.y.z[-pre]>.apk` —
+ * never some other `.apk` that might get attached to a release later.
  */
 function pickApkAsset(
     assets: { name?: string; browser_download_url?: string }[],
@@ -91,10 +91,14 @@ function pickApkAsset(
         (asset): asset is { name: string; browser_download_url: string } =>
             typeof asset.name === "string" && typeof asset.browser_download_url === "string",
     );
-    const exact = usable.find((asset) => asset.name === `free-grind-v${version}.apk`);
+    const exact = usable.find((asset) => asset.name === `${__APP_SLUG__}-v${version}.apk`);
     if (exact) return exact.browser_download_url;
-    return usable.find((asset) => /^free-grind-v\d+(\.\d+)*(-[0-9A-Za-z.-]+)?\.apk$/.test(asset.name))
-        ?.browser_download_url;
+    const prefix = `${__APP_SLUG__}-v`;
+    return usable.find(
+        (asset) =>
+            asset.name.startsWith(prefix) &&
+            /^\d+(\.\d+)*(-[0-9A-Za-z.-]+)?\.apk$/.test(asset.name.slice(prefix.length)),
+    )?.browser_download_url;
 }
 
 type GitHubRelease = {
@@ -106,9 +110,9 @@ type GitHubRelease = {
     assets?: { name?: string; browser_download_url?: string }[];
 };
 
-/** Release names look like `Free Grind v1.0.0-beta.0 (abc1234)`. */
+/** Release names look like `<App Name> v1.0.0-beta.0 (abc1234)`; the app name may have any number of words. */
 function parseReleaseVersion(release: GitHubRelease): string | null {
-    const raw = release.name?.split(" ")[2];
+    const raw = release.name?.match(/(?:^|\s)(v\d\S*)/)?.[1];
     if (!raw) return null;
     const version = normalizeVersion(raw);
     return semver.valid(version) ? version : null;
@@ -125,7 +129,7 @@ function parseReleaseCommit(release: GitHubRelease): string | undefined {
  */
 export async function fetchLatestRelease(signal: AbortSignal, includePrerelease: boolean): Promise<ReleaseInfo> {
     const response = await fetch(
-        "https://api.github.com/repos/fdev8975/free-grind/releases?per_page=30",
+        `${REPO_API_URL}/releases?per_page=30`,
         {
             headers: {
                 Accept: "application/vnd.github+json",

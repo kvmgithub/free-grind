@@ -92,15 +92,15 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Free Grind server config
-        # CSP (LiveKit host) and HTTP scope (media host) for the Free Grind
-        # server, read by the Tauri CLI from TAURI_CONFIG. The Rust side reads
+        # App identity (flavor manifest) plus CSP (LiveKit host) and HTTP scope
+        # (media host) for the Free Grind server, read by the Tauri CLI from TAURI_CONFIG. The Rust side reads
         # the FG_* variables directly at compile time.
         shell: bash
         run: |
           for v in FG_API_URL FG_MEDIA_URL FG_RTC_URL FG_FCM_PROJECT_ID FG_FCM_APP_ID FG_FCM_SENDER_ID FG_FCM_API_KEY; do
             if [ -n "${!v}" ]; then echo "$v: set"; else echo "$v: not set"; fi
           done
-          echo "TAURI_CONFIG=$(bun scripts/free-grind-config.mjs)" >> "$GITHUB_ENV"
+          echo "TAURI_CONFIG=$(bun scripts/flavor-config.mjs)" >> "$GITHUB_ENV"
 
       - name: Build desktop artifacts
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
@@ -185,15 +185,15 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Free Grind server config
-        # CSP (LiveKit host) and HTTP scope (media host) for the Free Grind
-        # server, read by the Tauri CLI from TAURI_CONFIG. The Rust side reads
+        # App identity (flavor manifest) plus CSP (LiveKit host) and HTTP scope
+        # (media host) for the Free Grind server, read by the Tauri CLI from TAURI_CONFIG. The Rust side reads
         # the FG_* variables directly at compile time.
         shell: bash
         run: |
           for v in FG_API_URL FG_MEDIA_URL FG_RTC_URL FG_FCM_PROJECT_ID FG_FCM_APP_ID FG_FCM_SENDER_ID FG_FCM_API_KEY; do
             if [ -n "${!v}" ]; then echo "$v: set"; else echo "$v: not set"; fi
           done
-          echo "TAURI_CONFIG=$(bun scripts/free-grind-config.mjs)" >> "$GITHUB_ENV"
+          echo "TAURI_CONFIG=$(bun scripts/flavor-config.mjs android)" >> "$GITHUB_ENV"
 
       - name: Initialize Android project
         run: bunx tauri android init --ci --skip-targets-install

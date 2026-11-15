@@ -4,6 +4,7 @@ import tailwindcss from "@tailwindcss/vite";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { loadFlavor } from "./scripts/flavor.mjs";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
@@ -23,6 +24,9 @@ function shortCommitHash() {
 }
 const commitHash = shortCommitHash();
 
+// App identity of the flavor being built (FG_FLAVOR, default grindr).
+const flavor = loadFlavor();
+
 // https://vite.dev/config/
 export default defineConfig(async () => ({
 	plugins: [react(), tailwindcss()],
@@ -32,6 +36,12 @@ export default defineConfig(async () => ({
 	define: {
 		"import.meta.env.VITE_APP_VERSION": JSON.stringify(appVersion),
 		"import.meta.env.VITE_COMMIT_HASH": JSON.stringify(commitHash),
+		__FLAVOR__: JSON.stringify(flavor.id),
+		__APP_NAME__: JSON.stringify(flavor.appName),
+		__APP_SLUG__: JSON.stringify(flavor.appSlug),
+		__GITHUB_REPO__: JSON.stringify(flavor.github),
+		__REPO_URL__: JSON.stringify(flavor.repoUrl),
+		__WEBSITE_URL__: JSON.stringify(flavor.websiteUrl),
 	},
 	build: {
 		outDir: "dist",

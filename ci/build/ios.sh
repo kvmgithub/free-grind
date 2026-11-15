@@ -72,8 +72,8 @@ bun install --frozen-lockfile
 bun run build
 
 # Free Grind server (optional): FG_API_URL / FG_MEDIA_URL / FG_RTC_URL, see
-# scripts/free-grind-config.mjs. Unset → the build has no Free Grind server.
-TAURI_CONFIG="$(bun scripts/free-grind-config.mjs)"
+# scripts/flavor-config.mjs. Unset → the build has no Free Grind server.
+TAURI_CONFIG="$(bun scripts/flavor-config.mjs ios)"
 export TAURI_CONFIG
 
 # `tauri ios init` regenerates gen/apple from Tauri's templates, which drops

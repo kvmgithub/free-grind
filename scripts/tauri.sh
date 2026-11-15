@@ -32,7 +32,13 @@ fi
 #   FG_FCM_PROJECT_ID / FG_FCM_APP_ID / FG_FCM_API_KEY / FG_FCM_SENDER_ID
 #                Firebase client config for Free Grind push (Rust, api/server.rs)
 #   FG_CA_CERT   extra root CA, test builds only (server/LOCAL-TLS.md)
-TAURI_CONFIG="$(bun scripts/free-grind-config.mjs)"
+# App identity (name, IDs, OTA) comes from the flavor manifest selected by
+# FG_FLAVOR (default grindr, see scripts/flavor.mjs).
+case "${1:-}" in
+  android|ios) target="$1" ;;
+  *) target="" ;; # desktop: the host OS
+esac
+TAURI_CONFIG="$(bun scripts/flavor-config.mjs $target)"
 export TAURI_CONFIG
 
 exec bunx tauri "$@"

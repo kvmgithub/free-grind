@@ -17,8 +17,8 @@ target="$CARGO_TARGET_DIR/release"
 rm -rf "$target/bundle" "$out/linux"
 mkdir -p "$out/linux"
 # Free Grind server (optional): FG_API_URL / FG_MEDIA_URL / FG_RTC_URL, see
-# scripts/free-grind-config.mjs. Unset → the build has no Free Grind server.
-TAURI_CONFIG="$(bun scripts/free-grind-config.mjs)"
+# scripts/flavor-config.mjs. Unset → the build has no Free Grind server.
+TAURI_CONFIG="$(bun scripts/flavor-config.mjs linux)"
 export TAURI_CONFIG
 
 bunx tauri build --bundles deb

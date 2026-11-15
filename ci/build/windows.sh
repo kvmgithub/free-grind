@@ -20,8 +20,8 @@ target="$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release"
 rm -rf "$target/bundle" "$out/windows"
 mkdir -p "$out/windows"
 # Free Grind server (optional): FG_API_URL / FG_MEDIA_URL / FG_RTC_URL, see
-# scripts/free-grind-config.mjs. Unset → the build has no Free Grind server.
-TAURI_CONFIG="$(bun scripts/free-grind-config.mjs)"
+# scripts/flavor-config.mjs. Unset → the build has no Free Grind server.
+TAURI_CONFIG="$(bun scripts/flavor-config.mjs windows)"
 export TAURI_CONFIG
 
 bunx tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis
