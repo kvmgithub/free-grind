@@ -73,7 +73,8 @@ import { Avatar } from "../../components/ui/avatar";
 import { getSavedAccountProfile, getSavedAccountThumbUrl, removeSavedAccountProfile, useSavedAccountProfiles } from "../../services/savedAccountProfiles";
 import { useSettingsSearchIndex } from "../../data/settingsSearchIndex";
 import { isSexualHealthEnabled } from "../../utils/optionalFeatures";
-import { GITHUB_ISSUES_URL, GITHUB_NEW_ISSUE_URL, openExternalUrl } from "../../utils/githubIssues";
+import { openExternalUrl } from "../../utils/externalUrl";
+import { ISSUES_URL, NEW_ISSUE_URL } from "../../config/links-config";
 import { SheetClose, SheetCloseButton, SHEET_FOOTER_CLASS, sheetButtonClass } from "../../components/ui/bottom-sheet";
 
 /**
@@ -1102,7 +1103,7 @@ export function SettingsPage() {
 									iconClass="bg-amber-500/15 text-amber-400"
 									label={t("settings.update_checks", { defaultValue: "Check Automatically" })}
 									description={t("settings.update_checks_desc", {
-										defaultValue: "Looks for new app and frontend versions on GitHub at every app start. When off, no request is sent to GitHub unless you check manually above.",
+										defaultValue: "Looks for new app and frontend versions on {{forge}} at every app start. When off, no request is sent to {{forge}} unless you check manually above.",
 									})}
 								/>
 								{updateChecksEnabled && (
@@ -1113,7 +1114,7 @@ export function SettingsPage() {
 										iconClass="bg-sky-500/15 text-sky-400"
 										label={t("settings.auto_update", { defaultValue: "Install Automatically" })}
 										description={t("settings.auto_update_desc", {
-											defaultValue: "Installs new frontend versions (OTA) from GitHub Actions right away and reloads the app. When off, you'll be asked first.",
+											defaultValue: "Installs new frontend versions (OTA) from {{ci}} right away and reloads the app. When off, you'll be asked first.",
 										})}
 									/>
 								)}
@@ -1165,14 +1166,14 @@ export function SettingsPage() {
 									t("settings.about_desc"),
 								)}
 								{navRow(
-									() => void openExternalUrl(GITHUB_ISSUES_URL),
+									() => void openExternalUrl(ISSUES_URL),
 									<ClipboardListFilled className="h-5 w-5" />,
 									"bg-orange-500/15 text-orange-400",
 									t("settings.issue_board"),
 									t("settings.issue_board_desc"),
 								)}
 								{navRow(
-									() => void openExternalUrl(GITHUB_NEW_ISSUE_URL),
+									() => void openExternalUrl(NEW_ISSUE_URL),
 									<BugFilled className="h-5 w-5" />,
 									"bg-rose-500/15 text-rose-400",
 									t("settings.report_issue"),

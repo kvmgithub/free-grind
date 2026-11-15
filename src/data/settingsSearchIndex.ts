@@ -58,7 +58,7 @@ import {
 	type LucideIcon,
 } from "lucide-react";
 import { useDesktopBreakpoint } from "../hooks/useDesktopBreakpoint";
-import { GITHUB_ISSUES_URL, GITHUB_NEW_ISSUE_URL } from "../utils/githubIssues";
+import { ISSUES_URL, NEW_ISSUE_URL } from "../config/links-config";
 import { useMemo } from "react";
 import { RightNowIcon } from "../components/icons/RightNowIcon";
 import { isSexualHealthEnabled } from "../utils/optionalFeatures";
@@ -955,7 +955,7 @@ export function useSettingsSearchIndex(): SettingsSearchEntry[] {
 		{
 			id: "nav-issues",
 			route: "/settings",
-			externalUrl: GITHUB_ISSUES_URL,
+			externalUrl: ISSUES_URL,
 			label: t("settings.issue_board"),
 			description: t("settings.issue_board_desc"),
 			section: t("settings.search_sections.about"),
@@ -965,7 +965,7 @@ export function useSettingsSearchIndex(): SettingsSearchEntry[] {
 		{
 			id: "nav-report-issue",
 			route: "/settings",
-			externalUrl: GITHUB_NEW_ISSUE_URL,
+			externalUrl: NEW_ISSUE_URL,
 			label: t("settings.report_issue"),
 			description: t("settings.report_issue_desc"),
 			section: t("settings.search_sections.about"),

@@ -1,3 +1,5 @@
+import java.net.URI
+import java.net.URLEncoder
 import java.util.Properties
 import javax.inject.Inject
 
@@ -95,12 +97,20 @@ val flavorDir = when (flavorId) {
 val flavorManifest = groovy.json.JsonSlurper().parse(flavorDir.resolve("flavor.json")) as Map<String, Any?>
 val flavorApplicationId = (flavorManifest["android"] as Map<String, Any?>)["applicationId"] as String
 val flavorAppSlug = flavorManifest["appSlug"] as String
-val flavorGithub = flavorManifest["github"] as String
+// Repository web URL, GitLab (also self-hosted) or GitHub, see scripts/flavor.mjs.
+val flavorRepoUrl = (flavorManifest["repository"] as String).trimEnd('/')
+val flavorRepoHost = URI(flavorRepoUrl).host
+val flavorRepoPath = URI(flavorRepoUrl).path.trim('/')
 // APKs the in-app updater may install: the flavor's own download location
-// (manifest updates.downloadUrl), or its GitHub releases.
+// (manifest updates.downloadUrl), else where its repository's release CI puts
+// them (GitLab: the project's generic package registry; GitHub: releases).
 @Suppress("UNCHECKED_CAST")
 val flavorDownloadUrl = ((flavorManifest["updates"] as Map<String, Any?>?)?.get("downloadUrl") as String?)
-    ?: "https://github.com/$flavorGithub/releases/download/"
+    ?: if (flavorRepoHost == "github.com") {
+        "https://github.com/$flavorRepoPath/releases/download/"
+    } else {
+        "https://$flavorRepoHost/api/v4/projects/${URLEncoder.encode(flavorRepoPath, "UTF-8")}/packages/generic/"
+    }
 
 // Without the keystore (ci/build/android.sh) the release APK comes out
 // unsigned; CI signs it once two independent builds produced the same bytes.

@@ -92,7 +92,8 @@ export default defineConfig(async () => ({
 		__APP_FOLDER__: JSON.stringify(flavor.folderName),
 		// Main binary name (Tauri default: the Cargo package name).
 		__APP_BINARY__: JSON.stringify(flavor.mainBinaryName ?? "free-grind"),
-		__GITHUB_REPO__: JSON.stringify(flavor.github),
+		__REPO_FORGE__: JSON.stringify(flavor.repoForge),
+		__REPO_API_URL__: JSON.stringify(flavor.repoApiUrl),
 		__REPO_URL__: JSON.stringify(flavor.repoUrl),
 		__WEBSITE_URL__: JSON.stringify(flavor.websiteUrl),
 		// Release feed and page when releases aren't on GitHub (manifest updates).

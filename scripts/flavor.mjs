@@ -17,7 +17,26 @@ const FLAVOR_DIRS = {
 	server: "server/app-flavor/",
 };
 
-const REQUIRED = ["appName", "appSlug", "folderName", "identifier", "userAgent", "github", "websiteUrl", "ota.endpoint", "ota.pubkey", "android.applicationId", "ios.bundleId"];
+const REQUIRED = ["appName", "appSlug", "folderName", "identifier", "userAgent", "repository", "websiteUrl", "ota.endpoint", "ota.pubkey", "android.applicationId", "ios.bundleId"];
+
+/**
+ * The source repository's web URL (GitLab, also self-hosted, or GitHub): its
+ * forge, path and API base, for the app's links, release lookups and commit
+ * comparisons.
+ */
+function repository(url, file) {
+	const m = /^https:\/\/([^/]+)\/([\w.-]+(?:\/[\w.-]+)+)\/?$/.exec(url);
+	if (!m) throw new Error(`${file}: repository must be the repository's https URL, e.g. https://gitlab.com/group/project`);
+	const [, host, path] = m;
+	const forge = host === "github.com" ? "github" : "gitlab";
+	return {
+		repoUrl: `https://${host}/${path}`,
+		repoForge: forge,
+		repoPath: path,
+		repoApiUrl:
+			forge === "github" ? `https://api.github.com/repos/${path}` : `https://${host}/api/v4/projects/${encodeURIComponent(path)}`,
+	};
+}
 
 function get(obj, path) {
 	return path.split(".").reduce((o, k) => (o && typeof o === "object" ? o[k] : undefined), obj);
@@ -50,6 +69,5 @@ export function loadFlavor(id = flavorId()) {
 	if (missing.length) throw new Error(`${fileURLToPath(file)}: missing ${missing.join(", ")}`);
 	if (flavor.id !== id) throw new Error(`${fileURLToPath(file)}: id is "${flavor.id}", expected "${id}"`);
 	if (!/^[a-z0-9-]+$/.test(flavor.appSlug)) throw new Error(`${fileURLToPath(file)}: appSlug must be lowercase letters, digits and dashes`);
-	if (!/^[\w.-]+\/[\w.-]+$/.test(flavor.github)) throw new Error(`${fileURLToPath(file)}: github must be "owner/repo"`);
-	return { ...flavor, repoUrl: `https://github.com/${flavor.github}` };
+	return { ...flavor, ...repository(flavor.repository, fileURLToPath(file)) };
 }

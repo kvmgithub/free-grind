@@ -7,8 +7,8 @@ import toast from "react-hot-toast";
 import { PageHeader } from "../../components/PageHeader";
 import { usePreferences } from "../../contexts/PreferencesContext";
 import { triggerSinModeUnlock } from "../../utils/sinModeEasterEgg";
-import { openExternalUrl } from "../../utils/githubIssues";
-import { DISCORD_URL, REPO_URL, TELEGRAM_URL, WEBSITE_URL } from "../../config/links-config";
+import { openExternalUrl } from "../../utils/externalUrl";
+import { DISCORD_URL, REPO_URL, TELEGRAM_URL, WEBSITE_URL, repoFileUrl } from "../../config/links-config";
 import logo from "../../images/freegrind-logo.webp";
 
 type AboutIcon = ComponentType<{ className?: string }>;
@@ -130,7 +130,7 @@ export function AboutPage() {
 							icon={Code2}
 							iconClass="bg-sky-500/15 text-sky-400"
 							label={t("about_page.highlights.open_source_title", { defaultValue: "Open source" })}
-							description={t("about_page.highlights.open_source_desc", { defaultValue: "All code is public on GitHub." })}
+							description={t("about_page.highlights.open_source_desc", { defaultValue: "All code is public on {{forge}}." })}
 						/>
 						<ProjectRow
 							icon={Ban}
@@ -197,7 +197,7 @@ export function AboutPage() {
 							label={t("about_page.resources.contributing_title")}
 							description={t("about_page.resources.contributing_desc")}
 							right={externalIcon}
-							onClick={() => void openExternalUrl(`${REPO_URL}/blob/main/CONTRIBUTING.md`)}
+							onClick={() => void openExternalUrl(repoFileUrl("CONTRIBUTING.md"))}
 						/>
 						<ProjectRow
 							icon={Scale}
@@ -210,7 +210,7 @@ export function AboutPage() {
 									{externalIcon}
 								</>
 							}
-							onClick={() => void openExternalUrl(`${REPO_URL}/blob/main/LICENSE`)}
+							onClick={() => void openExternalUrl(repoFileUrl("LICENSE"))}
 						/>
 					</div>
 				</div>

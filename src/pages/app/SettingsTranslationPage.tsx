@@ -27,7 +27,7 @@ import {
 	translateTexts,
 } from "../../utils/autoTranslate";
 import { cn } from "../../utils/cn";
-import { openExternalUrl } from "../../utils/githubIssues";
+import { openExternalUrl } from "../../utils/externalUrl";
 
 type SetupStep = { key: string; title: string; desc: string; url?: string; linkLabel?: string };
 

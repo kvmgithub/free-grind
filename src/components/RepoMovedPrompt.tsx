@@ -7,14 +7,15 @@ import { getVersion } from "@tauri-apps/api/app";
 import { ExternalLink, TriangleAlert } from "lucide-react";
 import { FullscreenPrompt, fullscreenPrimaryButtonClass, fullscreenSecondaryButtonClass } from "./FullscreenPrompt";
 import { isOlderVersion } from "./OutdatedVersionPrompt";
-import { RELEASES_URL, REPO_URL } from "../config/links-config";
-import { openExternalUrl } from "../utils/githubIssues";
+import { RELEASES_URL, REPO_URL, fetchReleases } from "../config/links-config";
+import { openExternalUrl } from "../utils/externalUrl";
 
 /**
- * First app release published from the new repository. Installed apps older
- * than this were built from the old one and have to be replaced by hand.
+ * First app release published from the new repository (GitLab, 2026-11). Installed
+ * apps older than this look for updates where the old one was and have to be
+ * replaced by hand; the hint reaches them over OTA.
  */
-const FIRST_VERSION_FROM_NEW_REPO = "1.0.0-beta.53";
+const FIRST_VERSION_FROM_NEW_REPO = "1.0.0-beta.54";
 
 /** Repository address without the scheme, for display. */
 export const REPO_DISPLAY_NAME = REPO_URL.replace(/^https:\/\//, "");
@@ -45,14 +46,8 @@ let releaseLookup: Promise<boolean> | null = null;
  * failed lookup counts as no release.
  */
 function hasPublishedRelease(): Promise<boolean> {
-	releaseLookup ??= fetch(`https://api.github.com/repos/${REPO_URL.replace(/^https:\/\/github\.com\//, "")}/releases?per_page=10`, {
-		headers: { Accept: "application/vnd.github+json" },
-	})
-		.then(async (response) => {
-			if (!response.ok) return false;
-			const releases = (await response.json()) as { draft?: boolean }[];
-			return Array.isArray(releases) && releases.some((release) => !release.draft);
-		})
+	releaseLookup ??= fetchReleases()
+		.then((releases) => releases.some((release) => !release.draft))
 		.catch(() => false);
 	return releaseLookup;
 }
