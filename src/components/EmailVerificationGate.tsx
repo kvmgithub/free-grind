@@ -8,7 +8,6 @@ import { useApi } from "../hooks/useApi";
 import { useLogoutToNextAccount } from "../hooks/useLogoutToNextAccount";
 import { useRefreshAssignments } from "./AssignmentsBridge";
 import { useFeatureFlag } from "../services/assignmentsStore";
-import { useServerInfo } from "../services/serverConfig";
 
 // Server allows one new code per minute.
 const RESEND_COOLDOWN_MS = 60_000;
@@ -24,14 +23,13 @@ type Status = { email: string | null; verified: boolean; mode: "off" | "optional
  * replaces the app; optional → a dismissible banner opens it.
  */
 export function EmailVerificationGate({ children }: { children: ReactNode }) {
-	const server = useServerInfo();
 	const unverified = useFeatureFlag("email_unverified");
 	const required = useFeatureFlag("email_verification_required");
 	const [open, setOpen] = useState(false);
 	const [dismissed, setDismissed] = useState(false);
 	const { t } = useTranslation();
 
-	if (server.kind !== "freeGrind" || !unverified) return <>{children}</>;
+	if (!unverified) return <>{children}</>;
 	if (required || open) {
 		return (
 			<div className="app-shell">

@@ -1,19 +1,33 @@
-//! Backend selection: the official Grindr servers or the Free Grind server
-//! built into the app (addresses fixed at build time, see grindr's server.rs).
-//! The choice is made on the sign-in screen, persisted, remembered per saved
-//! account, and applied to the `grindr` crate's [`grindr::set_server_config`].
-
-use std::time::Duration;
+//! The backend this app talks to, fixed by the app flavor at build time: the
+//! official Grindr servers (the default) or the Free Grind server (cargo
+//! feature `flavor-server`, addresses from FG_API_URL / FG_MEDIA_URL, see
+//! grindr's server.rs). Applied to the `grindr` crate's
+//! [`grindr::set_server_config`] before the first client is built.
+//!
+//! Builds from before the flavor split let the user pick the server on the
+//! sign-in screen and remembered the choice per saved account. Those records
+//! are still read: an account, or a stored active session, that belongs to the
+//! other backend is not this app's, and is never sent to this app's server.
 
 use serde::{Deserialize, Serialize};
 
-use tauri::Manager;
-
-use super::auth::{
-    adopt_client, clear_slot, get_slot_bytes, persist_current_session, set_slot_bytes, AuthStorage, DeviceStorage,
-};
+use super::auth::{clear_slot, get_slot_bytes, set_slot_bytes, AuthStorage, DeviceStorage};
 use crate::error::AppError;
-use crate::state::AppState;
+
+#[cfg(feature = "flavor-server")]
+const _: () = assert!(
+    option_env!("FG_API_URL").is_some() && option_env!("FG_MEDIA_URL").is_some(),
+    "the server flavor needs FG_API_URL and FG_MEDIA_URL at build time (server/app-flavor/flavor.json)",
+);
+
+/// This app's backend.
+pub fn flavor_server() -> grindr::ServerConfig {
+    if cfg!(feature = "flavor-server") {
+        grindr::ServerConfig::FreeGrind
+    } else {
+        grindr::ServerConfig::Official
+    }
+}
 
 const ACTIVE_SERVER_SLOT: &str = "server-config";
 
@@ -24,26 +38,8 @@ fn account_server_slot(profile_id: &str) -> String {
 pub struct ServerStorage;
 
 impl ServerStorage {
-    /// A stored Free Grind choice falls back to official in a build without
-    /// Free Grind addresses.
     fn decode(bytes: &[u8]) -> Option<grindr::ServerConfig> {
-        serde_json::from_slice::<grindr::ServerConfig>(bytes)
-            .ok()
-            .filter(|c| c.is_official() || grindr::free_grind_available())
-    }
-
-    /// The persisted active backend; official when nothing (or garbage) is stored.
-    pub fn load_active() -> grindr::ServerConfig {
-        get_slot_bytes(ACTIVE_SERVER_SLOT)
-            .ok()
-            .flatten()
-            .and_then(|b| Self::decode(&b))
-            .unwrap_or_default()
-    }
-
-    pub fn save_active(config: &grindr::ServerConfig) -> Result<(), AppError> {
-        let bytes = serde_json::to_vec(config).map_err(|e| AppError::Auth(e.to_string()))?;
-        set_slot_bytes(ACTIVE_SERVER_SLOT, &bytes)
+        serde_json::from_slice::<grindr::ServerConfig>(bytes).ok()
     }
 
     /// The backend a saved account belongs to. Accounts saved before server
@@ -56,6 +52,11 @@ impl ServerStorage {
             .unwrap_or_default()
     }
 
+    /// Whether a saved account lives on this app's backend.
+    pub fn belongs_here(profile_id: &str) -> bool {
+        Self::load_for_account(profile_id) == flavor_server()
+    }
+
     pub fn save_for_account(profile_id: &str, config: &grindr::ServerConfig) -> Result<(), AppError> {
         let bytes = serde_json::to_vec(config).map_err(|e| AppError::Auth(e.to_string()))?;
         set_slot_bytes(&account_server_slot(profile_id), &bytes)
@@ -66,16 +67,31 @@ impl ServerStorage {
     }
 }
 
-/// Applies the persisted backend before the first client is built (startup).
-pub fn apply_persisted_server() {
-    grindr::set_server_config(ServerStorage::load_active());
-}
-
-/// Makes `config` active and persists it as the current choice.
-pub fn activate(config: grindr::ServerConfig) -> Result<(), AppError> {
-    ServerStorage::save_active(&config)?;
-    grindr::set_server_config(config);
-    Ok(())
+/// Sets this app's backend before the first client is built (startup).
+///
+/// A build with the old server picker may have left the other backend active,
+/// with its session. That session is dropped here together with the device
+/// identity, so neither reaches this server (the two servers must not be able
+/// to correlate the device). The account itself stays saved, just hidden from
+/// the switcher.
+pub fn apply_flavor_server() {
+    let server = flavor_server();
+    let previous = get_slot_bytes(ACTIVE_SERVER_SLOT)
+        .ok()
+        .flatten()
+        .and_then(|b| ServerStorage::decode(&b))
+        .unwrap_or_default();
+    if previous != server {
+        if AuthStorage::get_session().ok().flatten().is_some() {
+            eprintln!("[server] dropping the stored session of the other backend");
+            let _ = AuthStorage::clear_session();
+        }
+        let _ = DeviceStorage::save(&grindr::DeviceInfo::generate());
+        if let Ok(bytes) = serde_json::to_vec(&server) {
+            let _ = set_slot_bytes(ACTIVE_SERVER_SLOT, &bytes);
+        }
+    }
+    grindr::set_server_config(server);
 }
 
 /// Firebase client config of the Free Grind server's own project (push on
@@ -95,9 +111,10 @@ fn build_env(value: Option<&'static str>) -> Option<String> {
     value.map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned)
 }
 
-/// `None` unless the build set all four FG_FCM_* variables and has a Free Grind server.
+/// `None` unless this is the server flavor and the build set all four
+/// FG_FCM_* variables.
 pub fn free_grind_fcm() -> Option<FcmClientConfig> {
-    if !grindr::free_grind_available() {
+    if !cfg!(feature = "flavor-server") {
         return None;
     }
     Some(FcmClientConfig {
@@ -111,166 +128,18 @@ pub fn free_grind_fcm() -> Option<FcmClientConfig> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerInfo {
-    pub kind: &'static str,
     pub api_base: String,
     pub media_base: Option<String>,
-    /// Whether this build has a Free Grind server at all.
-    pub free_grind_available: bool,
-    /// Push config for the Free Grind server (only while it's the active one).
+    /// Push config of the Free Grind server (server flavor only).
     pub fcm: Option<FcmClientConfig>,
-}
-
-fn info(config: &grindr::ServerConfig) -> ServerInfo {
-    ServerInfo {
-        kind: kind_name(config),
-        api_base: config.api_base().to_owned(),
-        media_base: config.media_base().map(str::to_owned),
-        free_grind_available: grindr::free_grind_available(),
-        fcm: if config.is_official() { None } else { free_grind_fcm() },
-    }
-}
-
-/// `"official"` or `"freeGrind"`; nothing else can be chosen.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ServerSelection {
-    pub server: String,
-    /// "Add account" while signed in: park the active account in the switcher
-    /// (its session stays valid there) instead of refusing the switch.
-    #[serde(default)]
-    pub detach_session: bool,
-}
-
-/// `"official"` or `"freeGrind"`, as the frontend names them.
-pub fn kind_name(config: &grindr::ServerConfig) -> &'static str {
-    if config.is_official() {
-        "official"
-    } else {
-        "freeGrind"
-    }
-}
-
-fn parse_selection(selection: &ServerSelection) -> Result<grindr::ServerConfig, AppError> {
-    match selection.server.as_str() {
-        "official" => Ok(grindr::ServerConfig::Official),
-        "freeGrind" if grindr::free_grind_available() => Ok(grindr::ServerConfig::FreeGrind),
-        "freeGrind" => Err(AppError::Http("this build has no Free Grind server".to_owned())),
-        other => Err(AppError::Http(format!("unknown server {other:?}"))),
-    }
 }
 
 #[tauri::command]
 pub async fn get_server_config() -> Result<ServerInfo, AppError> {
-    Ok(info(&grindr::server_config()))
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ServerProbe {
-    pub ok: bool,
-    pub latency_ms: u64,
-    pub error: Option<String>,
-}
-
-/// Checks that the Free Grind server is reachable
-/// (`GET /healthz` → `{"ok":true}`). Nothing is changed.
-#[tauri::command]
-pub async fn test_server(selection: ServerSelection) -> Result<ServerProbe, AppError> {
-    let config = parse_selection(&selection)?;
-    if config.is_official() {
-        return Ok(ServerProbe { ok: true, latency_ms: 0, error: None });
-    }
-    let client = wreq::Client::builder()
-        .timeout(Duration::from_secs(8))
-        // Same trust as the API client (plus FG_CA_CERT in test builds).
-        .cert_store(grindr::extra_cert_store())
-        .build()
-        .map_err(|e| AppError::Http(e.to_string()))?;
-    let started = std::time::Instant::now();
-    let result = client.get(format!("{}/healthz", config.api_base())).send().await;
-    let latency_ms = started.elapsed().as_millis() as u64;
-    let probe = match result {
-        Err(e) => ServerProbe { ok: false, latency_ms, error: Some(e.to_string()) },
-        Ok(resp) if !resp.status().is_success() => ServerProbe {
-            ok: false,
-            latency_ms,
-            error: Some(format!("HTTP {}", resp.status().as_u16())),
-        },
-        Ok(resp) => match resp.json::<serde_json::Value>().await {
-            Ok(body) if body.get("ok").and_then(|v| v.as_bool()) == Some(true) => {
-                ServerProbe { ok: true, latency_ms, error: None }
-            }
-            _ => ServerProbe {
-                ok: false,
-                latency_ms,
-                error: Some("not a free-grind-server (unexpected /healthz response)".to_owned()),
-            },
-        },
-    };
-    Ok(probe)
-}
-
-/// Saves a session to the account switcher, with the active server, unless
-/// that account is already there.
-fn keep_in_switcher(session: &grindr::Session) {
-    let Some(profile_id) = session.credentials.profile_id.as_deref() else {
-        return;
-    };
-    if AuthStorage::get_account(profile_id).ok().flatten().is_some() {
-        return;
-    }
-    let Some(device) = DeviceStorage::load().ok().flatten() else {
-        return;
-    };
-    if AuthStorage::save_account(session, &device).is_ok() {
-        let _ = ServerStorage::save_for_account(profile_id, &grindr::server_config());
-    }
-}
-
-/// Switches the backend. Only while signed out, so a session of one server is
-/// never sent to another; the device identity is rotated as well, so the two
-/// servers can't correlate this device. With `detach_session` (adding an
-/// account), a signed-in account is first saved to the switcher and then
-/// detached locally, without signing it out on its server; switching back to
-/// it later restores its own backend.
-#[tauri::command]
-pub async fn set_server_config(app: tauri::AppHandle, selection: ServerSelection) -> Result<ServerInfo, AppError> {
-    let config = parse_selection(&selection)?;
-    if *grindr::server_config() == config {
-        return Ok(info(&config));
-    }
-    // Signed in means what the app shows (`auth_state`): the live client's
-    // session, not just a stored one.
-    let client = app.state::<AppState>().client().ok();
-    let signed_in = client
-        .as_ref()
-        .is_some_and(|client| {
-            client
-                .session_receiver()
-                .borrow()
-                .as_ref()
-                .is_some_and(|session| session.credentials.profile_id.is_some())
-        });
-    if signed_in {
-        if !selection.detach_session {
-            return Err(AppError::Auth("sign out before changing the server".to_owned()));
-        }
-        // Up to date in the switcher (and remembered with its server) before
-        // the active slot lets go of it.
-        if let Some(client) = &client {
-            persist_current_session(client).await;
-        }
-        AuthStorage::clear_session()?;
-    } else if let Some(stale) = AuthStorage::get_session().ok().flatten() {
-        // A stored session the client isn't using (it would have resumed it
-        // otherwise) must not block the switch, nor reach the other server.
-        // Kept in the switcher if it isn't there yet.
-        keep_in_switcher(&stale);
-        AuthStorage::clear_session()?;
-    }
-    activate(config)?;
-    let device = grindr::DeviceInfo::generate();
-    let _ = DeviceStorage::save(&device);
-    adopt_client(&app, Some(device), None)?;
-    Ok(info(&config))
+    let config = grindr::server_config();
+    Ok(ServerInfo {
+        api_base: config.api_base().to_owned(),
+        media_base: config.media_base().map(str::to_owned),
+        fcm: free_grind_fcm(),
+    })
 }

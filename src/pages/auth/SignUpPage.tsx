@@ -11,9 +11,7 @@ import { SmsVerificationRequiredError, type SignInRefusal } from "../../contexts
 import { AuthAltAction, AuthCancelAction, AuthSubmitSection, IconInput } from "./auth-form";
 import { useAddProfileMode } from "./useAddProfileMode";
 import { SmsVerificationPanel } from "./SmsVerificationPanel";
-import { ServerFooterButton, ServerSelectSheet } from "./ServerSelectSheet";
-import { useServerInfo } from "../../services/serverConfig";
-import { useDesktopBreakpoint } from "../../hooks/useDesktopBreakpoint";
+import { IS_GRINDR } from "../../services/serverConfig";
 
 const MIN_AGE = 18;
 // Earliest date of birth the Free Grind server accepts; anything before is a typo.
@@ -42,8 +40,7 @@ export function SignUpPage() {
 	const { callMethod } = useApi();
 	// Accounts this app created so far; null until loaded.
 	const [quota, setQuota] = useState<{ used: number; limit: number } | null>(null);
-	const server = useServerInfo();
-	const isCustom = server.kind === "freeGrind";
+	const isCustom = !IS_GRINDR;
 	// The local limit only applies to accounts on the official servers.
 	const isLimitReached = !isCustom && quota !== null && quota.used >= quota.limit;
 
@@ -88,21 +85,17 @@ export function SignUpPage() {
 	// Android can mint; a self-hosted server needs none.
 	const [recaptchaAvailable] = useState(isRecaptchaAvailable);
 	const hasRecaptcha = isCustom || recaptchaAvailable;
-	const [showServer, setShowServer] = useState(false);
-	const isDesktop = useDesktopBreakpoint();
 	const footer = (
 		<div className="flex flex-wrap items-center justify-center gap-1">
-			<ServerFooterButton onClick={() => setShowServer(true)} />
 			{addProfileMode ? null : <BugReportButton />}
 		</div>
 	);
-	const serverSheet = showServer ? (
-		<ServerSelectSheet isDesktop={isDesktop} onClose={() => setShowServer(false)} addProfile={addProfileMode} />
-	) : null;
 	const title = addProfileMode ? t("auth.sign_in.add_profile_title", { defaultValue: "Add Profile" }) : t("auth.sign_up.title");
 	const subtitle = addProfileMode
 		? t("auth.sign_up.add_profile_subtitle", { defaultValue: "Create a new account to add it to this app." })
-		: t("auth.sign_up.subtitle", { defaultValue: "Create a new Grindr account with your email and password." });
+		: IS_GRINDR
+			? t("auth.sign_up.subtitle", { defaultValue: "Create a new Grindr account with your email and password." })
+			: t("auth.sign_up.subtitle_server", { defaultValue: "Create a new {{appName}} account with your email and password." });
 	const cancelAction = addProfileMode ? <AuthCancelAction onClick={() => void cancelAddProfile()} /> : null;
 
 	const maxBirthday = latestAllowedBirthday();
@@ -158,7 +151,6 @@ export function SignUpPage() {
 	if (!hasRecaptcha) {
 		return (
 			<AuthShell title={title} subtitle={subtitle} footer={footer}>
-				{serverSheet}
 				<div className="animate-fade-in flex items-start gap-3 native-card rounded-2xl px-3 py-3">
 					<span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[var(--accent)] text-[var(--accent-contrast)]">
 						<Smartphone className="h-4 w-4" />
@@ -182,7 +174,6 @@ export function SignUpPage() {
 
 	return (
 		<AuthShell title={title} subtitle={subtitle} footer={footer}>
-			{serverSheet}
 			{registrationMode === "closed" ? (
 				<div className="animate-fade-in flex items-start gap-2.5 rounded-2xl bg-red-500/12 px-3 py-3 text-sm text-[var(--text)]">
 					<ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-[#f87171]" />

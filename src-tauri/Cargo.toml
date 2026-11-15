@@ -28,6 +28,10 @@ cc = "1"
 # This feature is used for production builds to enable custom protocol support (tauri://).
 # It's automatically enabled by the Tauri CLI during "tauri build".
 custom-protocol = ["tauri/custom-protocol"]
+# App flavor (see scripts/flavor.mjs). Without it the app talks to Grindr's
+# servers; with it only to the Free Grind server (FG_API_URL / FG_MEDIA_URL
+# required). Set by scripts/flavor-config.mjs (build.features) for FG_FLAVOR=server.
+flavor-server = []
 
 [dependencies]
 # custom-protocol is removed from here and moved to [features].

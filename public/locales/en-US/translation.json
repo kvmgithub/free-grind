@@ -1530,19 +1530,10 @@
       "hide_password": "Hide password",
       "error_details": "Details"
     },
-    "server": {
-      "title": "Server",
-      "change": "Change server",
-      "official": "Official servers",
-      "official_hint": "Sign in with your Grindr account.",
-      "unreachable": "Not reachable: {{error}}",
-      "save": "Use this server",
-      "saving": "Switching…",
-      "free_grind_hint": "The Free Grind server. Accounts there are separate from Grindr."
-    },
     "sign_in": {
       "title": "Sign In",
       "subtitle": "Use your Grindr email and password, or sign in with Google.",
+      "subtitle_server": "Use your {{appName}} email and password.",
       "no_account_label": "Don't have an account?",
       "no_account_action": "Sign up",
       "or_divider": "or",
@@ -1604,6 +1595,7 @@
     "sign_up": {
       "title": "Sign Up",
       "subtitle": "Create a new Grindr account with your email and password.",
+      "subtitle_server": "Create a new {{appName}} account with your email and password.",
       "add_profile_subtitle": "Create a new account to add it to this app.",
       "invalid_birthday": "Please enter a valid date of birth.",
       "errors": {

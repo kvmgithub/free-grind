@@ -49,6 +49,10 @@ const patch = {
 		hotswap: { endpoint: flavor.ota.endpoint, pubkey: flavor.ota.pubkey },
 	},
 };
+// The Rust side picks its backend by cargo feature (src-tauri/Cargo.toml).
+if (flavor.id === "server") {
+	patch.build = { features: ["flavor-server"] };
+}
 if (flavor.windows?.wixUpgradeCode) {
 	patch.bundle = { windows: { wix: { upgradeCode: flavor.windows.wixUpgradeCode } } };
 }

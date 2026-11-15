@@ -1,4 +1,4 @@
-import { getServerInfo } from "../services/serverConfig";
+import { getServerInfo, IS_GRINDR } from "../services/serverConfig";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import { demoProfileImageForUrl } from "./demoProfileImages";
 
@@ -36,8 +36,8 @@ function isProxiedHost(hostname: string): boolean {
 
 /** The self-hosted server's media origin, which grindr.rs also allows (exact origin). */
 function isCustomServerMedia(url: URL): boolean {
+	if (IS_GRINDR) return false;
 	const server = getServerInfo();
-	if (server.kind !== "freeGrind") return false;
 	try {
 		return new URL(server.mediaBase ?? server.apiBase).origin === url.origin;
 	} catch {

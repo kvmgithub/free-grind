@@ -12,8 +12,6 @@ Grindr only shows the very last visitor in full to free users. The others are hi
 
 Free Grind matches these anonymous visitors with your [local chat history](/guide/features/chat-history). If it finds a match, the profile is revealed to you.
 
-On the Free Grind server, the Views list shows exactly what the server returns. Its limits are its own policy, so Free Grind doesn't reveal anonymous visitors or keep older visitors there, and their photos stay blurred.
-
 ## Taps
 
 The **Taps** list shows everyone who tapped you, and their profile shows which kind of tap they sent. Taps you sent are listed separately, with a mark once the recipient has seen them.

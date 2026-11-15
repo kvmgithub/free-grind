@@ -43,7 +43,7 @@ import { runRestoredFavorites } from "../services/restoredFavorites";
 import { runTapsAutomationSync } from "../services/tapsSync";
 import { syncSavedPhrasesFromServer } from "../services/savedPhrases";
 import { mintRecaptchaToken, RecaptchaError, type RecaptchaFailure } from "../services/recaptcha";
-import { getParkedAccount, isCustomServer, loadServerConfig, setParkedAccount } from "../services/serverConfig";
+import { IS_GRINDR } from "../services/serverConfig";
 import i18n from "../i18n";
 
 const AUTH_USER_ID_STORAGE_KEY = "fg-user-id";
@@ -88,7 +88,7 @@ function writeStoredBan(status: AccountStatus) {
 /** The FCM token Android handed over, cached or still waiting on window. */
 function cachedPushToken(): string | null {
 	// Each server only ever gets the token of the Firebase project it sends with.
-	if (isCustomServer()) return window.localStorage.getItem(SELF_HOSTED_PUSH_TOKEN_STORAGE_KEY) || null;
+	if (!IS_GRINDR) return window.localStorage.getItem(SELF_HOSTED_PUSH_TOKEN_STORAGE_KEY) || null;
 	const fallback = (window as Window & { __FG_FCM_TOKEN?: unknown }).__FG_FCM_TOKEN;
 	return window.localStorage.getItem(PUSH_TOKEN_STORAGE_KEY) || (typeof fallback === "string" ? fallback : null) || null;
 }
@@ -332,15 +332,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			} else {
 				appLog.info("[Auth] checkAuth: no active session");
 				dispatch({ type: "CLEAR_USER" });
-				// An "add account" that switched servers and was then abandoned:
-				// back to the account it parked. Not on the reload right after
-				// the switch, which still carries ?restore= for that add.
-				const parked = getParkedAccount();
-				if (parked && !new URLSearchParams(window.location.search).has("restore")) {
-					setParkedAccount(null);
-					appLog.info("[Auth] checkAuth: restoring parked account");
-					void switchAccount(parked).catch(() => undefined);
-				}
 				// The session was dropped by a ban, not a sign-out: show the ban screen again.
 				if (bootBan) {
 					appLog.info("[Auth] checkAuth: restoring ban screen from last run");
@@ -584,7 +575,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 			// Official servers: sign-up is Android-only (rejects with a RecaptchaError
 			// elsewhere). A self-hosted server needs no reCAPTCHA token.
-			const captchaToken = isCustomServer() ? "" : await mintRecaptchaToken("sign_up");
+			const captchaToken = IS_GRINDR ? await mintRecaptchaToken("sign_up") : "";
 			const profileId = await callMethod("create_account", {
 				email,
 				password,
@@ -679,9 +670,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 			const result = await callMethod("switch_account", { profileId });
 			appLog.info("[Auth] switchAccount: succeeded");
-			// The account may live on the other server: pick that up before
-			// anything reacts to the new user (media URLs, push token sync).
-			await loadServerConfig().catch((err) => appLog.warn("[Auth] switchAccount: server config reload failed", err));
 			dispatch({ type: "SET_USER", payload: result.profileId });
 			void refreshSavedAccounts();
 			if (!showRestriction(result.restriction)) {
@@ -719,12 +707,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	useEffect(() => {
 		checkAuth();
 	}, []);
-
-	// Signed in again (the added account, or back to the parked one): nothing
-	// left to restore.
-	useEffect(() => {
-		if (state.userId != null) setParkedAccount(null);
-	}, [state.userId]);
 
 	// Points the chat db at the active account's own file, and on an actual
 	// account change (not the initial boot resolution) clears every other
@@ -936,7 +918,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			const selfHosted = event.type === "fg:fcm-token-selfhosted";
 			window.localStorage.setItem(selfHosted ? SELF_HOSTED_PUSH_TOKEN_STORAGE_KEY : PUSH_TOKEN_STORAGE_KEY, token);
 			// Grindr's token goes to the official server only, ours to ours only.
-			if (selfHosted !== (isCustomServer())) return;
+			if (selfHosted === IS_GRINDR) return;
 
 			if (!state.userId || state.isLoading) {
 				appLog.debug("[PUSH_SYNC] Token cached; waiting for authenticated session before sync");
@@ -982,7 +964,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 				return;
 			}
 
-			if (isCustomServer()) {
+			if (!IS_GRINDR) {
 				const own = window.localStorage.getItem(SELF_HOSTED_PUSH_TOKEN_STORAGE_KEY);
 				if (!own) return;
 				const marker = `${own}::${state.userId}`;

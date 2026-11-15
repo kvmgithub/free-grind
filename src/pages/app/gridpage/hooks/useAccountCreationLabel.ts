@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { useFeatureFlag } from "../../../../services/assignmentsStore";
-import { useServerInfo } from "../../../../services/serverConfig";
+import { IS_GRINDR } from "../../../../services/serverConfig";
 import type { ProfileDetail } from "../../../../types/grid";
 import { estimateAccountCreationTimestamp, formatAccountCreationDate } from "../utils";
 
@@ -15,7 +15,6 @@ import { estimateAccountCreationTimestamp, formatAccountCreationDate } from "../
 export function useAccountCreationLabel(): (profile: Pick<ProfileDetail, "profileId" | "created"> | null | undefined) => string | null {
 	const { t } = useTranslation();
 	const realDates = useFeatureFlag("account-creation-date");
-	const { kind } = useServerInfo();
 
 	return useCallback(
 		(profile) => {
@@ -23,10 +22,10 @@ export function useAccountCreationLabel(): (profile: Pick<ProfileDetail, "profil
 			if (realDates && typeof profile.created === "number" && profile.created > 0) {
 				return t("profile_details.joined", { date: formatAccountCreationDate(profile.created) });
 			}
-			if (kind !== "official") return null;
+			if (!IS_GRINDR) return null;
 			const estimate = estimateAccountCreationTimestamp(profile.profileId);
 			return estimate == null ? null : t("profile_details.estimated_joined", { date: formatAccountCreationDate(estimate) });
 		},
-		[kind, realDates, t],
+		[realDates, t],
 	);
 }

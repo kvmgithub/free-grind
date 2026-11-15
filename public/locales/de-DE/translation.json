@@ -1530,19 +1530,10 @@
             "hide_password": "Passwort verbergen",
             "error_details": "Details"
         },
-        "server": {
-            "title": "Server",
-            "change": "Server ändern",
-            "official": "Offizielle Server",
-            "official_hint": "Mit deinem Grindr-Konto anmelden.",
-            "unreachable": "Nicht erreichbar: {{error}}",
-            "save": "Diesen Server verwenden",
-            "saving": "Wechsle…",
-            "free_grind_hint": "Der Free-Grind-Server. Konten dort sind von Grindr getrennt."
-        },
         "sign_in": {
             "title": "Anmelden",
             "subtitle": "Nutze deine Grindr-E-Mail und dein Passwort oder melde dich mit Google an.",
+            "subtitle_server": "Melde dich mit deiner {{appName}}-E-Mail und deinem Passwort an.",
             "no_account_label": "Noch kein Konto?",
             "no_account_action": "Registrieren",
             "or_divider": "oder",
@@ -1604,6 +1595,7 @@
         "sign_up": {
             "title": "Registrieren",
             "subtitle": "Erstelle ein neues Grindr-Konto mit deiner E-Mail und deinem Passwort.",
+            "subtitle_server": "Erstelle ein neues {{appName}}-Konto mit deiner E-Mail und einem Passwort.",
             "add_profile_subtitle": "Erstelle ein neues Konto, um es in dieser App hinzuzufügen.",
             "invalid_birthday": "Bitte gib ein gültiges Geburtsdatum ein.",
             "errors": {

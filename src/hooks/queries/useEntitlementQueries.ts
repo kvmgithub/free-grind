@@ -2,7 +2,6 @@ import { useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useApiFunctions } from "../useApiFunctions";
 import { useAuth } from "../../contexts/useAuth";
-import { useServerInfo } from "../../services/serverConfig";
 import { useCanBypassExpiringLimit } from "../../grindr-workarounds";
 import {
 	isAllowanceExhausted,
@@ -30,13 +29,12 @@ export function useEntitlements(userId: number | null, geohash: string | null, e
 
 /**
  * Expiring media allowance (GET /v4/{pics,videos,albums}/expiring/status),
- * per account and backend. Refreshed after every expiring send (see
+ * per account. Refreshed after every expiring send (see
  * markExpiringAllowanceStale) and when the period may have rolled over.
  */
 export function useExpiringAllowance(kind: ExpiringMediaKind, enabled = true) {
 	const api = useApiFunctions();
 	const { userId } = useAuth();
-	const { kind: serverKind } = useServerInfo();
 	const queryClient = useQueryClient();
 	useEffect(
 		() =>
@@ -46,7 +44,7 @@ export function useExpiringAllowance(kind: ExpiringMediaKind, enabled = true) {
 		[queryClient],
 	);
 	return useQuery<ExpiringAllowance>({
-		queryKey: ["expiring-allowance", kind, userId, serverKind],
+		queryKey: ["expiring-allowance", kind, userId],
 		queryFn: () => api.getExpiringAllowance(kind),
 		staleTime: 5 * 60 * 1000,
 		retry: 1,

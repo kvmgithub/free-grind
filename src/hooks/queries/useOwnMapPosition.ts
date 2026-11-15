@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useApiFunctions } from "../useApiFunctions";
-import { isCustomServer } from "../../services/serverConfig";
+import { IS_GRINDR } from "../../services/serverConfig";
 import type { OwnMapPosition } from "../../services/api/ownMapPositionMethods";
 
 export const ownMapPositionKey = ["own-map-position"] as const;
@@ -15,7 +15,7 @@ export function useOwnMapPosition(enabled: boolean) {
 	return useQuery<OwnMapPosition>({
 		queryKey: ownMapPositionKey,
 		queryFn: () => api.getOwnMapPosition(),
-		enabled: enabled && isCustomServer(),
+		enabled: enabled && !IS_GRINDR,
 		staleTime: 60_000,
 		retry: 1,
 	});

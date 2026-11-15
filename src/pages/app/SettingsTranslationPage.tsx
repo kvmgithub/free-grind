@@ -10,7 +10,7 @@ import { SelectSheet } from "../../components/ui/select-sheet";
 import { SHEET_FIELD_CLASS } from "../../components/ui/sheet-section";
 import { useDesktopBreakpoint } from "../../hooks/useDesktopBreakpoint";
 import { useSettingsHighlight } from "../../hooks/useSettingsHighlight";
-import { useServerInfo } from "../../services/serverConfig";
+import { IS_GRINDR } from "../../services/serverConfig";
 import {
 	TRANSLATION_PROVIDERS,
 	type ApiKeyTranslationProvider,
@@ -409,7 +409,6 @@ export function SettingsTranslationPage() {
 	const [isProviderSheetOpen, setIsProviderSheetOpen] = useState(false);
 	const [isKeySheetOpen, setIsKeySheetOpen] = useState(false);
 	const isDesktop = useDesktopBreakpoint();
-	const { kind: serverKind } = useServerInfo();
 	const providerInfo = PROVIDER_INFO[provider];
 	const ProviderIcon = providerInfo.icon;
 	// Server translation has no key: every API key row, guide and sheet is hidden.
@@ -510,7 +509,7 @@ export function SettingsTranslationPage() {
 							<div className="flex items-start gap-2.5 px-4 py-3">
 								<Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]" />
 								<p className="text-xs leading-relaxed text-[var(--text-muted)]">
-									{serverKind === "official"
+									{IS_GRINDR
 										? t("auto_translate.server_info_official", {
 												defaultValue: "Messages are translated by the server. This is a paid feature: without a subscription, translating fails.",
 											})

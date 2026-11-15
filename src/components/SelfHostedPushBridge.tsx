@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { useServerInfo } from "../services/serverConfig";
+import { IS_GRINDR, useServerInfo } from "../services/serverConfig";
 import { appLog } from "../utils/logger";
 
 /**
@@ -8,14 +8,14 @@ import { appLog } from "../utils/logger";
  * side registers a second FirebaseApp for it and answers with
  * `fg:fcm-token-selfhosted`, which AuthContext sends to /v3/gcm-push-tokens.
  * Grindr's own Firebase setup for the official server is untouched. No-op on
- * desktop, on the official server and in builds without FG_FCM_*.
+ * desktop, in the grindr flavor and in builds without FG_FCM_*.
  */
 export function SelfHostedPushBridge() {
-	const { kind, fcm } = useServerInfo();
+	const { fcm } = useServerInfo();
 	const configured = useRef<string | null>(null);
 
 	useEffect(() => {
-		if (kind !== "freeGrind" || !fcm) return;
+		if (IS_GRINDR || !fcm) return;
 		const bridge = window.FreeGrindBridge;
 		if (!bridge?.configureSelfHostedPush) return;
 		const json = JSON.stringify(fcm);
@@ -27,7 +27,7 @@ export function SelfHostedPushBridge() {
 		} catch (error) {
 			appLog.warn("[PUSH_SYNC] Self-hosted Firebase setup failed", error);
 		}
-	}, [kind, fcm]);
+	}, [fcm]);
 
 	return null;
 }

@@ -5,7 +5,6 @@ import { Copy, Loader2, Plus, Share2, Ticket, X } from "lucide-react";
 import { useApi } from "../../hooks/useApi";
 import { parseJsonSafe } from "../../services/apiHelpers";
 import { useFeatureFlag } from "../../services/assignmentsStore";
-import { FREE_GRIND_SERVER_NAME, useServerInfo } from "../../services/serverConfig";
 import { appLog } from "../../utils/logger";
 
 type InviteStatus = "active" | "used" | "expired" | "revoked";
@@ -37,14 +36,13 @@ type InvitesState = {
  */
 export function InvitesSection() {
 	const { t, i18n } = useTranslation();
-	const server = useServerInfo();
 	const enabled = useFeatureFlag("user_invites");
 	const { fetchRest } = useApi();
 	const [state, setState] = useState<InvitesState | null>(null);
 	const [creating, setCreating] = useState(false);
 	const [revoking, setRevoking] = useState<string | null>(null);
 
-	const active = server.kind === "freeGrind" && enabled;
+	const active = enabled;
 
 	const load = useCallback(async () => {
 		try {
@@ -69,7 +67,7 @@ export function InvitesSection() {
 	const shareText = (code: string) =>
 		t("settings.invites.share_text", {
 			defaultValue: "Join me on {{server}}! Use my invite code when you sign up: {{code}}",
-			server: FREE_GRIND_SERVER_NAME,
+			server: __APP_NAME__,
 			code,
 		});
 

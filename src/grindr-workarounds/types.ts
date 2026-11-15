@@ -13,8 +13,8 @@ export type ViewsApi = {
 
 /**
  * What a Grindr workaround can plug into. Every hook is optional, and the app
- * behaves like the official one where none is given. Hooks only run while
- * Grindr's servers are active (see index.ts), so a Free Grind server's limits
+ * behaves like the official one where none is given. Workarounds only exist
+ * in the grindr flavor (see index.ts), so a Free Grind server's limits
  * always apply as they are.
  */
 export type GrindrWorkaround = {
@@ -52,7 +52,7 @@ export type GrindrWorkaround = {
 	/** Profiles the server marks as not blockable (`isBlockable: false`) can be blocked anyway. Default: they can only be hidden. */
 	allowBlockingAnyProfile?: boolean;
 
-	// --- Lifecycle (run on every server: they only keep local state in order) ---
+	// --- Lifecycle (they only keep local state in order) ---
 	/** The signed-in account changed (null: signed out). */
 	onActiveUser?: (profileId: number | string | null) => void;
 

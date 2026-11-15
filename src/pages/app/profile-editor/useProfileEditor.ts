@@ -25,7 +25,6 @@ import { BannedTermsError } from "../../../services/apiHelpers";
 import { validateMediaHash } from "../../../utils/media";
 import { sanitizeUploadFile } from "../../../services/uploadSanitize";
 import { useFeatureFlag } from "../../../services/assignmentsStore";
-import { useServerInfo } from "../../../services/serverConfig";
 import { buildTagLabelMap } from "../../../utils/tags";
 import {
 	getBodyTypeOptions,
@@ -119,8 +118,7 @@ export function useProfileEditor() {
 	// Profile videos are a self-hosted-server extension, rolled out via the
 	// "profile_videos" assignment; the official servers never offer them.
 	const isProfileVideosFlagOn = useFeatureFlag("profile_videos");
-	const serverInfo = useServerInfo();
-	const allowProfileVideos = isProfileVideosFlagOn && serverInfo.kind === "freeGrind";
+	const allowProfileVideos = isProfileVideosFlagOn;
 
 	// Tracks each photo's last-seen moderation state across reloads, so a
 	// background poll can toast when one changes (e.g. pending -> approved)

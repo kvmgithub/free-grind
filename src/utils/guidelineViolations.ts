@@ -8,7 +8,7 @@
  */
 
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { getServerInfo } from "../services/serverConfig";
+import { getServerInfo, IS_GRINDR } from "../services/serverConfig";
 
 export const COMMUNITY_GUIDELINES_URL = "https://www.grindr.com/community-guidelines";
 
@@ -462,8 +462,7 @@ export const BAN_APPEAL_URL = "https://web.grindr.com/ban-appeal";
 
 /** The appeal page of the active server: Grindr's, or the Free Grind server's own. */
 export function banAppealUrl(): string {
-	const info = getServerInfo();
-	return info.kind === "freeGrind" ? `${info.apiBase.replace(/\/$/, "")}/ban-appeal` : BAN_APPEAL_URL;
+	return IS_GRINDR ? BAN_APPEAL_URL : `${getServerInfo().apiBase.replace(/\/$/, "")}/ban-appeal`;
 }
 
 export function openBanAppeal() {

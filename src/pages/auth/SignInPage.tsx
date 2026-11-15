@@ -11,7 +11,7 @@ import { useTranslation } from "react-i18next";
 import { Mail, Lock, KeyRound, Eye, EyeOff, UserPlus, ChevronDown, QrCode, ScanLine } from "lucide-react";
 import { SmsVerificationRequiredError, type SignInRefusal } from "../../contexts/auth-context";
 import { SmsVerificationPanel } from "./SmsVerificationPanel";
-import { ServerFooterButton, ServerSelectSheet } from "./ServerSelectSheet";
+import { IS_GRINDR } from "../../services/serverConfig";
 import { isAndroid } from "../../services/saveMedia";
 import { isTauriRuntime } from "../../services/tauriWebSocket";
 import { cancelQrScan, isQrScanSupported, QrScanError, scanQrCode } from "../../services/qrScanner";
@@ -302,7 +302,6 @@ export function SignInPage() {
 	// Signing in with a code from another device: a secondary flow, so it
 	// opens in a sheet instead of being one of the method tabs.
 	const [showTransfer, setShowTransfer] = useState(false);
-	const [showServer, setShowServer] = useState(false);
 	const isDesktop = useDesktopBreakpoint();
 
 	// Set when an email sign-in is refused until the account verifies by SMS.
@@ -451,7 +450,7 @@ export function SignInPage() {
 		<>
 			<AuthShell
 				title={addProfileMode ? t("auth.sign_in.add_profile_title", { defaultValue: "Add Profile" }) : t("auth.sign_in.title")}
-				subtitle={addProfileMode ? t("auth.sign_in.add_profile_subtitle", { defaultValue: "Sign in with the account you want to add." }) : t("auth.sign_in.subtitle", { defaultValue: "Use your Grindr email and password, or sign in with Google." })}
+				subtitle={addProfileMode ? t("auth.sign_in.add_profile_subtitle", { defaultValue: "Sign in with the account you want to add." }) : IS_GRINDR ? t("auth.sign_in.subtitle", { defaultValue: "Use your Grindr email and password, or sign in with Google." }) : t("auth.sign_in.subtitle_server", { defaultValue: "Use your {{appName}} email and password." })}
 				footer={
 					<div className="flex flex-wrap items-center justify-center gap-1">
 						<button
@@ -462,7 +461,6 @@ export function SignInPage() {
 							<QrCode className="h-3.5 w-3.5" />
 							{t("auth.sign_in.qr_entry_title", { defaultValue: "Sign in with a QR code" })}
 						</button>
-						<ServerFooterButton onClick={() => setShowServer(true)} />
 						{addProfileMode ? null : <BugReportButton />}
 					</div>
 				}
@@ -615,7 +613,6 @@ export function SignInPage() {
 				{addProfileMode ? <AuthCancelAction onClick={() => void cancelAddProfile()} /> : null}
 			</AuthShell>
 			{showTransfer ? <TransferSignInSheet isDesktop={isDesktop} onClose={() => toggleTransfer(false)} /> : null}
-			{showServer ? <ServerSelectSheet isDesktop={isDesktop} onClose={() => setShowServer(false)} addProfile={addProfileMode} /> : null}
 		</>
 	);
 }

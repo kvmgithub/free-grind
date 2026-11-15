@@ -1377,29 +1377,22 @@ pub async fn accept_ban_agreement(state: tauri::State<'_, AppState>) -> Result<L
     }
 }
 
-/// A saved account as the switcher shows it: its stored meta plus the
-/// backend it lives on.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SavedAccountEntry {
-    #[serde(flatten)]
-    meta: SavedAccountMeta,
-    server: &'static str,
-}
-
+/// The saved accounts of this app's backend. Accounts of the other backend
+/// (saved by a build with the old server picker) stay stored but hidden.
 #[tauri::command]
-pub async fn list_saved_accounts() -> Result<Vec<SavedAccountEntry>, AppError> {
+pub async fn list_saved_accounts() -> Result<Vec<SavedAccountMeta>, AppError> {
     Ok(AuthStorage::list_saved_accounts()?
         .into_iter()
-        .map(|meta| {
-            let server = super::server::kind_name(&super::server::ServerStorage::load_for_account(&meta.profile_id));
-            SavedAccountEntry { meta, server }
-        })
+        .filter(|meta| super::server::ServerStorage::belongs_here(&meta.profile_id))
         .collect())
 }
 
 #[tauri::command]
 pub async fn switch_account(app: tauri::AppHandle, profile_id: String) -> Result<LoginResult, AppError> {
+    // Never send another backend's session to this app's server.
+    if !super::server::ServerStorage::belongs_here(&profile_id) {
+        return Err(AppError::Auth("No saved session for this account".to_owned()));
+    }
     let (session, device) = AuthStorage::get_account(&profile_id)?
         .ok_or_else(|| AppError::Auth("No saved session for this account".to_owned()))?;
 
@@ -1408,8 +1401,6 @@ pub async fn switch_account(app: tauri::AppHandle, profile_id: String) -> Result
         restriction: frontend_restriction(Some(&session)),
     };
 
-    // The account's own backend must be active before its session is used.
-    super::server::activate(super::server::ServerStorage::load_for_account(&profile_id))?;
     AuthStorage::set_session(&session)?;
     let _ = DeviceStorage::save(&device);
     adopt_client(&app, Some(device), Some(session))?;

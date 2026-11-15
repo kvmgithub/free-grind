@@ -67,10 +67,8 @@ export interface VersionAnnouncement {
 	items: AnnouncementItem[];
 }
 
-// Add one entry per release that should show a "what's new" screen on launch.
-// Only the entry whose `version` matches the running app version (VITE_APP_VERSION,
-// i.e. package.json's "version") is ever shown to users.
-export const VERSION_ANNOUNCEMENTS: VersionAnnouncement[] = [
+/** Releases of the grindr flavor (see VERSION_ANNOUNCEMENTS below). */
+const GRINDR_ANNOUNCEMENTS: VersionAnnouncement[] = [
 	{
 		version: "0.5.3",
 		items: [
@@ -373,3 +371,12 @@ export const VERSION_ANNOUNCEMENTS: VersionAnnouncement[] = [
 		],
 	},
 ];
+
+/** Releases of the server flavor (FG_FLAVOR=server). */
+const SERVER_ANNOUNCEMENTS: VersionAnnouncement[] = [];
+
+// Add one entry per release that should show a "what's new" screen on launch.
+// Only the entry whose `version` matches the running app version (VITE_APP_VERSION,
+// i.e. package.json's "version") is ever shown to users. Each app flavor has
+// its own list; the other flavor's is dropped from the bundle.
+export const VERSION_ANNOUNCEMENTS: VersionAnnouncement[] = __FLAVOR__ === "grindr" ? GRINDR_ANNOUNCEMENTS : SERVER_ANNOUNCEMENTS;

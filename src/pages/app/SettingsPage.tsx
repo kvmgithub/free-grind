@@ -71,7 +71,6 @@ import type { SavedAccountMeta } from "../../contexts/auth-context";
 import { areUpdateChecksEnabled, setUpdateChecksEnabled, subscribeUpdateChecks } from "../../services/updateChecks";
 import { Avatar } from "../../components/ui/avatar";
 import { getSavedAccountProfile, getSavedAccountThumbUrl, removeSavedAccountProfile, useSavedAccountProfiles } from "../../services/savedAccountProfiles";
-import { FREE_GRIND_SERVER_NAME } from "../../services/serverConfig";
 import { useSettingsSearchIndex } from "../../data/settingsSearchIndex";
 import { isSexualHealthEnabled } from "../../utils/optionalFeatures";
 import { GITHUB_ISSUES_URL, GITHUB_NEW_ISSUE_URL, openExternalUrl } from "../../utils/githubIssues";
@@ -293,8 +292,7 @@ export function SettingsPage() {
 		((account?.kind ?? "Email") === "Email" ? account?.email : null) ||
 		t("settings.account_profile_fallback", { defaultValue: "Profile {{id}}", id: profileId });
 	const withSignInMethod = (account: SavedAccountMeta | undefined, text: string) => {
-		const method = account?.kind === "Google" || account?.kind === "Facebook" ? `${account.kind} · ${text}` : text;
-		return account?.server === "freeGrind" ? `${FREE_GRIND_SERVER_NAME} · ${method}` : method;
+		return account?.kind === "Google" || account?.kind === "Facebook" ? `${account.kind} · ${text}` : text;
 	};
 	const inboxSyncStatus = useInboxSyncStatus(userId);
 	const inboxSyncDisplay = describeInboxSyncStatus(inboxSyncStatus, t);

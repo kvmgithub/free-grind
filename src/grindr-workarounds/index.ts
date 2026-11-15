@@ -6,8 +6,10 @@
  * Removing one: delete its folder and its line in WORKAROUNDS below. Every
  * hook falls back to the official app's behaviour, so nothing else changes.
  *
- * The hooks only run while Grindr's servers are active. A Free Grind server's
- * limits are its own policy: there the app behaves like the official one.
+ * Only the grindr flavor contains them. The server flavor (a Free Grind
+ * server's limits are its own policy) builds with stub.ts instead of this file
+ * (vite.config.mjs), which has the same API and the official behaviour only;
+ * stub.check.ts keeps the two in sync.
  */
 import { createElement, Fragment } from "react";
 import type { GrindrWorkaround, NamedView, ViewsApi } from "./types";
@@ -15,7 +17,6 @@ import type { InterestItem } from "../pages/app/interest/interestUtils";
 import { mergeViews, sortByNewest } from "../pages/app/interest/interestUtils";
 import type { BrowseCard } from "../pages/app/GridPage.types";
 import type { ExpiringMediaKind } from "../services/expiringAllowance";
-import { getServerInfo, useServerInfo, type ServerKind } from "../services/serverConfig";
 import { entitlementBypass } from "./entitlement-bypass";
 import { viewRecovery } from "./view-recovery";
 import { lockedPreviewPhotos } from "./locked-preview-photos";
@@ -25,15 +26,13 @@ const WORKAROUNDS: readonly GrindrWorkaround[] = [entitlementBypass, viewRecover
 
 export type { NamedView, ViewsApi } from "./types";
 
-const appliesTo = (kind: ServerKind) => kind === "official";
-
-/** The workarounds in effect right now: none on a Free Grind server. */
 function active(): readonly GrindrWorkaround[] {
-	return appliesTo(getServerInfo().kind) ? WORKAROUNDS : [];
+	return WORKAROUNDS;
 }
 
+// A hook in name only (no React state), kept so call sites read as hooks.
 function useActive(): readonly GrindrWorkaround[] {
-	return appliesTo(useServerInfo().kind) ? WORKAROUNDS : [];
+	return WORKAROUNDS;
 }
 
 /** The first active workaround that implements `key`. */
@@ -105,7 +104,7 @@ export function useCanBlockProfile(): (isBlockable: boolean | null | undefined) 
 	return (isBlockable) => allowAny || isBlockable !== false;
 }
 
-// --- Lifecycle: on every server, so local state follows the account ---
+// --- Lifecycle: local state follows the account ---
 
 export function setActiveUser(profileId: number | string | null): void {
 	for (const workaround of WORKAROUNDS) workaround.onActiveUser?.(profileId);
