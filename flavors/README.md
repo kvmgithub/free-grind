@@ -26,6 +26,7 @@ The flavor sets the app's identity. Product features are switched by the server'
 | `ios.bundleId` | iOS bundle ID |
 | `windows.wixUpgradeCode` | Optional; pins MSI upgrades (Tauri derives it from the name otherwise) |
 | `mainBinaryName` | Optional; binary name (Linux packages install it to `/usr/bin`, so two flavors need different ones) |
+| `env` | Optional; build variables (`FG_*` only), e.g. the server flavor's `FG_API_URL`, `FG_MEDIA_URL`, `FG_RTC_URL`, `FG_FCM_*`. A variable already set in the environment wins. Locally, `server/.env.app` sets them for the server flavor, for example to point at the dev stack. |
 
 Changing `identifier`, `android.applicationId` or `ios.bundleId` makes a different app: no in-place update, separate data.
 
@@ -46,4 +47,9 @@ Next to the manifest:
 - `build.gradle.kts` sets the Android ID and resources.
 - `ci/build/ios.sh` sets the iOS bundle.
 
-The server flavor also needs the cargo feature `flavor-server`, which `flavor-config.mjs` sets, and `FG_API_URL` / `FG_MEDIA_URL`.
+- `scripts/flavor-env.mjs` exports name, slug and build variables for the shell build scripts.
+- `scripts/check-flavor-build.mjs` fails a non-grindr build that still contains workaround traces.
+
+The server flavor also needs the cargo feature `flavor-server`, which `flavor-config.mjs` sets, and `FG_API_URL` / `FG_MEDIA_URL`, from its manifest's `env` or the environment.
+
+Local server-flavor development: `FG_FLAVOR=server bun run tauri dev`, with the dev stack's addresses in `server/.env.app`.
