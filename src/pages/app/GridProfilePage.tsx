@@ -259,12 +259,15 @@ export function GridProfilePage() {
 	const isTappingProfile = tappingProfileId === profileId;
 
 	const locationState =
-		(location.state as { returnTo?: unknown; profileIds?: unknown; fromChat?: unknown; backgroundLocation?: unknown; editOwnProfile?: unknown } | null) ?? {};
+		(location.state as { returnTo?: unknown; profileIds?: unknown; fromChat?: unknown; backgroundLocation?: unknown; editOwnProfile?: unknown; stacked?: unknown } | null) ?? {};
 	// Opened from a chat thread, which sits directly below in history.
 	const openedFromChat = locationState.fromChat === true;
 	// Shown as a modal over the page that opened it (see App.tsx), which is
 	// also directly below in history.
 	const isOverBackground = locationState.backgroundLocation != null;
+	// Opened from another profile or page that sits directly below in history
+	// (e.g. a linked profile); closing pops back to it.
+	const isStacked = locationState.stacked === true;
 	const returnToFromState =
 		typeof locationState.returnTo === "string" ? locationState.returnTo : null;
 	const profileIds: string[] = Array.isArray(locationState.profileIds)
@@ -277,7 +280,7 @@ export function GridProfilePage() {
 		returnTo.startsWith("/") &&
 		!returnTo.startsWith("//")
 			? returnTo
-			: "/browse";
+			: "/";
 
 	const currentIndex = profileId ? profileIds.indexOf(profileId) : -1;
 	const prevProfileId = currentIndex > 0 ? profileIds[currentIndex - 1] : null;
@@ -636,7 +639,7 @@ export function GridProfilePage() {
 				// Settings' profile row opens your own profile straight in edit mode.
 				initialEditMode={locationState.editOwnProfile === true}
 				onClose={() => {
-					if (openedFromChat || isOverBackground) {
+					if (openedFromChat || isOverBackground || isStacked) {
 						navigateBackTo(navigate, safeReturnTo);
 					} else {
 						navigate(safeReturnTo, { replace: true });

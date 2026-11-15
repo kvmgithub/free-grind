@@ -18,6 +18,8 @@ import { createSpotifyMethods } from "./api/spotifyMethods";
 import { createPushSettingsMethods } from "./api/pushSettingsMethods";
 import { createGroupMethods } from "./api/groupMethods";
 import { createReputationMethods } from "./api/reputationMethods";
+import { createCruisingMethods } from "./api/cruisingMethods";
+import { createOwnMapPositionMethods } from "./api/ownMapPositionMethods";
 import type { RightNowFeedItem, RightNowDiscreetFeedItem, RightNowFeedEntry, RightNowCreatePostRequest, RightNowCreatePostMedia, RightNowUpdatePostRequest } from "../types/right-now";
 
 export {
@@ -57,6 +59,8 @@ export function createApiFunctions(fetchRest: RestFetcher, t: (key: string) => s
 		...createPushSettingsMethods(fetchRest, t),
 		...createGroupMethods(fetchRest, t),
 		...createReputationMethods(fetchRest, t),
+		...createCruisingMethods(fetchRest, t),
+		...createOwnMapPositionMethods(fetchRest, t),
 
 		async request(
 			path: string,

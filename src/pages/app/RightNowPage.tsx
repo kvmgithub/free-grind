@@ -70,6 +70,7 @@ import {
 import { PageHeaderBackground } from "../../components/ui/PageHeaderBackground";
 import { FeedScrollContainer } from "../../components/ui/FeedScrollContainer";
 import { RightNowMap, getRightNowAvatarUrl, getRightNowItemKey, getRightNowProfileImageUrl, hasMapPosition } from "./rightnow/RightNowMap";
+import { CruisingMapOverlay, useCruisingMapState, useOwnMapCard, useOwnMapPresence } from "./gridpage/cruising/CruisingMapOverlay";
 import { proxyMediaUrl } from "../../utils/mediaProxy";
 import { getProfileImageUrl, validateMediaHash } from "../../utils/media";
 import { SHEET_ICON_BUTTON_CLASS, sheetButtonClass } from "../../components/ui/bottom-sheet";
@@ -1467,6 +1468,11 @@ export function RightNowPage() {
 		? parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--nav-rail-width")) || 0
 		: 0;
 	const isMapCardOpen = isMapView && selectedMapItem !== null;
+	// As on the grid map: the own profile (with the anchor at the real position)
+	// and, on the Free Grind server, the cruising spots.
+	const ownMapCard = useOwnMapCard();
+	const { selfMapPosition, selfFuzzRadiusMeters } = useOwnMapPresence(isMapView);
+	const cruisingMap = useCruisingMapState(isMapView && !isIncognito);
 	const { fullWidth: navFullWidth } = useNavStyle();
 	// Set by RightNowMap; the header's Center pill frames all markers through it.
 	const mapRecenterRef = useRef<(() => void) | null>(null);
@@ -1847,6 +1853,18 @@ export function RightNowPage() {
 						topInset={headerBottom}
 						leftInset={railWidth}
 						recenterRef={mapRecenterRef}
+						selfCard={ownMapCard}
+						selfMapPosition={selfMapPosition}
+						selfFuzzRadiusMeters={selfFuzzRadiusMeters}
+						onSelectSelf={ownMapCard ? () => handleSelect(String(ownMapCard.profileId)) : undefined}
+						spots={cruisingMap.spots}
+						selectedSpotId={cruisingMap.selectedSpotId}
+						checkedInSpotId={cruisingMap.checkIn?.spotId ?? null}
+						onSelectSpot={(spotId) => {
+							setSelectedMapKey(null);
+							cruisingMap.setSelectedSpotId(spotId);
+						}}
+						onCenterChange={cruisingMap.handleCenterChange}
 					/>
 
 					{/* Keeps the rail's tabs readable over the map, like the mobile nav bar's fade. */}
@@ -2012,6 +2030,18 @@ export function RightNowPage() {
 			className={cn("pointer-events-none fixed bottom-0 start-[var(--nav-rail-width,0px)] end-0 z-[55] hidden h-36", !isMapView && "rail:block")}
 			style={{ background: BOTTOM_SCRIM_GRADIENT }}
 		/>
+		{/* Cruising spots on the map: at page level (not inside the full-bleed map
+		    wrapper), so the bar centers like the post pill below. */}
+		{isMapView && !isIncognito ? (
+			<CruisingMapOverlay
+				state={cruisingMap}
+				onOpenProfile={handleSelect}
+				onBeforeSuggest={() => setSelectedMapKey(null)}
+				// One row above Right Now's own post button.
+				barClassName="bottom-[calc(var(--nav-height,var(--safe-area-bottom))+5.25rem)] rail:bottom-[calc(var(--page-bottom)+4.5rem)]"
+				hideBar={isMapCardOpen || isPosting || isFiltersOpen || isRequestsOpen}
+			/>
+		) : null}
 		<div className="fixed start-[var(--nav-rail-width,0px)] end-0 bottom-[calc(var(--nav-height,var(--safe-area-bottom))+0.75rem)] rail:bottom-[var(--page-bottom)] z-[60] pointer-events-none">
 			<div className="relative mx-auto h-full w-full max-w-4xl rail:max-w-none px-4 md:px-10">
 				{developerMode && showDebugInfo && (

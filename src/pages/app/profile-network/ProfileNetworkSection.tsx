@@ -86,8 +86,17 @@ export function ProfileNetworkSection({ profileId, isPreview = false }: { profil
 	// Nothing loaded (yet), or a failed request: no empty block that would still take the parent's gap.
 	if (!active || (!showLinks && !reputation)) return null;
 
-	const openProfile = (id: string) => navigate(`/profile/${id}`, { state: { returnTo: location.pathname } });
-	const openManagePage = () => navigate(LINKED_PROFILES_PATH, { state: { returnTo: location.pathname } });
+	// The opening profile stays directly below in history (`stacked`), so closing
+	// pops back to it with its own state (returnTo, swipe list) intact. On desktop
+	// the linked profile keeps the same background page under the modal.
+	const backgroundLocation = (location.state as { backgroundLocation?: unknown } | null)?.backgroundLocation;
+	const openProfile = (id: string) => {
+		if (String(id) === String(profileId)) return;
+		navigate(`/profile/${id}`, {
+			state: { returnTo: location.pathname, stacked: true, ...(backgroundLocation ? { backgroundLocation } : {}) },
+		});
+	};
+	const openManagePage = () => navigate(LINKED_PROFILES_PATH, { state: { returnTo: location.pathname, stacked: true } });
 
 	return (
 		<>

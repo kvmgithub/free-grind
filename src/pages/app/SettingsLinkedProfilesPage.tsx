@@ -20,6 +20,7 @@ import { PullToRefreshContainer } from "./components/PullToRefreshContainer";
 import { DrawerEmptyState } from "./chat/drawerUi";
 import { LinkedProfileRow, linkPillClass } from "./profile-network/LinkedProfileRow";
 import { ReputationSummary } from "./profile-network/ProfileNetworkSection";
+import { navigateBackTo } from "../../utils/navigateBack";
 
 /**
  * Manages the own linked profiles (Free Grind server, flag `profile-reputation`):
@@ -40,9 +41,11 @@ export function SettingsLinkedProfilesPage() {
 
 	if (!enabled) return <Navigate to="/settings" replace />;
 
-	const returnTo = (location.state as { returnTo?: unknown } | null)?.returnTo;
-	const backTo = typeof returnTo === "string" ? returnTo : "/settings";
-	const openProfile = (id: string) => navigate(`/profile/${id}`, { state: { returnTo: location.pathname } });
+	const pageState = (location.state as { returnTo?: unknown; stacked?: unknown } | null) ?? {};
+	const backTo = typeof pageState.returnTo === "string" ? pageState.returnTo : "/settings";
+	// Opened from a profile (stacked): pop back to it instead of pushing a stateless copy.
+	const handleBack = pageState.stacked === true ? () => navigateBackTo(navigate, backTo) : undefined;
+	const openProfile = (id: string) => navigate(`/profile/${id}`, { state: { returnTo: location.pathname, stacked: true } });
 
 	const run = (profile: LinkedProfile, action: ProfileLinkAction) => {
 		haptic(10);
@@ -85,7 +88,7 @@ export function SettingsLinkedProfilesPage() {
 			isDisabled={isLoading}
 			refreshingLabel={t("profile_network.refreshing")}
 		>
-			<PageHeader backTo={backTo} title={t("profile_network.page_title")} subtitle={t("profile_network.page_subtitle")} />
+			<PageHeader backTo={backTo} onBack={handleBack} title={t("profile_network.page_title")} subtitle={t("profile_network.page_subtitle")} />
 
 			<div className={`grid flex-1 gap-6 ${isEmpty ? "content-center" : "content-start"}`}>
 				{reputation && (

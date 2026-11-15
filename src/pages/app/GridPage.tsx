@@ -5,6 +5,10 @@ import { requestProfileShare, useCanShareProfiles } from "../../services/profile
 import { MapVisibilityControls, useDistanceMode } from "./MapPrivacySettings";
 import { GridMap, hasCardPosition, type MapCard } from "./gridpage/components/GridMap";
 import { readGridViewMode, writeGridViewMode, type GridViewMode } from "./gridpage/gridViewMode";
+import { ownMapPositionKey } from "../../hooks/queries/useOwnMapPosition";
+import { useQueryClient } from "@tanstack/react-query";
+import { CruisingMapOverlay, useCruisingMapState, useOwnMapPresence } from "./gridpage/cruising/CruisingMapOverlay";
+import { CruisingAutoCheckInSection } from "./gridpage/cruising/CruisingAutoCheckInToggle";
 import { SlidersHorizontal as PhosphorSlidersHorizontal } from "@phosphor-icons/react";
 import { LayoutGridFilled, MapFilled, MapPinFilled, UserFilled, UserSearchFilled } from "../../components/icons/FilledIcons";
 import { IconTabs, type IconTabConfig } from "../../components/ui/icon-tabs";
@@ -656,6 +660,9 @@ export function GridPage() {
 		[t],
 	);
 	const [mapCards, setMapCards] = useState<MapCard[]>([]);
+	const queryClient = useQueryClient();
+	// Free Grind server: where others see us on the map (and, with GPS, the anchor at the real position).
+	const { selfMapPosition, selfFuzzRadiusMeters } = useOwnMapPresence(showGridMap);
 	// Explore mode on the map: a tap anywhere drops the pin there and makes
 	// that spot the explore location, so the pill, the location picker and the
 	// grid all follow the pin. Outside explore mode the map shows the cascade
@@ -703,6 +710,10 @@ export function GridPage() {
 				});
 				if (cancelled) return;
 				setMapCards(parsed.cards.filter(hasCardPosition));
+				// The cascade moved us to `geohash`: the server re-derived our public point.
+				void queryClient.invalidateQueries({ queryKey: ownMapPositionKey });
+				// …and may have checked us in or out of a cruising spot.
+				void queryClient.invalidateQueries({ queryKey: ["cruising-spots"] });
 			} catch {
 				// The map stays up; a failed load just reads as nobody nearby.
 				if (!cancelled) setMapCards([]);
@@ -711,7 +722,10 @@ export function GridPage() {
 		return () => {
 			cancelled = true;
 		};
-	}, [showGridMap, geohash, exploreLocation, browseRequestFilters, getBrowseCardsWithTimeout]);
+	}, [showGridMap, geohash, exploreLocation, browseRequestFilters, getBrowseCardsWithTimeout, queryClient]);
+
+	// Cruising spots on the map (Free Grind server, flag `cruising-spots`).
+	const cruisingMap = useCruisingMapState(showGridMap, explorePin);
 
 	const refreshLocation = useCallback(async () => {
 		if (!useAutoLocation || !("geolocation" in navigator)) {
@@ -2153,6 +2167,14 @@ export function GridPage() {
 							onPlacePin={exploreLocation ? handlePlaceExplorePin : undefined}
 							topInset={headerBottom}
 							leftInset={railWidth}
+							selfCard={selfCard}
+							spots={cruisingMap.spots}
+							selectedSpotId={cruisingMap.selectedSpotId}
+							checkedInSpotId={cruisingMap.checkIn?.spotId ?? null}
+							onSelectSpot={cruisingMap.setSelectedSpotId}
+							onCenterChange={cruisingMap.handleCenterChange}
+							selfMapPosition={selfMapPosition}
+							selfFuzzRadiusMeters={selfFuzzRadiusMeters}
 						/>
 						{/* Keeps the rail's tabs readable over the map. */}
 						<div
@@ -2160,7 +2182,7 @@ export function GridPage() {
 							className="pointer-events-none absolute inset-y-0 start-0 z-10 hidden w-[calc(var(--nav-rail-width)+4rem)] rail:block"
 							style={{ background: "linear-gradient(to right, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0.75) 55%, transparent 100%)" }}
 						/>
-						{mapCards.length === 0 ? (
+						{mapCards.length === 0 && cruisingMap.spots.length === 0 ? (
 							<div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-8">
 								<p className="rounded-2xl border border-[var(--border)] bg-[var(--surface)]/90 px-4 py-3 text-center text-sm text-[var(--text-muted)] shadow-lg backdrop-blur">
 									{t("browse_page.map_empty", { defaultValue: "Nobody nearby shares their location on the map." })}
@@ -2231,6 +2253,8 @@ export function GridPage() {
 					}}
 				/>
 			)}
+
+			<CruisingMapOverlay state={cruisingMap} onOpenProfile={(profileId) => setActiveProfileId(profileId)} onBeforeSuggest={() => setActiveProfileId(null)} />
 
 			{renderedTileMenu && (
 				<GridTileContextMenu
@@ -2388,6 +2412,8 @@ export function GridPage() {
 								{t("privacy.map", { defaultValue: "Map" })}
 							</p>
 							<MapVisibilityControls variant="sheet" />
+							{/* Free Grind, flag cruising-spots: automatic check-in at spots. */}
+							<CruisingAutoCheckInSection />
 						</div>
 					) : undefined}
 					accentColor={exploreLocation ? "var(--explore)" : undefined}

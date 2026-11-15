@@ -1,13 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { Map as MaplibreMap, Marker } from "maplibre-gl";
 import { useTranslation } from "react-i18next";
 import { usePreferences } from "../../../../contexts/PreferencesContext";
-import { useProfilePhotoPrivacy, type ProfilePhotoPrivacy } from "../../../../hooks/useProfilePhotoPrivacy";
+import { useProfilePhotoPrivacy } from "../../../../hooks/useProfilePhotoPrivacy";
 import type { BrowseCard } from "../../../../types/grid";
-import { decodeGeohash } from "../../../../utils/geohash";
-import { proxyMediaUrl } from "../../../../utils/mediaProxy";
 import { setCrashContext } from "../../../../utils/crashContext";
 import { formatDistance } from "../utils";
+import type { CruisingSpot } from "../../../../services/api/cruisingMethods";
+import { useMapSelfAndSpots } from "../cruising/useMapSelfAndSpots";
+import { buildProfileMarker, isCardOnline } from "./mapProfileMarker";
 import { MAP_STYLE_DARK, applyDarkMapTheme, relaxRoadZoomThresholds } from "./mapStyles";
 
 /**
@@ -16,6 +17,9 @@ import { MAP_STYLE_DARK, applyDarkMapTheme, relaxRoadZoomThresholds } from "./ma
  * computed server-side). The client never learns the fuzz radius or the real
  * position, so nothing here can be used to narrow either down.
  * Reuses the Right Now marker styles (.rn-* in index.css).
+ *
+ * The own profile, its anchor and the cruising spots (Free Grind server) come
+ * from useMapSelfAndSpots, shared with the Right Now map.
  */
 
 export type MapCard = BrowseCard & { fuzzedLat: number; fuzzedLon: number };
@@ -41,59 +45,30 @@ type Props = {
 	topInset: number;
 	/** Width (px) covered by the desktop nav rail at the left of the map. */
 	leftInset?: number;
+	/** The own profile, shown at the own location; a tap selects it like any profile. */
+	selfCard?: BrowseCard | null;
+	/** Cruising spots (Free Grind server). */
+	spots?: CruisingSpot[];
+	selectedSpotId?: string | null;
+	/** The spot the user is checked in at (highlighted). */
+	checkedInSpotId?: string | null;
+	onSelectSpot?: (spotId: string) => void;
+	/** The visual map center after every move (and once loaded). */
+	onCenterChange?: (center: { lat: number; lon: number }) => void;
+	/** Where others see the own profile (the server's obfuscated point); the own marker sits there. Default: the own location. */
+	selfMapPosition?: { lat: number; lon: number } | null;
+	/**
+	 * Randomizer radius (m): while it's set, the real position gets an anchor
+	 * dot and a leash runs to the own marker (the radius itself isn't drawn).
+	 */
+	selfFuzzRadiusMeters?: number | null;
 };
 
-const MARKER_SIZE = 44;
+const NO_SPOTS: CruisingSpot[] = [];
 const MAX_PIXEL_RATIO = 2;
 const MAX_TILE_CACHE_SIZE = 64;
-const NAMEPLATE_ZOOM = 14;
-const USER_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 12a5 5 0 1 0 0-10 5 5 0 0 0 0 10Zm0 2c-4.42 0-8 2.24-8 5v1a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-1c0-2.76-3.58-5-8-5Z"/></svg>`;
-
-function isOnline(card: BrowseCard): boolean {
-	return typeof card.onlineUntil === "number" && card.onlineUntil > Date.now();
-}
-
-function buildMarker(card: MapCard, label: string, privacy: ProfilePhotoPrivacy, onClick: () => void): HTMLDivElement {
-	const el = document.createElement("div");
-	el.className = "rn-marker";
-	el.style.cssText = `width:${MARKER_SIZE}px;height:${MARKER_SIZE}px;cursor:pointer;`;
-	const pop = document.createElement("div");
-	pop.className = "rn-marker-pop";
-	const inner = document.createElement("div");
-	inner.className = "rn-marker-inner";
-	const avatar = document.createElement("div");
-	avatar.style.cssText =
-		"position:absolute;inset:0;border-radius:9999px;border:2px solid var(--accent);background:var(--surface-2);color:var(--text-muted);box-shadow:0 4px 12px rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;overflow:hidden;";
-	if (card.primaryImageUrl && privacy !== "hide") {
-		const img = document.createElement("img");
-		img.src = proxyMediaUrl(card.primaryImageUrl);
-		img.alt = "";
-		img.draggable = false;
-		img.style.cssText = `width:100%;height:100%;object-fit:cover;${privacy === "blur" ? "filter:blur(6px);transform:scale(1.1);" : ""}`;
-		avatar.appendChild(img);
-	} else {
-		avatar.innerHTML = USER_ICON_SVG;
-	}
-	inner.appendChild(avatar);
-	if (isOnline(card)) {
-		const dot = document.createElement("div");
-		dot.style.cssText = "position:absolute;bottom:-2px;right:-2px;width:12px;height:12px;border-radius:9999px;background:#22c55e;border:2px solid var(--bg);";
-		inner.appendChild(dot);
-	}
-	if (label) {
-		const plate = document.createElement("div");
-		plate.className = "rn-nameplate";
-		plate.textContent = label;
-		inner.appendChild(plate);
-	}
-	pop.appendChild(inner);
-	el.appendChild(pop);
-	el.addEventListener("click", (event) => {
-		event.stopPropagation();
-		onClick();
-	});
-	return el;
-}
+/** Name plates for everyone from street level on (same as the Right Now map). */
+const NAMEPLATE_ZOOM = 16;
 
 function buildPinMarker(): HTMLDivElement {
 	const el = document.createElement("div");
@@ -102,25 +77,29 @@ function buildPinMarker(): HTMLDivElement {
 	return el;
 }
 
-function buildYouMarker(label: string): HTMLDivElement {
-	const el = document.createElement("div");
-	el.className = "rn-radar";
-	el.innerHTML = `<div class="rn-radar-ring"></div><div class="rn-radar-ring"></div><div class="rn-radar-dot"></div>`;
-	const tag = document.createElement("div");
-	tag.className = "rn-radar-label";
-	tag.textContent = label;
-	el.appendChild(tag);
-	return el;
-}
-
-export function GridMap({ cards, selectedProfileId, onSelectProfile, explorePin = null, onPlacePin, topInset, leftInset = 0 }: Props) {
+export function GridMap({
+	cards,
+	selectedProfileId,
+	onSelectProfile,
+	explorePin = null,
+	onPlacePin,
+	topInset,
+	leftInset = 0,
+	selfCard = null,
+	spots = NO_SPOTS,
+	selectedSpotId = null,
+	checkedInSpotId = null,
+	onSelectSpot,
+	onCenterChange,
+	selfMapPosition = null,
+	selfFuzzRadiusMeters = null,
+}: Props) {
 	const { t } = useTranslation();
-	const { geohash, unitsPreset } = usePreferences();
+	const { unitsPreset } = usePreferences();
 	const privacy = useProfilePhotoPrivacy();
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const mapRef = useRef<MaplibreMap | null>(null);
 	const maplibreRef = useRef<typeof import("maplibre-gl") | null>(null);
-	const youRef = useRef<Marker | null>(null);
 	const markersRef = useRef(new Map<string, { marker: Marker; signature: string }>());
 	const cardsRef = useRef(cards);
 	cardsRef.current = cards;
@@ -128,6 +107,8 @@ export function GridMap({ cards, selectedProfileId, onSelectProfile, explorePin 
 	onSelectRef.current = onSelectProfile;
 	const onPlacePinRef = useRef(onPlacePin);
 	onPlacePinRef.current = onPlacePin;
+	const onCenterChangeRef = useRef(onCenterChange);
+	onCenterChangeRef.current = onCenterChange;
 	const pinRef = useRef<Marker | null>(null);
 	const explorePinRef = useRef(explorePin);
 	explorePinRef.current = explorePin;
@@ -142,17 +123,20 @@ export function GridMap({ cards, selectedProfileId, onSelectProfile, explorePin 
 		return distance ? `${name} · ${distance}` : name;
 	};
 
-	const ownCenter = useMemo<[number, number] | null>(() => {
-		if (!geohash) return null;
-		try {
-			const { lat, lon } = decodeGeohash(geohash);
-			return [(lon[0] + lon[1]) / 2, (lat[0] + lat[1]) / 2];
-		} catch {
-			return null;
-		}
-	}, [geohash]);
-	const ownCenterRef = useRef(ownCenter);
-	ownCenterRef.current = ownCenter;
+	const selfId = selfCard ? String(selfCard.profileId) : null;
+	const extras = useMapSelfAndSpots(mapRef, maplibreRef, {
+		selfCard,
+		selfMapPosition,
+		selfFuzzRadiusMeters,
+		onSelectSelf: selfId ? () => onSelectRef.current(selfId) : undefined,
+		spots,
+		checkedInSpotId,
+		onSelectSpot,
+	});
+	const extrasRef = useRef(extras);
+	extrasRef.current = extras;
+	const ownCenterRef = useRef(extras.ownCenter);
+	ownCenterRef.current = extras.ownCenter;
 
 	const syncMarkers = useCallback(() => {
 		const map = mapRef.current;
@@ -164,11 +148,11 @@ export function GridMap({ cards, selectedProfileId, onSelectProfile, explorePin 
 			const id = String(card.profileId);
 			next.add(id);
 			const label = labelFor.current(card);
-			const signature = [card.fuzzedLat, card.fuzzedLon, card.primaryImageUrl ?? "", isOnline(card), label, privacyRef.current].join("|");
+			const signature = [card.fuzzedLat, card.fuzzedLon, card.primaryImageUrl ?? "", isCardOnline(card), label, privacyRef.current].join("|");
 			const existing = markers.get(id);
 			if (existing?.signature === signature) continue;
 			existing?.marker.remove();
-			const element = buildMarker(card, label, privacyRef.current, () => onSelectRef.current(id));
+			const element = buildProfileMarker(card, label, privacyRef.current, () => onSelectRef.current(id));
 			markers.set(id, { marker: new maplibregl.Marker({ element, anchor: "center" }).setLngLat([card.fuzzedLon, card.fuzzedLat]).addTo(map), signature });
 		}
 		for (const [id, entry] of markers) {
@@ -194,18 +178,21 @@ export function GridMap({ cards, selectedProfileId, onSelectProfile, explorePin 
 		else pinRef.current.setLngLat([pin.lon, pin.lat]);
 	}, []);
 
-	const applySelection = useCallback((id: string | null) => {
-		let any = false;
-		for (const [markerId, entry] of markersRef.current) {
-			const el = entry.marker.getElement();
-			const selected = markerId === id;
-			any ||= selected;
-			const root = el.classList.contains("rn-marker") ? el : el.querySelector<HTMLElement>(".rn-marker");
-			if (root) root.dataset.selected = selected ? "true" : "false";
-			el.style.zIndex = selected ? "10" : "";
-		}
-		containerRef.current?.classList.toggle("rn-map-has-selection", any);
-	}, []);
+	const applySelection = useCallback(
+		(id: string | null, spotId: string | null) => {
+			let any = extrasRef.current.markSelection(spotId, id != null && id === selfId);
+			for (const [markerId, entry] of markersRef.current) {
+				const el = entry.marker.getElement();
+				const selected = markerId === id;
+				any ||= selected;
+				const root = el.classList.contains("rn-marker") ? el : el.querySelector<HTMLElement>(".rn-marker");
+				if (root) root.dataset.selected = selected ? "true" : "false";
+				el.style.zIndex = selected ? "10" : "";
+			}
+			containerRef.current?.classList.toggle("rn-map-has-selection", any);
+		},
+		[selfId],
+	);
 
 	useEffect(() => {
 		let mounted = true;
@@ -232,6 +219,7 @@ export function GridMap({ cards, selectedProfileId, onSelectProfile, explorePin 
 					relaxRoadZoomThresholds(map);
 					applyDarkMapTheme(map);
 				});
+				map.on("load", () => extrasRef.current.syncAnchor());
 				// Header and nav rail overlay the full-bleed map: keep the
 				// visual center (and "You") in the uncovered part.
 				map.setPadding({ top: insetsRef.current.top, left: insetsRef.current.left, right: 0, bottom: 0 });
@@ -243,13 +231,15 @@ export function GridMap({ cards, selectedProfileId, onSelectProfile, explorePin 
 				const updateZoomClass = () => containerRef.current?.classList.toggle("rn-map-zoomed", map.getZoom() >= NAMEPLATE_ZOOM);
 				map.on("zoom", updateZoomClass);
 				map.once("load", updateZoomClass);
+				const reportCenter = () => {
+					const center = map.getCenter();
+					onCenterChangeRef.current?.({ lat: center.lat, lon: center.lng });
+				};
+				map.on("moveend", reportCenter);
+				map.once("load", reportCenter);
 				mapRef.current = map;
 				setCrashContext("gridMap", "open");
-				if (ownCenterRef.current) {
-					const el = buildYouMarker(t("right_now.map_you", { defaultValue: "You" }));
-					el.style.zIndex = "0";
-					youRef.current = new maplibregl.Marker({ element: el, anchor: "center" }).setLngLat(ownCenterRef.current).addTo(map);
-				}
+				extrasRef.current.sync();
 				syncMarkers();
 				syncPin();
 			} catch {
@@ -265,8 +255,7 @@ export function GridMap({ cards, selectedProfileId, onSelectProfile, explorePin 
 			resizeObserver?.disconnect();
 			for (const entry of markers.values()) entry.marker.remove();
 			markers.clear();
-			youRef.current?.remove();
-			youRef.current = null;
+			extrasRef.current.teardown();
 			pinRef.current?.remove();
 			pinRef.current = null;
 			mapRef.current?.remove();
@@ -279,8 +268,9 @@ export function GridMap({ cards, selectedProfileId, onSelectProfile, explorePin 
 
 	useEffect(() => {
 		syncMarkers();
-		applySelection(selectedProfileId);
-	}, [cards, selectedProfileId, privacy, syncMarkers, applySelection]);
+		applySelection(selectedProfileId, selectedSpotId);
+		// spotHosts: spot markers mount through portals after syncing; mark the selection once they exist.
+	}, [cards, selectedProfileId, selectedSpotId, privacy, extras.spotHosts, syncMarkers, applySelection]);
 
 	useEffect(() => {
 		syncPin();
@@ -292,7 +282,8 @@ export function GridMap({ cards, selectedProfileId, onSelectProfile, explorePin 
 
 	return (
 		<div className="relative h-full w-full">
-			<div ref={containerRef} className="absolute inset-0" style={{ isolation: "isolate" }} />
+			<div ref={containerRef} className="fg-grid-map absolute inset-0" style={{ isolation: "isolate" }} />
+			{extras.portals}
 		</div>
 	);
 }

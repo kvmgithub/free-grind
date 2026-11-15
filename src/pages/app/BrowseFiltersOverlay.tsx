@@ -7,6 +7,7 @@ import { EditQuickFiltersButton } from "../../components/quick-filters/EditQuick
 import { BottomSheet, useBottomSheetClose, SheetCloseButton, SHEET_FOOTER_CLASS, sheetButtonClass } from "../../components/ui/bottom-sheet";
 import { SheetChip, SheetMoreButton, SheetSearchInput, SheetSection } from "../../components/ui/sheet-section";
 import { usePreferences } from "../../contexts/PreferencesContext";
+import { CruisingLayerToggle } from "./gridpage/cruising/CruisingLayerToggle";
 import { useManagedGenders, useManagedTagCategories } from "../../hooks/queries/useProfileQueries";
 import { cn } from "../../utils/cn";
 import { buildTagLabelMap } from "../../utils/tags";
@@ -330,6 +331,7 @@ function BrowseFiltersSheetContent({
 
 			<div className="-mx-4 min-h-0 flex-1 overflow-y-auto px-4" data-lenis-prevent>
 				<div className="space-y-5 pb-2">
+					<CruisingLayerToggle />
 					{renderToggleSection(t("browse_filters.quick_filters"), browseFilterOptions)}
 
 					<SheetSection

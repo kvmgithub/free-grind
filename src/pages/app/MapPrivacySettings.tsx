@@ -11,6 +11,7 @@ import { Slider } from "../../components/ui/range-slider";
 import { usePreferences } from "../../contexts/PreferencesContext";
 import { useApiFunctions } from "../../hooks/useApiFunctions";
 import { useMyOwnProfile, useMySettings } from "../../hooks/queries/useProfileQueries";
+import { ownMapPositionKey } from "../../hooks/queries/useOwnMapPosition";
 import { unwrapOwnProfile } from "./profile-editor/profileEditorUtils";
 import type { MySettings } from "../../types/api-functions";
 
@@ -32,6 +33,8 @@ function useAccountSettings() {
 		queryClient.setQueryData(["my-settings"], { ...settings, ...patch });
 		try {
 			await apiFunctions.updateMySettings(patch);
+			// Show on map / the randomizer radius move the own point on the grid map.
+			if ("showOnMap" in patch || "mapLocationFuzzRadius" in patch) void queryClient.invalidateQueries({ queryKey: ownMapPositionKey });
 		} catch (error) {
 			queryClient.setQueryData(["my-settings"], settings);
 			toast.error(error instanceof Error ? error.message : t("profile_editor.toasts.error_update"));
