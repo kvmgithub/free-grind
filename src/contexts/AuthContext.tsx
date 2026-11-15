@@ -42,7 +42,7 @@ import { runRestoredBlocklist, syncOwnBlocklist } from "../services/ownBlocklist
 import { runRestoredFavorites } from "../services/restoredFavorites";
 import { runTapsAutomationSync } from "../services/tapsSync";
 import { syncSavedPhrasesFromServer } from "../services/savedPhrases";
-import { mintRecaptchaToken, RecaptchaError, type RecaptchaFailure } from "../services/recaptcha";
+import { mintRecaptchaToken, recaptchaFailureMessage, RecaptchaError } from "../services/recaptcha";
 import { IS_GRINDR } from "../services/serverConfig";
 import i18n from "../i18n";
 
@@ -184,13 +184,6 @@ function isInvalidCredentials(appError: AppError | null): boolean {
 	);
 }
 
-// Shown when a sign-in or sign-up needs a reCAPTCHA token (Grindr's
-// first-party reCAPTCHA) but none could be minted.
-const CAPTCHA_MESSAGES: Partial<Record<RecaptchaFailure, string>> = {
-	unsupportedPlatform: "This account needs captcha verification, which is only available on Android.",
-	grindrMissing: "Captcha verification needs the Grindr app installed on this device.",
-};
-const CAPTCHA_FAILED_MESSAGE = "Captcha verification failed. Please try again.";
 
 type AuthAction =
 	| { type: "SET_USER"; payload: number }
@@ -380,6 +373,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 				// Accounts with Grindr's first-party reCAPTCHA fail the plain
 				// /v8 sign-in as invalid credentials. Open Grind retries those
 				// with a reCAPTCHA token via /v9 once the assignment says so.
+				// Grindr only: other flavors mint no tokens. (A literal check, so the
+				// rest of this branch is dropped from their bundle.)
+				if (__FLAVOR__ !== "grindr") throw error;
 				const firstError = asAppError(error);
 				if (firstError?.kind === "VerificationRequired" || !isInvalidCredentials(firstError)) throw error;
 				const required = await callMethod("recaptcha_first_party_enabled").catch((checkError) => {
@@ -413,7 +409,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			if (error instanceof RecaptchaError) {
 				appLog.warn("[Auth] login: reCAPTCHA token unavailable", { reason: error.reason, detail: error.detail });
 				if (error.reason !== "cancelled") {
-					const message = CAPTCHA_MESSAGES[error.reason] ?? CAPTCHA_FAILED_MESSAGE;
+					const message = recaptchaFailureMessage(error.reason);
 					dispatch({ type: "SET_ERROR", payload: { message } });
 				}
 				throw error;
@@ -590,7 +586,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			if (error instanceof RecaptchaError) {
 				appLog.warn("[Auth] signUp: reCAPTCHA token unavailable", { reason: error.reason, detail: error.detail });
 				if (error.reason !== "cancelled") {
-					const message = CAPTCHA_MESSAGES[error.reason] ?? CAPTCHA_FAILED_MESSAGE;
+					const message = recaptchaFailureMessage(error.reason);
 					dispatch({ type: "SET_ERROR", payload: { message } });
 				}
 				throw error;

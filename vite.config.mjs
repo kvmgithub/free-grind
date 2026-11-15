@@ -29,16 +29,22 @@ const commitHash = shortCommitHash();
 const flavor = loadFlavor();
 
 /**
- * Builds other than the grindr flavor ship without the Grindr workarounds:
- * every import of src/grindr-workarounds/index.ts from outside that folder
- * resolves to stub.ts (same API, official behaviour only), so none of the
- * workaround code ends up in the bundle; their texts (the "grindr" i18next
- * namespace, public/locales/<locale>/grindr.json) are left out of the output.
+ * Builds other than the grindr flavor ship without anything that works around
+ * or poses as Grindr. Each module below resolves to a stand-in with the same
+ * API (a *.check.ts next to it keeps them in sync) for every import from
+ * outside its own folder, so the original never ends up in the bundle:
+ *  - src/grindr-workarounds/index.ts → stub.ts (official behaviour only)
+ *  - src/services/recaptcha.ts → recaptcha.unavailable.ts (no token minting)
+ * The workarounds' texts (the "grindr" i18next namespace,
+ * public/locales/<locale>/grindr.json) are left out of the output too.
  */
 function withoutGrindrWorkarounds() {
-	const dir = normalizePath(fileURLToPath(new URL("./src/grindr-workarounds/", import.meta.url)));
-	const index = `${dir}index.ts`;
-	const stub = `${dir}stub.ts`;
+	const src = (file) => normalizePath(fileURLToPath(new URL(`./src/${file}`, import.meta.url)));
+	const swaps = [
+		// Files inside grindr-workarounds/ keep their real siblings.
+		{ original: src("grindr-workarounds/index.ts"), standIn: src("grindr-workarounds/stub.ts"), keepWithin: src("grindr-workarounds/") },
+		{ original: src("services/recaptcha.ts"), standIn: src("services/recaptcha.unavailable.ts") },
+	];
 	let outDir = "";
 	return {
 		name: "without-grindr-workarounds",
@@ -47,10 +53,12 @@ function withoutGrindrWorkarounds() {
 			outDir = path.resolve(config.root, config.build.outDir);
 		},
 		async resolveId(source, importer, options) {
-			if (!importer || !source.includes("grindr-workarounds")) return null;
-			if (normalizePath(importer).startsWith(dir)) return null;
+			if (!importer || !/grindr-workarounds|recaptcha/.test(source)) return null;
 			const resolved = await this.resolve(source, importer, { ...options, skipSelf: true });
-			return resolved && normalizePath(resolved.id) === index ? stub : null;
+			if (!resolved) return null;
+			const swap = swaps.find(({ original }) => normalizePath(resolved.id) === original);
+			if (!swap || (swap.keepWithin && normalizePath(importer).startsWith(swap.keepWithin))) return null;
+			return swap.standIn;
 		},
 		closeBundle() {
 			const locales = path.join(outDir, "locales");

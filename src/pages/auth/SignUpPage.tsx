@@ -83,7 +83,7 @@ export function SignUpPage() {
 	const [verification, setVerification] = useState<{ profileId: string; signIn: SignInRefusal } | null>(null);
 	// Sign-up on the official servers sends a reCAPTCHA token, which only
 	// Android can mint; a self-hosted server needs none.
-	const [recaptchaAvailable] = useState(isRecaptchaAvailable);
+	const [recaptchaAvailable] = useState(() => IS_GRINDR && isRecaptchaAvailable());
 	const hasRecaptcha = isCustom || recaptchaAvailable;
 	const footer = (
 		<div className="flex flex-wrap items-center justify-center gap-1">

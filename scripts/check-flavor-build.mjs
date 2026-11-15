@@ -14,7 +14,11 @@ import { flavorId } from "./flavor.mjs";
 // Strings only the workaround code (src/grindr-workarounds,
 // src-tauri/src/api/entitlements.rs) and its texts (locales/*/grindr.json)
 // contain.
-const FRONTEND_MARKERS = ["enter_honduras", "restore_stranded_location", "entitlement_bypass", "location_finder", "Honduras"];
+const FRONTEND_MARKERS = [
+	"enter_honduras", "restore_stranded_location", "entitlement_bypass", "location_finder", "Honduras",
+	// reCAPTCHA minting (src/services/recaptcha.ts)
+	"mintRecaptchaToken", "fg:recaptcha-result", "recaptcha_first_party_enabled",
+];
 const BINARY_MARKERS = ["honduras-hold.data", "[entitlements]"];
 
 if (flavorId() === "grindr") {
