@@ -564,6 +564,8 @@ export function ProfileDetailsModal({
 	// Leaving it re-reads the profile here, since the parent only fetches it
 	// when the opened profile changes.
 	const [isEditingOwnProfile, setIsEditingOwnProfile] = useState(initialEditMode);
+	// Edit mode opened from the open link requests row: the editor scrolls there.
+	const [focusLinkedProfilesOnEdit, setFocusLinkedProfilesOnEdit] = useState(false);
 	const [hasUnsavedOwnEdits, setHasUnsavedOwnEdits] = useState(false);
 	const [isDiscardEditsPromptOpen, setIsDiscardEditsPromptOpen] = useState(false);
 	const [refreshedOwnProfile, setRefreshedOwnProfile] = useState<ProfileDetail | null>(null);
@@ -585,6 +587,7 @@ export function ProfileDetailsModal({
 		setRefreshedOwnProfile(null);
 		setEditedOwnPhotoHashes(null);
 		setIsEditingOwnProfile(false);
+		setFocusLinkedProfilesOnEdit(false);
 	}, [openedProfileId]);
 	const activeProfile = refreshedOwnProfile ?? activeProfileProp;
 	const activeProfilePhotoHashes = useMemo(
@@ -633,6 +636,7 @@ export function ProfileDetailsModal({
 
 	const finishOwnProfileEdit = useCallback(() => {
 		setIsEditingOwnProfile(false);
+		setFocusLinkedProfilesOnEdit(false);
 		setHasUnsavedOwnEdits(false);
 		setIsDiscardEditsPromptOpen(false);
 		if (userId == null) return;
@@ -643,6 +647,10 @@ export function ProfileDetailsModal({
 			ownProfileDataCache.set(ownId, { tags: fresh.profileTags ?? [] });
 		}).catch((error) => appLog.warn("Failed to reload own profile after editing", error));
 	}, [apiFunctions, userId]);
+	const manageOwnLinkedProfiles = useCallback(() => {
+		setFocusLinkedProfilesOnEdit(true);
+		setIsEditingOwnProfile(true);
+	}, []);
 	const toggleOwnProfileEdit = () => {
 		if (!isEditingOwnProfile) setIsEditingOwnProfile(true);
 		else if (hasUnsavedOwnEdits) setIsDiscardEditsPromptOpen(true);
@@ -1214,6 +1222,9 @@ export function ProfileDetailsModal({
 			s.dragging = false;
 			s.lastDelta = 0;
 			s.pastThreshold = false;
+			// Horizontal scrollers (e.g. the linked profiles strip) keep their drags:
+			// decided as vertical, so onMove leaves them alone.
+			if ((e.target as Element | null)?.closest?.("[data-no-profile-swipe]")) s.decided = true;
 		};
 
 		const onMove = (e: TouchEvent) => {
@@ -2900,7 +2911,7 @@ export function ProfileDetailsModal({
 					) : activeProfileError ? (
 						<p className="text-sm text-[var(--text-muted)]">{activeProfileError}</p>
 					) : activeProfile && isOwnProfile && isEditingOwnProfile ? (
-						<OwnProfileEditPanel onDone={finishOwnProfileEdit} onDirtyChange={setHasUnsavedOwnEdits} onPhotoHashesChange={setEditedOwnPhotoHashes} onPhotoControlsChange={setOwnPhotoControls} />
+						<OwnProfileEditPanel onDone={finishOwnProfileEdit} onDirtyChange={setHasUnsavedOwnEdits} onPhotoHashesChange={setEditedOwnPhotoHashes} onPhotoControlsChange={setOwnPhotoControls} focusLinkedProfiles={focusLinkedProfilesOnEdit} />
 					) : activeProfile ? (
 						<ProfileDetailsContent
 							activeProfile={activeProfile}
@@ -2924,6 +2935,7 @@ export function ProfileDetailsModal({
 							onTapProfile={variant === "page" && !isOwnProfile ? onTapProfile : undefined}
 							onTagClick={onTagClick}
 							onPhotoIndexChange={setMobileCarouselPhotoIndex}
+							onManageLinkedProfiles={isOwnProfile ? manageOwnLinkedProfiles : undefined}
 							isTapDisabled={isTapDisabled}
 							isTapBlocked={isTapBlocked}
 							isTapActive={isTapActive}
@@ -3283,7 +3295,7 @@ export function ProfileDetailsModal({
 									) : activeProfileError ? (
 										<p className="text-sm text-[var(--text-muted)]">{activeProfileError}</p>
 									) : activeProfile && isOwnProfile && isEditingOwnProfile ? (
-										<OwnProfileEditPanel onDone={finishOwnProfileEdit} onDirtyChange={setHasUnsavedOwnEdits} onPhotoHashesChange={setEditedOwnPhotoHashes} onPhotoControlsChange={setOwnPhotoControls} />
+										<OwnProfileEditPanel onDone={finishOwnProfileEdit} onDirtyChange={setHasUnsavedOwnEdits} onPhotoHashesChange={setEditedOwnPhotoHashes} onPhotoControlsChange={setOwnPhotoControls} focusLinkedProfiles={focusLinkedProfilesOnEdit} />
 									) : activeProfile ? (
 										<ProfileDetailsContent
 											activeProfile={activeProfile}
@@ -3305,6 +3317,7 @@ export function ProfileDetailsModal({
 											messageProfileId={messageProfileId}
 											onMessageProfile={undefined}
 											onTapProfile={undefined}
+											onManageLinkedProfiles={isOwnProfile ? manageOwnLinkedProfiles : undefined}
 											onTagClick={onTagClick}
 											isTapDisabled={isTapDisabled}
 											isTapBlocked={isTapBlocked}

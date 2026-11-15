@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { ChevronRight, Link2, ShieldCheck, Users } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate } from "react-router-dom";
@@ -10,11 +11,16 @@ import {
 } from "../../../hooks/queries/useReputationQueries";
 import type { ProfileReputation } from "../../../services/api/reputationMethods";
 import { ProfileImage } from "../../../components/ui/profile-image";
+import { NATIVE_SHEET_BG } from "../../../components/ui/action-sheet";
+import { SheetCloseButton } from "../../../components/ui/bottom-sheet";
+import { ControlledBottomSheet } from "../../../components/ui/controlled-sheet";
+import { useDesktopBreakpoint } from "../../../hooks/useDesktopBreakpoint";
+import { LinkedProfileRow } from "./LinkedProfileRow";
 import { getThumbImageUrl, validateMediaHash } from "../../../utils/media";
 
-export const LINKED_PROFILES_PATH = "/settings/linked-profiles";
-
 const SECTION_LABEL_CLASS = "text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]";
+/** From this many links on, the strip gets a "Show all" sheet. */
+const SHOW_ALL_FROM = 4;
 
 /** The five-step index as dots, filled up to the level. */
 function ReputationLevelDots({ level }: { level: number }) {
@@ -66,9 +72,18 @@ export function ReputationSummary({ reputation }: { reputation: ProfileReputatio
  * Below the Spotify songs: the profiles linked to this one (only when there
  * are any) and its reputation index (Free Grind server, flag
  * `profile-reputation`). Link requests and the "personally known" mark live in
- * the profile's actions menu; the own profile points to the management page.
+ * the profile's actions menu; on the own profile, the open requests row opens
+ * the editor's linked profiles section (`onManage`), where links are managed.
  */
-export function ProfileNetworkSection({ profileId, isPreview = false }: { profileId: string; isPreview?: boolean }) {
+export function ProfileNetworkSection({
+	profileId,
+	isPreview = false,
+	onManage,
+}: {
+	profileId: string;
+	isPreview?: boolean;
+	onManage?: () => void;
+}) {
 	const { t } = useTranslation();
 	const navigate = useNavigate();
 	const location = useLocation();
@@ -79,6 +94,10 @@ export function ProfileNetworkSection({ profileId, isPreview = false }: { profil
 	const { data: reputation } = useProfileReputation(profileId, active);
 	const { data: links } = useProfileLinks(profileId, active);
 	const { data: myLinks } = useMyProfileLinks(active && isOwnProfile);
+	const isDesktop = useDesktopBreakpoint();
+	const [isAllOpen, setIsAllOpen] = useState(false);
+	// Opened from the sheet: navigate once it slid out and popped its history entry.
+	const [openAfterClose, setOpenAfterClose] = useState<string | null>(null);
 
 	const linkedProfiles = links?.links ?? [];
 	const incomingCount = isOwnProfile ? (myLinks?.incoming.length ?? 0) : 0;
@@ -96,43 +115,62 @@ export function ProfileNetworkSection({ profileId, isPreview = false }: { profil
 			state: { returnTo: location.pathname, stacked: true, ...(backgroundLocation ? { backgroundLocation } : {}) },
 		});
 	};
-	const openManagePage = () => navigate(LINKED_PROFILES_PATH, { state: { returnTo: location.pathname, stacked: true } });
 
 	return (
 		<>
 			{showLinks && (
 				<div className="px-3">
-					<div className="mb-2 flex min-h-5 items-center justify-between">
-						<p className={SECTION_LABEL_CLASS}>{t("profile_network.linked_profiles")}</p>
-						{isOwnProfile && (
-							<button type="button" onClick={openManagePage} className="-my-1.5 rounded-lg px-2 py-1.5 text-sm font-semibold text-[var(--accent)] transition active:opacity-60">
-								{t("profile_network.manage")}
+					<div className="mb-2 flex min-h-5 items-center justify-between gap-3">
+						<p className={SECTION_LABEL_CLASS}>
+							{t("profile_network.linked_profiles")}
+							{linkedProfiles.length > 0 && <span className="ms-1.5 tabular-nums">{linkedProfiles.length}</span>}
+						</p>
+						{linkedProfiles.length >= SHOW_ALL_FROM && (
+							<button
+								type="button"
+								onClick={() => setIsAllOpen(true)}
+								className="-my-1.5 rounded-lg px-2 py-1.5 text-sm font-semibold text-[var(--accent-readable)] transition active:opacity-60"
+							>
+								{t("profile_network.show_all")}
 							</button>
 						)}
 					</div>
-					{/* Tiles like the Spotify songs above: photo, name below. */}
+					{/* One row of tiles, scrolled sideways and bled to the edges; the
+					    profile pager leaves its drags alone (data-no-profile-swipe). */}
 					{linkedProfiles.length > 0 && (
-						<div className="grid grid-cols-4 gap-2 sm:grid-cols-5">
+						<div
+							data-no-profile-swipe
+							data-lenis-prevent
+							className="-mx-3 flex snap-x snap-mandatory scroll-px-3 gap-2 overflow-x-auto overscroll-x-contain px-3 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+						>
 							{linkedProfiles.map((profile) => {
 								const name = profile.displayName?.trim() || t("common.unknown_display_name");
 								const avatarUrl = profile.primaryMediaHash && validateMediaHash(profile.primaryMediaHash) ? getThumbImageUrl(profile.primaryMediaHash, "320x320") : null;
 								return (
-									<button key={profile.profileId} type="button" onClick={() => openProfile(profile.profileId)} className="group min-w-0 text-start">
+									<button
+										key={profile.profileId}
+										type="button"
+										onClick={() => openProfile(profile.profileId)}
+										className="group w-[6.5rem] shrink-0 snap-start text-start sm:w-28"
+									>
 										{/* Name inside the tile, like the grid: white on a bottom gradient. */}
-										<span className="relative block aspect-square w-full overflow-hidden rounded-lg bg-[var(--surface-2)] ring-1 ring-[var(--border)] transition group-hover:ring-[var(--accent)]">
+										<span className="relative block aspect-[3/4] w-full overflow-hidden rounded-xl bg-[var(--surface-2)]">
 											<ProfileImage src={avatarUrl} alt={t("profile_details.photo_alt", { name })} placeholder="silhouette" />
-											<span className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-black/70 via-black/25 to-transparent" />
-											<span className="absolute inset-x-1.5 bottom-1.5 truncate text-xs font-semibold text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]">{name}</span>
+											<span className="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-black/75 via-black/30 to-transparent" />
+											<span className="absolute inset-x-2 bottom-1.5 truncate text-xs font-semibold text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]">{name}</span>
+											{/* Border inside the tile, over the photo: an outer ring would be
+											    clipped by the scroller (overflow-x also clips vertically). */}
+											<span className="pointer-events-none absolute inset-0 rounded-xl ring-1 ring-inset ring-[var(--border)] transition group-hover:ring-2 group-hover:ring-[var(--accent)] group-focus-visible:ring-2 group-focus-visible:ring-[var(--accent)]" />
 										</span>
 									</button>
 								);
 							})}
 						</div>
 					)}
-					{incomingCount > 0 && (
+					{incomingCount > 0 && onManage && (
 						<button
 							type="button"
-							onClick={openManagePage}
+							onClick={onManage}
 							className={`flex min-h-12 w-full items-center gap-3 rounded-2xl bg-[var(--surface-2)] px-4 text-start transition hover-fill [--hover-base:var(--surface-2)] ${linkedProfiles.length > 0 ? "mt-3" : ""}`}
 						>
 							<Link2 className="h-4 w-4 shrink-0 text-[var(--accent)]" />
@@ -143,6 +181,42 @@ export function ProfileNetworkSection({ profileId, isPreview = false }: { profil
 					)}
 				</div>
 			)}
+
+			<ControlledBottomSheet
+				isOpen={isAllOpen}
+				onDismiss={() => setIsAllOpen(false)}
+				onClosed={() => {
+					if (openAfterClose) openProfile(openAfterClose);
+					setOpenAfterClose(null);
+				}}
+				expandable={linkedProfiles.length > 6}
+				isDesktop={isDesktop}
+				bg={NATIVE_SHEET_BG}
+				panelClassName={isDesktop ? "max-h-[85dvh] px-4" : "px-4"}
+			>
+				<div className="mb-3 flex shrink-0 items-center justify-between gap-3">
+					<p className="text-base font-semibold text-[var(--text)]">
+						{t("profile_network.linked_profiles")}
+						<span className="ms-1.5 tabular-nums text-[var(--text-muted)]">{linkedProfiles.length}</span>
+					</p>
+					<SheetCloseButton />
+				</div>
+				<div className="-mx-4 min-h-0 flex-1 overflow-y-auto px-4 pb-2" data-lenis-prevent>
+					<div className="native-group">
+						{linkedProfiles.map((profile) => (
+							<LinkedProfileRow
+								key={profile.profileId}
+								profile={profile}
+								subtitle={profile.since ? t("profile_network.linked_since", { date: new Date(profile.since).toLocaleDateString() }) : undefined}
+								onOpen={(id) => {
+									setOpenAfterClose(id);
+									setIsAllOpen(false);
+								}}
+							/>
+						))}
+					</div>
+				</div>
+			</ControlledBottomSheet>
 
 			{reputation && (
 				<div className="px-3">

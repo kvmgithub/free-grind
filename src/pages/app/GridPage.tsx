@@ -1444,6 +1444,19 @@ export function GridPage() {
 		setActiveProfileId(profileId);
 	};
 
+	// From the map (markers, cruising spots): like Right Now's map — full screen
+	// on mobile with the map kept mounted underneath (backgroundLocation, see
+	// App.tsx), so closing returns to the same map view; the modal on desktop.
+	const openProfileFromMap = (profileId: string) => {
+		if (window.matchMedia("(max-width: 639px)").matches) {
+			navigate(`/profile/${profileId}`, {
+				state: { returnTo: `${location.pathname}${location.search}`, backgroundLocation: location },
+			});
+			return;
+		}
+		setActiveProfileId(profileId);
+	};
+
 	// Neighbours in grid order, so the open profile can step to the next one.
 	const activeCardIndex = activeProfileId ? sortedCards.findIndex((c) => c.profileId === activeProfileId) : -1;
 	const prevCardProfileId = activeCardIndex > 0 ? sortedCards[activeCardIndex - 1].profileId : null;
@@ -2161,7 +2174,7 @@ export function GridPage() {
 							cards={mapCards}
 							selectedProfileId={activeProfileId}
 							onSelectProfile={(profileId) => {
-								if (profileId) setActiveProfileId(profileId);
+								if (profileId) openProfileFromMap(profileId);
 							}}
 							explorePin={exploreLocation ? explorePin : null}
 							onPlacePin={exploreLocation ? handlePlaceExplorePin : undefined}
@@ -2254,7 +2267,7 @@ export function GridPage() {
 				/>
 			)}
 
-			<CruisingMapOverlay state={cruisingMap} onOpenProfile={(profileId) => setActiveProfileId(profileId)} onBeforeSuggest={() => setActiveProfileId(null)} />
+			<CruisingMapOverlay state={cruisingMap} onOpenProfile={openProfileFromMap} onBeforeSuggest={() => setActiveProfileId(null)} />
 
 			{renderedTileMenu && (
 				<GridTileContextMenu

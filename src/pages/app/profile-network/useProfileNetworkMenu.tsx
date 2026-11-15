@@ -1,3 +1,4 @@
+import { linkErrorMessage } from "./linkErrorMessage";
 import { type ReactNode, useState } from "react";
 import { Check, Link2, Unlink, UserCheck, UserX, X } from "lucide-react";
 import { toast } from "react-hot-toast";
@@ -67,7 +68,7 @@ export function useProfileNetworkMenu({
 					else if (action === "request") toast.success(t("profile_network.request_sent_toast"));
 					setConfirmUnlink(false);
 				},
-				onError: (error) => toast.error(error instanceof Error ? error.message : t("profile_network.errors.link_failed")),
+				onError: (error) => toast.error(linkErrorMessage(error, t)),
 			},
 		);
 	};

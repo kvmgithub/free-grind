@@ -1,3 +1,4 @@
+import { linkErrorMessage } from "../profile-network/linkErrorMessage";
 import type { ReactNode } from "react";
 import { Check, Link2, Loader2, X } from "lucide-react";
 import { toast } from "react-hot-toast";
@@ -67,7 +68,7 @@ export function ProfileLinkRequestCard({
 				onSuccess: () => {
 					if (action === "accept") toast.success(t("profile_network.linked_toast"));
 				},
-				onError: (error) => toast.error(error instanceof Error ? error.message : t("profile_network.errors.link_failed")),
+				onError: (error) => toast.error(linkErrorMessage(error, t)),
 			},
 		);
 	};

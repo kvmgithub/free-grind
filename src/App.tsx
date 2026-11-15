@@ -22,7 +22,6 @@ import { GridProfilePage } from "./pages/app/GridProfilePage.tsx";
 import { AboutPage } from "./pages/app/AboutPage.tsx";
 import { SettingsBlockedPage } from "./pages/app/SettingsBlockedPage.tsx";
 import { SettingsHiddenPage } from "./pages/app/SettingsHiddenPage.tsx";
-import { SettingsLinkedProfilesPage } from "./pages/app/SettingsLinkedProfilesPage.tsx";
 import { SettingsBlockHistoryPage } from "./pages/app/SettingsBlockHistoryPage.tsx";
 import { SharedAlbumsPage } from "./pages/app/SharedAlbumsPage.tsx";
 import { VideoGalleryPage } from "./pages/app/VideoGalleryPage.tsx";
@@ -302,7 +301,6 @@ export default function App() {
 								<Route path="/settings/albums" element={<Navigate to="/settings" replace />} />
 								<Route path="/settings/blocked" element={<SettingsBlockedPage />} />
 								<Route path="/settings/hidden" element={<SettingsHiddenPage />} />
-								<Route path="/settings/linked-profiles" element={<SettingsLinkedProfilesPage />} />
 								<Route path="/settings/transfer-account" element={<Navigate to="/settings#transfer-account" replace />} />
 								<Route path="/settings/block-history" element={<SettingsBlockHistoryPage />} />
 								<Route path="/settings/sexual-health" element={<SexualHealthPage />} />

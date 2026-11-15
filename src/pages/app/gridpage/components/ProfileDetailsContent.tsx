@@ -184,6 +184,8 @@ type ProfileDetailsContentProps = {
 	/** The content sits on a native card (the desktop modal) rather than the page. */
 	isOnCard?: boolean;
 	isChatLinkedProfile?: boolean;
+	/** Own profile: opens edit mode at the linked profiles section. */
+	onManageLinkedProfiles?: () => void;
 };
 
 export function ProfileDetailsContent({
@@ -236,6 +238,7 @@ export function ProfileDetailsContent({
 	isPreview = false,
 	isOnCard = false,
 	isChatLinkedProfile = false,
+	onManageLinkedProfiles,
 }: ProfileDetailsContentProps) {
 	const { t, i18n } = useTranslation();
 	// Only chat partners get their photos locally cached (see avatarStore.ts) —
@@ -917,7 +920,7 @@ export function ProfileDetailsContent({
 			)}
 
 			{/* Linked profiles + reputation index (Free Grind server, flag profile-reputation). */}
-			<ProfileNetworkSection profileId={String(activeProfile.profileId)} isPreview={isPreview} />
+			<ProfileNetworkSection profileId={String(activeProfile.profileId)} isPreview={isPreview} onManage={onManageLinkedProfiles} />
 
 			<div className="px-3">
 				<p className="mb-2 text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">

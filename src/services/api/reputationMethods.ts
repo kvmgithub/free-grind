@@ -44,7 +44,8 @@ const myLinksSchema = z.object({
 	links: z.array(linkedProfileSchema).default([]),
 	incoming: z.array(linkedProfileSchema).default([]),
 	outgoing: z.array(linkedProfileSchema).default([]),
-	max: z.number().default(10),
+	/** Tier limit (entitlement `profile.links.max`); null = unlimited. */
+	max: z.number().nullable().default(10),
 });
 export type MyProfileLinks = z.infer<typeof myLinksSchema>;
 
