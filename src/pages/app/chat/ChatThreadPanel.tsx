@@ -314,7 +314,8 @@ type ChatThreadPanelProps = {
 	selectedActionMessageMine: boolean;
 	isAlbumSheetOpen: boolean;
 	onOpenMediaSheet?: () => void;
-	isPartnerTyping?: boolean;
+	/** Who is typing in this thread right now (others only). */
+	typingProfileIds?: readonly number[];
 	isArchived?: boolean;
 	archivedReason?: ArchivedReason | null;
 	mergeableConversations?: ConversationEntry[];
@@ -855,7 +856,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 		selectedActionMessageMine,
 		isAlbumSheetOpen,
 		onOpenMediaSheet,
-		isPartnerTyping = false,
+		typingProfileIds,
 		toggleDrawer,
 		isDrawerOpen,
 		isLoadingDrawer,
@@ -2235,7 +2236,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 						ownAlbumMediaCountMap={albumMediaCountMap}
 						ownAlbumNameMap={ownAlbumNameMap}
 						threadBottomRef={threadBottomRef}
-						isPartnerTyping={isPartnerTyping}
+						typingProfileIds={typingProfileIds}
 						isArchived={isArchived}
 						localNickname={localNickname}
 						messageTranslations={messageTranslations}

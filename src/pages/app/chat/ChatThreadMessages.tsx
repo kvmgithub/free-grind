@@ -144,7 +144,8 @@ type ChatThreadMessagesProps = {
 	ownAlbumMediaCountMap?: Map<number, AlbumMediaCount>;
 	ownAlbumNameMap?: Map<number, string>;
 	threadBottomRef: { current: HTMLDivElement | null };
-	isPartnerTyping?: boolean;
+	/** Who is typing in this thread right now (others only), in the order they started. */
+	typingProfileIds?: readonly number[];
 	isArchived?: boolean;
 	localNickname?: string | null;
 	messageTranslations: MessageTranslations;
@@ -395,7 +396,7 @@ export function ChatThreadMessages({
 	ownAlbumMediaCountMap,
 	ownAlbumNameMap,
 	threadBottomRef,
-	isPartnerTyping = false,
+	typingProfileIds,
 	isArchived = false,
 	localNickname = null,
 	messageTranslations,
@@ -2989,16 +2990,50 @@ export function ChatThreadMessages({
                     </div>
                 ));
             })()}
-            </div>
-            {isPartnerTyping && (
-                <div className="flex items-end gap-2 px-4 py-1">
-                    <div className="flex items-center gap-1 rounded-2xl rounded-es-sm bg-[var(--surface-2)] px-3 py-2.5">
-                        <span className="h-2 w-2 animate-bounce rounded-full bg-[var(--text-muted)]" style={{ animationDelay: "0ms" }} />
-                        <span className="h-2 w-2 animate-bounce rounded-full bg-[var(--text-muted)]" style={{ animationDelay: "160ms" }} />
-                        <span className="h-2 w-2 animate-bounce rounded-full bg-[var(--text-muted)]" style={{ animationDelay: "320ms" }} />
+            {typingProfileIds && typingProfileIds.length > 0 && (() => {
+                // Styled like an incoming text bubble; groups also show who is typing.
+                const typers = typingProfileIds;
+                const names = typers.map((id) => groupNameOf(id));
+                const label = !isGroupThread
+                    ? null
+                    : names.length === 1
+                        ? t("chat.typing_single", { name: names[0] })
+                        : names.length === 2
+                            ? t("chat.typing_pair", { first: names[0], second: names[1] })
+                            : t("chat.typing_group", { first: names[0], second: names[1], count: names.length - 2 });
+                const shownAvatars = typers.slice(0, 3);
+                return (
+                    <div className="flex w-full animate-typing-in flex-col items-start" role="status" aria-live="polite">
+                        <div className="flex items-center gap-1 rounded-2xl rounded-es-[3px] bg-[var(--surface-2)] px-3.5 py-3" aria-hidden="true">
+                            {[0, 1, 2].map((i) => (
+                                <span
+                                    key={i}
+                                    className="h-2 w-2 animate-typing-dot rounded-full bg-[var(--accent)]"
+                                    style={{ animationDelay: `${i * 0.15}s` }}
+                                />
+                            ))}
+                        </div>
+                        {label ? (
+                            <div className="mt-1 flex max-w-full items-center gap-1.5 text-[11px] font-medium text-[var(--text-muted)]">
+                                <span className="flex shrink-0 gap-0.5">
+                                    {shownAvatars.map((id) => {
+                                        const avatarHash = groupMembers.avatarOf(id);
+                                        return (
+                                            <span key={id} className="h-4 w-4 overflow-hidden rounded-full bg-[var(--surface-2)]">
+                                                <ProfileImage src={resolveAvatarSrc(avatarHash, getParticipantAvatarUrl(avatarHash))} alt="" iconClassName="h-2.5 w-2.5" />
+                                            </span>
+                                        );
+                                    })}
+                                </span>
+                                <span className="truncate">{label}</span>
+                            </div>
+                        ) : (
+                            <span className="sr-only">{t("chat.typing")}</span>
+                        )}
                     </div>
-                </div>
-            )}
+                );
+            })()}
+            </div>
             <div ref={threadBottomRef} className="h-3 shrink-0" />
 			{reactionParticles && reactionParticles.items.map((p, i) => p.emoji ? (
 				<span

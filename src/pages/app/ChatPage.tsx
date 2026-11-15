@@ -161,7 +161,7 @@ import type { ChatContactIndexRecord } from "../../types/chat-contact-index";
 import { markInboxSeen } from "../../services/seenStore";
 import { clearAutomationSeenHistoryForSender, runAutomationRulesForSender } from "../../utils/automationRules";
 import { consumeSelfBlockAction } from "../../utils/selfBlockActions";
-import { isReadReceiptsHidden, markServerUnreadReadLocally, setLocalReadMarker } from "../../utils/privacy";
+import { getIncognitoMode, isReadReceiptsHidden, markServerUnreadReadLocally, setLocalReadMarker } from "../../utils/privacy";
 import { clearChatNotifications } from "../../services/localNotify";
 import { takePendingSharedImages, usePendingSharedImages } from "../../services/sharedImages";
 import { sendUploadedChatMedia, uploadChatMediaFile } from "../../services/chatMediaSend";
@@ -711,8 +711,13 @@ export function ChatPage() {
 	const [isLoadingOlderMessages, setIsLoadingOlderMessages] = useState(false);
 	const [threadError, setThreadError] = useState<string | null>(null);
 	const [draft, setDraft] = useState("");
-	const [typingConversationIds, setTypingConversationIds] = useState<Set<string>>(new Set());
+	// Who is typing where: conversation → profile ids, in the order they started.
+	const [typingProfilesByConversation, setTypingProfilesByConversation] = useState<Map<string, number[]>>(new Map());
+	const typingConversationIds = useMemo(() => new Set(typingProfilesByConversation.keys()), [typingProfilesByConversation]);
+	// Keyed `${conversationId}:${profileId}`.
 	const typingExpireTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+	const typingUserIdRef = useRef(userId);
+	typingUserIdRef.current = userId;
 	const isSendingTypingRef = useRef(false);
 	const typingDebounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const [replyTargetMessageId, setReplyTargetMessageId] = useState<string | null>(null);
@@ -3867,37 +3872,46 @@ export function ChatPage() {
 		const onTyping = (event: Event) => {
 			const detail = (event as CustomEvent<TypingStatusDetail>).detail;
 			if (!detail) return;
-			const { conversationId, status } = detail;
-			if (status === "Typing") {
-				setTypingConversationIds((prev) => {
-					const next = new Set(prev);
-					next.add(conversationId);
+			const { conversationId } = detail;
+			const profileId = Number(detail.profileId);
+			if (!Number.isFinite(profileId)) return;
+			// Our own typing (e.g. echoed from another device) isn't shown.
+			const ownId = typingUserIdRef.current;
+			if (ownId != null && profileId === Number(ownId)) return;
+			const timerKey = `${conversationId}:${profileId}`;
+			const removeTyper = () =>
+				setTypingProfilesByConversation((prev) => {
+					const current = prev.get(conversationId);
+					if (!current?.includes(profileId)) return prev;
+					const next = new Map(prev);
+					const remaining = current.filter((id) => id !== profileId);
+					if (remaining.length > 0) next.set(conversationId, remaining);
+					else next.delete(conversationId);
+					return next;
+				});
+			const existing = typingExpireTimers.current.get(timerKey);
+			if (existing) {
+				clearTimeout(existing);
+				typingExpireTimers.current.delete(timerKey);
+			}
+			if (detail.status === "Typing") {
+				setTypingProfilesByConversation((prev) => {
+					const current = prev.get(conversationId) ?? [];
+					if (current.includes(profileId)) return prev;
+					const next = new Map(prev);
+					next.set(conversationId, [...current, profileId]);
 					return next;
 				});
 				// Auto-expire after 8s in case Cleared never arrives
-				const existing = typingExpireTimers.current.get(conversationId);
-				if (existing) clearTimeout(existing);
-				const timer = setTimeout(() => {
-					setTypingConversationIds((prev) => {
-						const next = new Set(prev);
-						next.delete(conversationId);
-						return next;
-					});
-					typingExpireTimers.current.delete(conversationId);
-				}, 8000);
-				typingExpireTimers.current.set(conversationId, timer);
+				typingExpireTimers.current.set(
+					timerKey,
+					setTimeout(() => {
+						typingExpireTimers.current.delete(timerKey);
+						removeTyper();
+					}, 8000),
+				);
 			} else {
-				setTypingConversationIds((prev) => {
-					if (!prev.has(conversationId)) return prev;
-					const next = new Set(prev);
-					next.delete(conversationId);
-					return next;
-				});
-				const existing = typingExpireTimers.current.get(conversationId);
-				if (existing) {
-					clearTimeout(existing);
-					typingExpireTimers.current.delete(conversationId);
-				}
+				removeTyper();
 			}
 		};
 		// A conversation's archived flag changed somewhere that doesn't have
@@ -3996,7 +4010,7 @@ export function ChatPage() {
 	const selectedConversationIdForTyping = selectedConversation?.data.conversationId ?? null;
 	useEffect(() => {
 		if (!selectedConversationIdForTyping) return;
-		if (isReadReceiptsHidden(selectedConversationIdForTyping)) return;
+		if (isReadReceiptsHidden(selectedConversationIdForTyping) || getIncognitoMode()) return;
 		const cid = selectedConversationIdForTyping;
 
 		if (typingDebounceTimer.current) {
@@ -8012,7 +8026,7 @@ export function ChatPage() {
 			selectedActionMessageMine={selectedActionMessageMine}
 			isAlbumSheetOpen={albumViewer !== null}
 			onOpenMediaSheet={() => setIsChatMediaSheetOpen(true)}
-			isPartnerTyping={selectedConversation != null && typingConversationIds.has(selectedConversation.data.conversationId)}
+			typingProfileIds={selectedConversation != null ? typingProfilesByConversation.get(selectedConversation.data.conversationId) : undefined}
 		/>
 	);
 
