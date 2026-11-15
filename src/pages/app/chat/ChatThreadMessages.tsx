@@ -1,5 +1,5 @@
 import { MapPinFilled } from "../../../components/icons/FilledIcons";
-import { Album, Ban, CircleAlert, Copy, Download, Eye, History, ImagePlay, Images, Languages, Loader2, Lock, MessageCircleQuestion, MessageSquarePlus, Mic, MoreVertical, PhoneOff, Play, Repeat2, Reply, RotateCw, ShieldCheck, Trash2, Undo2, Link2, UserRound, UsersRound, Video, VideoOff, ImageOff } from "lucide-react";
+import { Album, Ban, CircleAlert, Copy, Download, Eye, History, ImagePlay, Images, Languages, Loader2, Lock, MessageCircleQuestion, MessageSquarePlus, Mic, MoreVertical, Pencil, PhoneOff, Play, Repeat2, Reply, RotateCw, ShieldCheck, Trash2, Undo2, Link2, UserRound, UsersRound, Video, VideoOff, ImageOff } from "lucide-react";
 import { sentMediaEcho } from "./sentMediaEchoes";
 import { TakenOnGrindrBadge } from "./TakenOnGrindrBadge";
 import { createPortal } from "react-dom";
@@ -138,6 +138,9 @@ type ChatThreadMessagesProps = {
 	handleRetry: (message: Message) => void;
 	handleReply: (message: Message) => void | Promise<void>;
 	canReply: boolean;
+	/** Whether a message can be edited here (flag chat-message-edit, my own text message). */
+	canEditMessage: (message: UiMessage) => boolean;
+	handleEdit: (message: UiMessage) => void;
 	handleStopAlbumShare: (albumId: number) => void | Promise<void>;
 	handleRemoveLocalAlbum: (albumId: number) => void | Promise<void>;
 	/** Image/video counts of the user's own albums (received ones come from albumStore). */
@@ -391,6 +394,8 @@ export function ChatThreadMessages({
 	handleRetry,
 	handleReply,
 	canReply,
+	canEditMessage,
+	handleEdit,
 	handleStopAlbumShare,
 	handleRemoveLocalAlbum,
 	ownAlbumMediaCountMap,
@@ -925,6 +930,16 @@ export function ChatThreadMessages({
 			});
 		}
 
+		if (canEditMessage(message)) {
+			actions.push({
+				key: "edit",
+				label: t("chat.actions.edit"),
+				icon: <Pencil className="h-4 w-4" />,
+				onClick: () => handleEdit(message),
+				disabled: isMutating,
+			});
+		}
+
 		if (hasText || location) {
 			actions.push({
 				key: "copy",
@@ -1061,6 +1076,8 @@ export function ChatThreadMessages({
 		t,
 		handleReply,
 		canReply,
+		canEditMessage,
+		handleEdit,
 		handleCopy,
 		handleAddToSavedPhrases,
 		handleUnsend,
@@ -2896,6 +2913,9 @@ export function ChatThreadMessages({
                                         <div className="flex items-center gap-2">
                                             {localOnly ? (
                                                 <span title={t("chat.thread.from_local_history")}><History className="h-3 w-3 opacity-70" /></span>
+                                            ) : null}
+                                            {message.editedAt != null && !message.unsent ? (
+                                                <span title={new Date(message.editedAt).toLocaleString()}>{t("chat.thread.edited")}</span>
                                             ) : null}
                                             <span>
                                                 {formatMessageTime(message.timestamp, nowTimestamp, t)}

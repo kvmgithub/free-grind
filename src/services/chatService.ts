@@ -532,6 +532,26 @@ export function createChatService(
 		},
 
 		/**
+		 * POST /v4/chat/message/edit (Free Grind server, flag chat-message-edit):
+		 * replaces the text of one of my Text messages. Answers the updated
+		 * message (with `editedAt`); the other side gets it as chat.v1.message_sent.
+		 */
+		async editMessage(payload: ChatMessageMutation & { text: string }): Promise<Message> {
+			const { text, ...mutation } = payload;
+			const safePayload = chatMessageMutationSchema.parse(mutation);
+			const response = await fetchRest("/v4/chat/message/edit", {
+				method: "POST",
+				body: { ...safePayload, body: { text } },
+			});
+			// Free Grind server: past chat.edit.maxAgeMinutes.
+			if (response.status === 403) throw new ApiFunctionError(t("chat.errors.edit_window_expired"), 403, await parseJsonSafe(response));
+			await assertSuccess(response, t("chat.errors.edit_failed"));
+			const parsed = z.object({ message: messageSchema }).safeParse(await parseJsonSafe(response));
+			if (!parsed.success) throw new ApiFunctionError(t("chat.errors.edit_failed"), response.status, null);
+			return parsed.data.message;
+		},
+
+		/**
 		 * POST /v5/chat/translate: the server translates one message. Paid on
 		 * Grindr's server (402); a Free Grind server answers 503 when it has no
 		 * translation set up.

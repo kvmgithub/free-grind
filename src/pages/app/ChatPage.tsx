@@ -178,6 +178,7 @@ import { useFeatureFlag } from "../../services/assignmentsStore";
 import { GROUP_REMOVED_EVENT, type GroupRemovedDetail, clearGroupChatState, forgetGroup, setGroupInvites, upsertGroup, useGroupInvites } from "../../services/groupChatStore";
 import type { ChatGroup } from "../../types/messages";
 import { GROUP_CHATS_FLAG, groupIdOfConversation, isGroupConversationId } from "../../utils/groupChat";
+import { isEditableMessage, isWithinEditWindow, messageText, useMessageEditWindow } from "./chat/messageEdit";
 import { ConfirmDialog } from "../../components/ui/confirm-dialog";
 import { CreateGroupSheet } from "./chat/groups/CreateGroupSheet";
 import { GroupInfoSheet } from "./chat/groups/GroupInfoSheet";
@@ -412,6 +413,11 @@ function mergeMessagePreservingUnsendWipe(
 	if (previous.unsent && !incoming.unsent) {
 		return previous;
 	}
+	// Same for edits: a copy older than the edit we already know (a poll that
+	// was in flight while we edited) would flip the text back for a moment.
+	if (previous.editedAt != null && !incoming.unsent && (incoming.editedAt ?? 0) < previous.editedAt) {
+		return { ...incoming, body: previous.body, editedAt: previous.editedAt };
+	}
 	const prevBody = previous.body as Record<string, unknown> | null | undefined;
 	const newBody = incoming.body as Record<string, unknown> | null | undefined;
 	if (incoming.unsent && !newBody && prevBody && isChatArchiveEnabled()) {
@@ -519,6 +525,7 @@ export function ChatPage() {
 	// Group chats (Free Grind server, flag group-chats): open invites show as
 	// inbox rows and open as a thread with Join / Decline.
 	const groupChatsEnabled = useFeatureFlag(GROUP_CHATS_FLAG);
+	const { enabled: messageEditEnabled, maxAgeMs: messageEditMaxAgeMs } = useMessageEditWindow();
 	const groupInvites = useGroupInvites();
 	const inviteEntries = useMemo(
 		() => (groupChatsEnabled ? groupInvites.map((group) => groupInviteEntry(group, userId, t)) : []),
@@ -721,6 +728,10 @@ export function ChatPage() {
 	const isSendingTypingRef = useRef(false);
 	const typingDebounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const [replyTargetMessageId, setReplyTargetMessageId] = useState<string | null>(null);
+	// The message the composer is editing (flag chat-message-edit), and the
+	// draft it replaced, restored once editing ends.
+	const [editTargetMessageId, setEditTargetMessageId] = useState<string | null>(null);
+	const draftBeforeEditRef = useRef("");
 	const [isSending, setIsSending] = useState(false);
 	const [isUpdatingConversationState, setIsUpdatingConversationState] =
 		useState(false);
@@ -3240,6 +3251,22 @@ export function ChatPage() {
 		if (!messages.length) {
 			return;
 		}
+		// Edits (Free Grind server) re-deliver an existing message: they only
+		// change its text — in the thread and, if it's the inbox preview, there.
+		// Not new activity: no unread count, no reordering.
+		const isEditUpdate = (m: Message) => m.editedAt != null && !m.unsent;
+		const editedMessages = messages.filter(isEditUpdate);
+		if (editedMessages.length) {
+			const byId = new Map(editedMessages.map((m) => [m.messageId, m] as const));
+			setConversations((previous) =>
+				previous.map((conversation) => {
+					const preview = conversation.data.preview;
+					const edited = preview?.messageId ? byId.get(preview.messageId) : undefined;
+					if (!preview || !edited) return conversation;
+					return { ...conversation, data: { ...conversation.data, preview: { ...preview, text: getStoredPreviewText(edited, t) } } };
+				}),
+			);
+		}
 
 		// Persist incoming realtime messages so they survive deletions/blocks.
 		const byConv = new Map<string, Message[]>();
@@ -3418,6 +3445,7 @@ export function ChatPage() {
 		const byConversation = new Map<string, Message>();
 		let hasUnknownConversation = false;
 		for (const message of messages) {
+			if (isEditUpdate(message)) continue;
 			const previous = byConversation.get(message.conversationId);
 			if (
 				!previous ||
@@ -3494,6 +3522,7 @@ export function ChatPage() {
 		if (activeConversationId && !isGroupConversationId(activeConversationId)) {
 			const otherPersonMessages = messages.filter(
 				(m) =>
+					!isEditUpdate(m) &&
 					m.conversationId === activeConversationId &&
 					userId != null &&
 					Number(m.senderId) !== Number(userId),
@@ -3507,6 +3536,7 @@ export function ChatPage() {
 		// Update unread markers and local index for messages not in the active chat
 		for (const m of messages) {
 			if (
+				!isEditUpdate(m) &&
 				userId != null &&
 				Number(m.senderId) !== Number(userId) &&
 				m.conversationId !== activeConversationId &&
@@ -4018,7 +4048,8 @@ export function ChatPage() {
 			typingDebounceTimer.current = null;
 		}
 
-		if (draft.length > 0) {
+		// Editing an old message isn't typing a new one.
+		if (draft.length > 0 && !editTargetMessageId) {
 			typingDebounceTimer.current = setTimeout(() => {
 				if (!isSendingTypingRef.current) {
 					isSendingTypingRef.current = true;
@@ -4031,7 +4062,7 @@ export function ChatPage() {
 			service.sendTypingStatus(cid, "Cleared").catch(() => {});
 		}
 	// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [draft, selectedConversationIdForTyping]);
+	}, [draft, selectedConversationIdForTyping, editTargetMessageId]);
 
 	useEffect(() => {
 		if (realtimeStatus === "connected") {
@@ -4222,6 +4253,18 @@ export function ChatPage() {
 			setReplyTargetMessageId(null);
 		}
 	}, [replyTargetMessageId, threadMessages]);
+
+	// The edited message went away (other chat opened, unsent or deleted elsewhere):
+	// stop editing and give the composer its earlier draft back.
+	useEffect(() => {
+		if (!editTargetMessageId) return;
+		const target = threadMessages.find((message) => message.messageId === editTargetMessageId);
+		if (!target || target.unsent) {
+			setEditTargetMessageId(null);
+			setDraft(draftBeforeEditRef.current);
+			draftBeforeEditRef.current = "";
+		}
+	}, [editTargetMessageId, threadMessages]);
 
 	// Older-page restore runs as a layout effect so the prepended messages are
 	// never painted at the wrong scroll position first.
@@ -4552,6 +4595,13 @@ export function ChatPage() {
 			null
 		);
 	}, [replyTargetMessageId, threadMessages]);
+
+	const editTargetMessage = useMemo(() => {
+		if (!editTargetMessageId) {
+			return null;
+		}
+		return threadMessages.find((message) => message.messageId === editTargetMessageId) ?? null;
+	}, [editTargetMessageId, threadMessages]);
 
 	// An open re-invite to a group we'd left isn't archived while it's pending:
 	// its row and thread are the invite (Join / Decline), not the old archive.
@@ -6529,6 +6579,10 @@ export function ChatPage() {
 
 	const handleSend = (event: FormEvent<HTMLFormElement>) => {
 		event.preventDefault();
+		if (editTargetMessageId) {
+			void submitMessageEdit();
+			return;
+		}
 		const parsedCommand = parseSlashCommand(draft.trim());
 		if (parsedCommand) {
 			setDraft("");
@@ -6592,6 +6646,105 @@ export function ChatPage() {
 		setReplyTargetMessageId(message.messageId);
 		setOpenMessageActionId(null);
 	}, [canReply, t]);
+
+	const canEditMessage = useCallback(
+		(message: UiMessage) =>
+			messageEditEnabled &&
+			!isSelectedConversationArchived &&
+			isEditableMessage(message, userId) &&
+			isWithinEditWindow(message, messageEditMaxAgeMs),
+		[messageEditEnabled, messageEditMaxAgeMs, isSelectedConversationArchived, userId],
+	);
+
+	/** Puts one of my text messages into the composer for editing. */
+	const handleEditMessage = useCallback((message: UiMessage) => {
+		setOpenMessageActionId(null);
+		if (!canEditMessage(message)) return;
+		// Switching from one edit to another keeps the draft from before the first.
+		if (!editTargetMessageId) draftBeforeEditRef.current = draft;
+		setReplyTargetMessageId(null);
+		setEditTargetMessageId(message.messageId);
+		setDraft(messageText(message));
+	}, [canEditMessage, draft, editTargetMessageId]);
+
+	const cancelMessageEdit = useCallback(() => {
+		if (!editTargetMessageId) return;
+		setEditTargetMessageId(null);
+		setDraft(draftBeforeEditRef.current);
+		draftBeforeEditRef.current = "";
+	}, [editTargetMessageId]);
+
+	// Replying ends an edit (editing clears the reply target itself).
+	useEffect(() => {
+		if (replyTargetMessageId && editTargetMessageId) cancelMessageEdit();
+	}, [replyTargetMessageId]);
+
+	/** Desktop: arrow up in an empty composer edits my last text message. Returns whether it did. */
+	const editLastOwnMessage = useCallback((): boolean => {
+		for (let i = threadMessages.length - 1; i >= 0; i -= 1) {
+			const message = threadMessages[i]!;
+			if (canEditMessage(message)) {
+				handleEditMessage(message);
+				return true;
+			}
+		}
+		return false;
+	}, [threadMessages, canEditMessage, handleEditMessage]);
+
+	const submitMessageEdit = async () => {
+		const target = editTargetMessage;
+		if (!target || !selectedConversation) {
+			cancelMessageEdit();
+			return;
+		}
+		const text = draft.trim();
+		// Empty text would be a delete in disguise; that's what unsend is for.
+		if (!text) return;
+		if (text === messageText(target).trim()) {
+			cancelMessageEdit();
+			return;
+		}
+		const previous = target;
+		setEditTargetMessageId(null);
+		setDraft(draftBeforeEditRef.current);
+		draftBeforeEditRef.current = "";
+		setIsMutatingMessageId(target.messageId);
+		setThreadMessages((current) =>
+			current.map((item) =>
+				item.messageId === target.messageId
+					? { ...item, body: { ...(item.body as Record<string, unknown>), text }, editedAt: Date.now() }
+					: item,
+			),
+		);
+		try {
+			const updated = await service.editMessage({
+				conversationId: selectedConversation.data.conversationId,
+				messageId: target.messageId,
+				text,
+			});
+			// The server's copy replaces the optimistic one outright (its editedAt
+			// is the one later copies compare against), then gets stored.
+			setThreadMessages((current) =>
+				current.map((item) => (item.messageId === updated.messageId ? { ...item, ...updated } : item)),
+			);
+			void chatLog.appendMessages(updated.conversationId, [updated]);
+			setConversations((previous) =>
+				previous.map((conversation) =>
+					conversation.data.preview?.messageId === updated.messageId
+						? { ...conversation, data: { ...conversation.data, preview: { ...conversation.data.preview, text } } }
+						: conversation,
+				),
+			);
+			void chatDb.updatePreviewTextForEditedMessage(updated.conversationId, updated.messageId, text).catch(() => undefined);
+		} catch (error) {
+			setThreadMessages((current) =>
+				current.map((item) => (item.messageId === previous.messageId ? previous : item)),
+			);
+			toast.error(error instanceof Error ? error.message : t("chat.errors.edit_failed"));
+		} finally {
+			setIsMutatingMessageId(null);
+		}
+	};
 
 	const handleReact = async (message: UiMessage) => {
 		if (!selectedConversation || !userId || isMutatingMessageId) {
@@ -7962,6 +8115,8 @@ export function ChatPage() {
 			handleRetry={handleRetry}
 			handleReply={handleReplyToMessage}
 			canReply={canReply}
+			canEditMessage={canEditMessage}
+			handleEdit={handleEditMessage}
 			handleStopAlbumShare={handleStopAlbumShare}
 			handleRemoveLocalAlbum={handleRemoveLocalAlbum}
 			threadBottomRef={threadBottomRef}
@@ -8021,6 +8176,9 @@ export function ChatPage() {
 			setDraft={setDraft}
 			replyTargetMessage={replyTargetMessage}
 			clearReplyTarget={() => setReplyTargetMessageId(null)}
+			editTargetMessage={editTargetMessage}
+			cancelEdit={cancelMessageEdit}
+			editLastOwnMessage={editLastOwnMessage}
 			isSending={isSending}
 			selectedActionMessage={selectedActionMessage}
 			selectedActionMessageMine={selectedActionMessageMine}

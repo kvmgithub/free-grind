@@ -67,7 +67,7 @@ import { fetchAndStoreMedia } from "../services/mediaStore";
 import { captureAlbumsForMessages } from "../services/albumStore";
 import { captureReplyPreviewsForMessages } from "../services/replyMediaStore";
 import { getConversation, getDisplayName } from "../services/conversationDirectory";
-import { deleteConversationCascade, hasMessage, saveProfileSnapshot } from "../services/chatDb";
+import { deleteConversationCascade, hasMessage, saveProfileSnapshot, updatePreviewTextForEditedMessage } from "../services/chatDb";
 import { GROUP_REMOVED_EVENT, type GroupRemovedDetail, applyGroupRealtimeEvent } from "../services/groupChatStore";
 import { isGroupConversationId } from "../utils/groupChat";
 import { PROFILE_LINK_EVENT } from "../services/api/reputationMethods";
@@ -988,6 +988,10 @@ export function ChatRealtimeBridge() {
 
 						const fromOther = userIdRef.current != null && Number(m.senderId) !== Number(userIdRef.current);
 						if (fromOther && m.unsent) withdrawMessageNotification(m.conversationId, m.messageId);
+						// Edited (Free Grind server): the stored inbox preview follows when it shows this message.
+						if (m.editedAt != null && !m.unsent && typeof msgBody?.text === "string") {
+							void updatePreviewTextForEditedMessage(m.conversationId, m.messageId, msgBody.text).catch(() => undefined);
+						}
 						// chat.v1.message_sent also fires when a message is unsent or
 						// reacted to, re-delivering the original message (same
 						// messageId). Reacting to their message would otherwise look

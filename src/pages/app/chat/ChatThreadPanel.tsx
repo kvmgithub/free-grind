@@ -9,6 +9,7 @@ import {
 	Download,
 	EllipsisVertical,
 	Languages,
+	Pencil,
 	Star,
 	GitMerge,
 	GripVertical,
@@ -34,6 +35,7 @@ import {
 	LogOut,
 } from "lucide-react";
 import { useFeatureFlag } from "../../../services/assignmentsStore";
+import { messageText } from "./messageEdit";
 import { MediaEditSheet } from "./MediaEditSheet";
 import type { MediaEdit } from "./MediaEditStep";
 import { BananaFilled, BellOffFilled, StickerFilled, CameraPlusFilled, EyeFilled, MicFilled, EyeOffFilled, ImagesFilled, MapPinFilled, MessageCircleXFilled, MessageSquareQuoteFilled, PencilLineFilled, SendHorizontalFilled, ShieldCheckFilled, UserFilled, VideoOffFilled } from "../../../components/icons/FilledIcons";
@@ -237,6 +239,9 @@ type ChatThreadPanelProps = {
 	handleRetry: (message: Message) => void;
 	handleReply: (message: Message) => void | Promise<void>;
 	canReply: boolean;
+	/** Whether a message can be edited here (flag chat-message-edit, my own text message). */
+	canEditMessage: (message: UiMessage) => boolean;
+	handleEdit: (message: UiMessage) => void;
 	handleStopAlbumShare: (albumId: number) => void | Promise<void>;
 	handleRemoveLocalAlbum: (albumId: number) => void | Promise<void>;
 	threadBottomRef: { current: HTMLDivElement | null };
@@ -309,6 +314,11 @@ type ChatThreadPanelProps = {
 	setDraft: (value: string) => void;
 	replyTargetMessage: UiMessage | null;
 	clearReplyTarget: () => void;
+	/** The message the composer is editing; its draft is the new text. */
+	editTargetMessage: UiMessage | null;
+	cancelEdit: () => void;
+	/** Desktop arrow up: edits my last text message; false if there is none. */
+	editLastOwnMessage: () => boolean;
 	isSending: boolean;
 	selectedActionMessage: UiMessage | null;
 	selectedActionMessageMine: boolean;
@@ -817,6 +827,8 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 		handleRetry,
 		handleReply,
 		canReply,
+		canEditMessage,
+		handleEdit,
 		handleStopAlbumShare,
 		handleRemoveLocalAlbum,
 		threadBottomRef,
@@ -851,6 +863,9 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 		setDraft,
 		replyTargetMessage,
 		clearReplyTarget,
+		editTargetMessage,
+		cancelEdit,
+		editLastOwnMessage,
 		isSending,
 		selectedActionMessage,
 		selectedActionMessageMine,
@@ -912,6 +927,19 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 			textareaRef.current?.focus();
 		}
 	}, [replyTargetMessage]);
+
+	// Editing starts with the caret after the old text.
+	const editTargetMessageId = editTargetMessage?.messageId ?? null;
+	useEffect(() => {
+		if (!editTargetMessageId) return;
+		const el = textareaRef.current;
+		if (!el) return;
+		el.focus();
+		requestAnimationFrame(() => el.setSelectionRange(el.value.length, el.value.length));
+	}, [editTargetMessageId]);
+	// One banner above the composer at a time; editing wins over a reply.
+	const showReplyBanner = !!selectedConversation && !!replyTargetMessage && !editTargetMessage;
+	const hasComposerBanner = !!selectedConversation && (!!replyTargetMessage || !!editTargetMessage);
 
 	// The gesture picked in Behavior settings sends the phrase, the other one fills the composer.
 	const handleUsePhrase = (phrase: string, gesture: "tap" | "longPress" = "tap") => {
@@ -2231,6 +2259,8 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 						handleRetry={handleRetry}
 						handleReply={handleReply}
 						canReply={canReply}
+						canEditMessage={canEditMessage}
+						handleEdit={handleEdit}
 						handleStopAlbumShare={handleStopAlbumShare}
 						handleRemoveLocalAlbum={handleRemoveLocalAlbum}
 						ownAlbumMediaCountMap={albumMediaCountMap}
@@ -2441,7 +2471,28 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 								</div>
 							</div>
 						)}
-                        {selectedConversation && replyTargetMessage ? (() => {
+                        {selectedConversation && editTargetMessage ? (
+							<div className={`rounded-t-[25px] p-1 pb-0 transition-colors ${composerFillClass(isRecording, recordingMs)}`}>
+								<div className="flex items-center gap-2.5 rounded-[21px] bg-[color-mix(in_srgb,var(--text)_6%,transparent)] py-1.5 ps-1.5 pe-1">
+									<div className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--accent)_16%,transparent)] text-[var(--accent)]">
+										<Pencil className="h-4 w-4" />
+									</div>
+									<div className="min-w-0 flex-1">
+										<p className="truncate text-xs font-semibold text-[var(--accent)]">{t("chat.thread.editing_message")}</p>
+										<p className="truncate text-xs text-[var(--text-muted)]">{messageText(editTargetMessage)}</p>
+									</div>
+									<button
+										type="button"
+										onClick={cancelEdit}
+										className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[var(--text-muted)] transition hover:ink-tint-8 hover:text-[var(--text)] active:scale-90"
+										aria-label={t("chat.actions.cancel")}
+									>
+										<X className="h-4 w-4" />
+									</button>
+								</div>
+							</div>
+						) : null}
+                        {showReplyBanner && replyTargetMessage ? (() => {
 							const rtm = replyTargetMessage;
 							const rtmBody = rtm.body as Record<string, unknown> | null | undefined;
 							const isAudioReply = rtm.type === "Audio" || rtm.chat1Type?.toLowerCase() === "audio";
@@ -2575,7 +2626,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 
 						{props.pendingAudioBlob ? (
 							<div className={`${composerFieldMb} flex items-center gap-2 overflow-hidden py-1 ps-1 pe-1 rounded-[25px] border border-transparent ${PENDING_AUDIO_FILL_CLASS} ${
-								selectedConversation && replyTargetMessage ? "rounded-t-none" : ""
+								hasComposerBanner ? "rounded-t-none" : ""
 							}`}>
 								{/* No fixed height: like the composer it's border + py-1 + its h-10/h-8
 								    buttons, all in rem, so the two match even when the system font
@@ -2611,8 +2662,8 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 							// composer's buttons take the recording icon's slot on the left.
 							isRecording || compactComposer ? "ps-1 pe-1" : "ps-3 pe-1"
 						} border-transparent ${composerFillClass(isRecording, recordingMs)} ${
-							// A reply preview sits on top as the same field's first row.
-							selectedConversation && replyTargetMessage ? "rounded-t-none" : ""
+							// A reply preview (or the message being edited) sits on top as the same field's first row.
+							hasComposerBanner ? "rounded-t-none" : ""
 						}`}>
 							{isRecording ? (
 								<>
@@ -2717,6 +2768,11 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 										}
 									}}
 									onKeyDown={(event) => {
+										if (event.key === "Escape" && editTargetMessage) {
+											event.preventDefault();
+											cancelEdit();
+											return;
+										}
 										if (isDesktop && event.key === "Escape" && replyTargetMessage) {
 											event.preventDefault();
 											clearReplyTarget();
@@ -2739,7 +2795,20 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 												return;
 											}
 										}
-										if (enterSends && event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+										// Desktop: arrow up in an empty composer edits my last text message.
+										if (
+											isDesktop &&
+											event.key === "ArrowUp" &&
+											!event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey &&
+											draft.length === 0 &&
+											!editTargetMessage &&
+											editLastOwnMessage()
+										) {
+											event.preventDefault();
+											return;
+										}
+										// While editing, Enter saves on desktop even with "Enter sends" off.
+										if ((enterSends || (isDesktop && editTargetMessage)) && event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
 											event.preventDefault();
 											event.currentTarget.form?.requestSubmit();
 										}
@@ -2793,7 +2862,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 									<Loader2 className={`h-5 w-5 animate-spin`} />
 									<SendCountBadge progress={drawerSendProgress} />
 								</button>
-							) : draft.trim().length > 0 || isSending ? (
+							) : draft.trim().length > 0 || isSending || editTargetMessage ? (
 								// Distinct keys: if React reused one <button> across these
 								// branches, the accent background would fade out over the
 								// mic button's square corners right after sending.
@@ -2805,7 +2874,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 									// pill's edge, so a slightly-off tap still sends.
 									className={`shrink-0 inline-flex relative h-10 w-10 after:absolute after:-inset-x-3 after:-inset-y-2 after:content-[''] items-center justify-center transition hover:opacity-80 disabled:opacity-30 rounded-full bg-[var(--accent)] text-[var(--accent-contrast)]`}
 								>
-									{isSending ? <Loader2 className={`h-5 w-5 animate-spin`} /> : <SendHorizontalFilled className={"h-5 w-5"} />}
+									{isSending ? <Loader2 className={`h-5 w-5 animate-spin`} /> : editTargetMessage ? <Check className={"h-5 w-5"} /> : <SendHorizontalFilled className={"h-5 w-5"} />}
 								</button>
 							) : (
 								<button
@@ -3211,6 +3280,16 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 											label: t("chat.actions.reply", { defaultValue: "Reply" }),
 											onClick: () => void handleReply(message),
 											disabled: isMutating || !canReply,
+										});
+									}
+
+									if (canEditMessage(message)) {
+										rows.push({
+											key: "edit",
+											icon: <Pencil className="h-3.5 w-3.5" />,
+											label: t("chat.actions.edit"),
+											onClick: () => handleEdit(message),
+											disabled: isMutating,
 										});
 									}
 

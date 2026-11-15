@@ -132,6 +132,8 @@ export const messageSchema = z.object({
 	replyToMessage: z.unknown().nullable().optional(),
 	replyPreview: z.unknown().nullable().optional(),
 	dynamic: z.boolean().optional(),
+	/** Free Grind server (flag chat-message-edit): when the sender last edited it; absent if never. */
+	editedAt: z.coerce.number().nullable().optional(),
 });
 
 export const messagesResponseSchema = z.object({

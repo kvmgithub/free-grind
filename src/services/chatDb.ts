@@ -57,7 +57,7 @@ const LEGACY_CHAT_DB = `sqlite:${LEGACY_CHAT_DB_FILENAME}`;
 // on it. BUMP THIS whenever initChatDbSchema changes (new table, index,
 // column or data fix) — otherwise existing installs skip the setup and never
 // get the change; only fresh installs would.
-const CHAT_DB_SCHEMA_VERSION = 6;
+const CHAT_DB_SCHEMA_VERSION = 7;
 const SLOW_DB_OPEN_MS = 2_000;
 const SQLITE_LOCK_RETRY_DELAYS_MS = [30, 80, 180, 350] as const;
 
@@ -130,6 +130,7 @@ type MessageRow = {
 	reply_to_message_id: string | null;
 	reply_preview_json: string | null;
 	reactions_json: string | null;
+	edited_at?: number | null;
 };
 
 type MediaFileRow = {
@@ -349,6 +350,14 @@ async function initChatDbSchema(db: Database): Promise<void> {
 		await db.execute(
 			"CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages(reply_to_message_id)",
 		);
+		// Added later: when the sender last edited the message (Free Grind
+		// server, flag chat-message-edit); NULL if never. Not in backups: the
+		// next sync brings it back from the server.
+		try {
+			await db.execute("ALTER TABLE messages ADD COLUMN edited_at INTEGER");
+		} catch {
+			// already migrated
+		}
 
 		await db.execute(`
 			CREATE TABLE IF NOT EXISTS media_files (
@@ -924,6 +933,22 @@ export async function setConversationPreview(
 			[JSON.stringify(preview), activityTimestamp, Date.now(), conversationId],
 		);
 	});
+}
+
+/**
+ * An edited message (Free Grind server, flag chat-message-edit) that is the
+ * conversation's inbox preview: the stored preview takes its new text. Leaves
+ * activity and order alone — an edit isn't new activity.
+ */
+export async function updatePreviewTextForEditedMessage(
+	conversationId: string,
+	messageId: string,
+	text: string,
+): Promise<void> {
+	const stored = await getConversation(conversationId);
+	const preview = stored?.entry.data.preview;
+	if (!stored || !preview || preview.messageId !== messageId || preview.text === text) return;
+	await setConversationPreview(conversationId, { ...preview, text }, stored.entry.data.lastActivityTimestamp ?? 0);
 }
 
 /**
@@ -1724,6 +1749,7 @@ function rowToStoredMessage(row: MessageRow): StoredMessage {
 		replyToMessage: row.reply_to_message_id,
 		replyPreview: row.reply_preview_json ? JSON.parse(row.reply_preview_json) : null,
 		localHistory: Boolean(row.local_history),
+		editedAt: row.edited_at ?? null,
 	};
 }
 
@@ -1754,8 +1780,8 @@ export async function upsertMessages(
 				INSERT INTO messages (
 					message_id, conversation_id, sender_id, timestamp, type, chat1_type,
 					body_json, unsent, local_history, reply_to_message_id,
-					reply_preview_json, reactions_json, created_at, updated_at
-				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9, $10, $11, $12, $12)
+					reply_preview_json, reactions_json, created_at, updated_at, edited_at
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9, $10, $11, $12, $12, $13)
 				ON CONFLICT(message_id) DO UPDATE SET
 					sender_id = excluded.sender_id,
 					timestamp = excluded.timestamp,
@@ -1766,7 +1792,9 @@ export async function upsertMessages(
 					reply_to_message_id = excluded.reply_to_message_id,
 					reply_preview_json = excluded.reply_preview_json,
 					reactions_json = excluded.reactions_json,
-					updated_at = excluded.updated_at
+					updated_at = excluded.updated_at,
+					-- An edit never goes back; a copy without the field keeps it.
+					edited_at = COALESCE(excluded.edited_at, messages.edited_at)
 				`,
 				[
 					message.messageId,
@@ -1781,6 +1809,7 @@ export async function upsertMessages(
 					message.replyPreview != null ? JSON.stringify(message.replyPreview) : null,
 					JSON.stringify(message.reactions ?? []),
 					now,
+					message.editedAt ?? null,
 				],
 			);
 		}

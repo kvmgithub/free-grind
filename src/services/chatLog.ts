@@ -87,6 +87,11 @@ export async function appendMessages(
 					unsendWipeMessageIds.push(m.messageId);
 					return { ...prev, unsent: true };
 				}
+				// A copy older than the stored edit (a poll in flight while it was
+				// edited) keeps the edited text.
+				if (prev.editedAt != null && !m.unsent && (m.editedAt ?? 0) < prev.editedAt) {
+					return { ...m, body: prev.body, editedAt: prev.editedAt };
+				}
 
 				if (prevBody?.url && !newBody?.url && (archive || !isViewLimitedMedia(m))) {
 					return { ...m, body: { ...newBody, url: prevBody.url } };
