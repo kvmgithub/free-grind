@@ -3,6 +3,7 @@
 	"id": "grindr",
 	"appName": "Free Grind",
 	"appSlug": "free-grind",
+	"folderName": "FreeGrind",
 	"identifier": "dev.estopia.free-grind",
 	"userAgent": "FreeGrind/1.0.0 (+https://freegrind.imaoreo.dev/; contact: support@imaoreo.dev)",
 	"github": "fdev8975/free-grind",

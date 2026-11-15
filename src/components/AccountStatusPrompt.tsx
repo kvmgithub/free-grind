@@ -292,7 +292,7 @@ function contentFor(status: AccountStatus, t: Translate, agreementPending: boole
 			return {
 				icon: ShieldAlert,
 				title: t("account_status.age_verification.title", { defaultValue: "Age Verification Required" }),
-				description: t("account_status.age_verification.description", { defaultValue: "Grindr requires you to verify your age before continuing. Complete it in the official Grindr app, then sign in again. Free Grind does not bypass age verification." }),
+				description: t("account_status.age_verification.description", { defaultValue: "Grindr requires you to verify your age before continuing. Complete it in the official Grindr app, then sign in again. {{appName}} does not bypass age verification." }),
 				details,
 			};
 		}

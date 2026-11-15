@@ -64,7 +64,7 @@ function ViewsIntroPrompt({ onConfirm }: { onConfirm: () => void }) {
 						<p className="mt-0.5 text-xs leading-relaxed text-[var(--text-muted)]">
 							{t(
 								"interest_page.onboarding.recovery_desc",
-								"Free Grind automatically matches anonymous previews with your local history. If we find a match, we reveal the profile for you.",
+								"{{appName}} automatically matches anonymous previews with your local history. If we find a match, we reveal the profile for you.",
 							)}
 						</p>
 						<span className="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-[var(--accent)]">

@@ -59,6 +59,8 @@ The app's identity (name, identifier, user agent, update endpoint and key, repos
 
 `scripts/flavor-config.mjs` turns it into the Tauri config patch (`TAURI_CONFIG`), and `vite.config.mjs` into the frontend constants `__APP_NAME__`, `__REPO_URL__` and so on (declared in `src/vite-env.d.ts`). Builds of this repository need nothing extra; the default is `grindr`.
 
+Texts never hardcode the app's name: translations use `{{appName}}` (and `{{appFolder}}` for the export folder, as in `Downloads/{{appFolder}}`), which i18next fills in for every string.
+
 ## Development builds
 
 ### Toolchain

@@ -39,6 +39,7 @@ export default defineConfig(async () => ({
 		__FLAVOR__: JSON.stringify(flavor.id),
 		__APP_NAME__: JSON.stringify(flavor.appName),
 		__APP_SLUG__: JSON.stringify(flavor.appSlug),
+		__APP_FOLDER__: JSON.stringify(flavor.folderName),
 		__GITHUB_REPO__: JSON.stringify(flavor.github),
 		__REPO_URL__: JSON.stringify(flavor.repoUrl),
 		__WEBSITE_URL__: JSON.stringify(flavor.websiteUrl),

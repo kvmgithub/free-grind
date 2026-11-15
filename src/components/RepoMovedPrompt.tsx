@@ -107,10 +107,10 @@ export function RepoMovedPromptView({ onDismiss }: { onDismiss: () => void }) {
 		<FullscreenPrompt
 			icon={TriangleAlert}
 			iconTileClass={warningIconTileClass}
-			title={t("settings.repo_moved", { defaultValue: "Free Grind Has Moved" })}
+			title={t("settings.repo_moved", { defaultValue: "{{appName}} Has Moved" })}
 			description={t("settings.repo_moved_prompt_desc", {
 				defaultValue:
-					"Free Grind now lives at {{repo}}. Download the latest release from there to keep getting updates.",
+					"{{appName}} now lives at {{repo}}. Download the latest release from there to keep getting updates.",
 				repo: REPO_DISPLAY_NAME,
 			})}
 			footer={

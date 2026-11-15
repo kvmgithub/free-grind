@@ -150,7 +150,7 @@ function TransferSignInSheet({ isDesktop, onClose }: { isDesktop: boolean; onClo
 			if (error instanceof QrScanError && error.reason === "cancelled") return;
 			setScanError(
 				error instanceof QrScanError && error.reason === "permissionDenied"
-					? t("auth.sign_in.qr_camera_denied", { defaultValue: "Free Grind needs camera access to scan the code." })
+					? t("auth.sign_in.qr_camera_denied", { defaultValue: "{{appName}} needs camera access to scan the code." })
 					: t("auth.sign_in.qr_scan_failed", { defaultValue: "Couldn't scan the code. Please try again." }),
 			);
 			return;
@@ -209,7 +209,7 @@ function TransferSignInSheet({ isDesktop, onClose }: { isDesktop: boolean; onClo
 						step={1}
 						title={t("auth.sign_in.qr_step_show", { defaultValue: "Show the code on your signed-in device" })}
 						hint={t("auth.sign_in.qr_step_show_hint", {
-							defaultValue: "In Free Grind on that device, open Settings and tap \"Sign in on another device\".",
+							defaultValue: "In {{appName}} on that device, open Settings and tap \"Sign in on another device\".",
 						})}
 					/>
 					<Step
@@ -551,7 +551,7 @@ export function SignInPage() {
 								step={1}
 								title={t("auth.sign_in.facebook_step_open", { defaultValue: "Sign in on Facebook" })}
 								hint={t("auth.sign_in.facebook_step_open_hint", {
-									defaultValue: "A Facebook window opens. Your password goes to Facebook only, never to Free Grind.",
+									defaultValue: "A Facebook window opens. Your password goes to Facebook only, never to {{appName}}.",
 								})}
 							/>
 							<Step
@@ -586,7 +586,7 @@ export function SignInPage() {
 								step={1}
 								title={t("auth.sign_in.google_step_open", { defaultValue: "Sign in on Google" })}
 								hint={t("auth.sign_in.google_step_open_hint", {
-									defaultValue: "A Google window opens. Your password goes to Google only, never to Free Grind.",
+									defaultValue: "A Google window opens. Your password goes to Google only, never to {{appName}}.",
 								})}
 							/>
 							<Step

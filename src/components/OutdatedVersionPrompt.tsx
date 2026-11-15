@@ -226,7 +226,7 @@ export function OutdatedVersionPromptView({
 			{phase === "needs-permission" && (
 				<p className="mb-1 text-center text-xs leading-relaxed text-[var(--text-muted)]">
 					{t("update_prompt.needs_permission_hint", {
-						defaultValue: "Allow Free Grind to install apps, then come back here — the update continues automatically.",
+						defaultValue: "Allow {{appName}} to install apps, then come back here — the update continues automatically.",
 					})}
 				</p>
 			)}

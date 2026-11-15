@@ -63,6 +63,9 @@ i18n
 		returnEmptyString: false,
 		interpolation: {
 			escapeValue: false,
+			// Available in every string: the flavor's app name and export folder
+			// (flavors/<flavor>/flavor.json), so texts never hardcode them.
+			defaultVariables: { appName: __APP_NAME__, appFolder: __APP_FOLDER__ },
 		},
 		detection: {
 			order: ["supportedLocale"],

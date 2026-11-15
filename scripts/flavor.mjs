@@ -17,7 +17,7 @@ const FLAVOR_DIRS = {
 	server: "server/app-flavor/",
 };
 
-const REQUIRED = ["appName", "appSlug", "identifier", "userAgent", "github", "websiteUrl", "ota.endpoint", "ota.pubkey", "android.applicationId", "ios.bundleId"];
+const REQUIRED = ["appName", "appSlug", "folderName", "identifier", "userAgent", "github", "websiteUrl", "ota.endpoint", "ota.pubkey", "android.applicationId", "ios.bundleId"];
 
 function get(obj, path) {
 	return path.split(".").reduce((o, k) => (o && typeof o === "object" ? o[k] : undefined), obj);

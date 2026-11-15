@@ -321,8 +321,8 @@ export function ApiInspectorPage() {
 			await saveTextFile(fileName, exportApiTraceEntries(), "application/json");
 			toast.success(
 				isAndroid() || !isIos()
-					? `Saved to Downloads/FreeGrind/${fileName}`
-					: `Saved to Files → On My iPhone/iPad → Free Grind/${fileName}`,
+					? `Saved to Downloads/${__APP_FOLDER__}/${fileName}`
+					: `Saved to Files → On My iPhone/iPad → ${__APP_NAME__}/${fileName}`,
 			);
 		} catch (error) {
 			toast.error(error instanceof Error ? error.message : "Export failed");

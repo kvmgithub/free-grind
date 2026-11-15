@@ -116,7 +116,7 @@ const FACEBOOK_DIALOG_ERROR = "facebook-dialog-error";
 const FACEBOOK_HANDOFF_REFUSED = "facebook-handoff-refused";
 // Error markers from sign_in_with_transfer_code (api/auth.rs), matched verbatim.
 const TRANSFER_CODE_MESSAGES: Record<string, string> = {
-	"transfer-code-invalid": "This isn't a Free Grind sign-in code.",
+	"transfer-code-invalid": `This isn't a ${__APP_NAME__} sign-in code.`,
 	"transfer-code-expired": "This sign-in code has expired. Show a new one on the other device.",
 	"transfer-code-revoked": "The other device's session is no longer valid. Sign in there again, then show a new code.",
 };

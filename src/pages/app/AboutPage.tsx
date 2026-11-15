@@ -106,7 +106,7 @@ export function AboutPage() {
 							<img src={logo} alt="" className="h-5 w-5 rounded-md object-cover" draggable={false} />
 						</div>
 						<div className="min-w-0 flex-1">
-							<p className="text-sm font-semibold leading-snug">Free Grind</p>
+							<p className="text-sm font-semibold leading-snug">{__APP_NAME__}</p>
 							<p className="mt-0.5 text-xs text-[var(--text-muted)]">
 								{t("about_page.tagline", { defaultValue: "The privacy-first, community-built client" })}
 							</p>
@@ -118,7 +118,7 @@ export function AboutPage() {
 				</div>
 
 				<div>
-					<SectionLabel>{t("about_page.section_principles", { defaultValue: "Why Free Grind" })}</SectionLabel>
+					<SectionLabel>{t("about_page.section_principles", { defaultValue: "Why {{appName}}" })}</SectionLabel>
 					<div className="native-group">
 						<ProjectRow
 							icon={LockFilled}

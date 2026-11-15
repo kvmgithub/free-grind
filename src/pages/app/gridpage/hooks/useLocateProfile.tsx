@@ -533,7 +533,7 @@ export function LocateProfileHost() {
 				title={t("profile_details.location_finder_confirm_title", { defaultValue: "Location finder" })}
 				message={t("profile_details.location_finder_confirm_message", {
 					defaultValue:
-						"Free Grind can triangulate this profile's position by repeatedly changing your location on the server. This takes a few minutes; your location is restored afterwards.",
+						"{{appName}} can triangulate this profile's position by repeatedly changing your location on the server. This takes a few minutes; your location is restored afterwards.",
 				})}
 				warning={t("profile_details.location_finder_confirm_warning", {
 					defaultValue:

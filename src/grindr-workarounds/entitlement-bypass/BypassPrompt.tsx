@@ -37,7 +37,7 @@ export function BypassPrompt() {
 
 	const explanation = t("entitlement_bypass.prompt_message", {
 		defaultValue:
-			"Free Grind can attempt to bypass this by momentarily spoofing your location to Honduras.",
+			"{{appName}} can attempt to bypass this by momentarily spoofing your location to Honduras.",
 	});
 
 	return (

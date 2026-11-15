@@ -13,6 +13,8 @@ declare const __FLAVOR__: "grindr" | "server";
 declare const __APP_NAME__: string;
 /** Lowercase app slug, prefix of release asset names (`<slug>-v<version>.apk`). */
 declare const __APP_SLUG__: string;
+/** Folder name for user-visible exports (Downloads/<folder>, Documents/<folder>). */
+declare const __APP_FOLDER__: string;
 /** GitHub repository as "owner/repo". */
 declare const __GITHUB_REPO__: string;
 declare const __REPO_URL__: string;
