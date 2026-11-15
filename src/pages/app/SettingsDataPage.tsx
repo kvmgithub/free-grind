@@ -258,7 +258,7 @@ export function SettingsDataPage() {
 				toast.error(t("data_backup.encounters_export_empty", { defaultValue: "No logged encounters to export." }));
 				return;
 			}
-			const fileName = `free-grind-encounters-${new Date().toISOString().slice(0, 10)}.ics`;
+			const fileName = `${__APP_SLUG__}-encounters-${new Date().toISOString().slice(0, 10)}.ics`;
 			await saveTextFile(fileName, encountersToIcs(encounters), "text/calendar");
 
 			toast.success(

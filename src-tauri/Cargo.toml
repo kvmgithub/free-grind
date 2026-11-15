@@ -23,6 +23,8 @@ tokio = { version = "1", features = ["test-util", "rt-multi-thread"] }
 tauri-build = { version = "2", features = [] }
 # Compiles the Linux video extension (webkit-extension/fgmedia.c).
 cc = "1"
+# Reads the app flavor's manifest (flavors/<flavor>/flavor.json).
+serde_json = "1"
 
 [features]
 # This feature is used for production builds to enable custom protocol support (tauri://).

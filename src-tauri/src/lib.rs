@@ -3,6 +3,7 @@ mod api;
 mod app_disguise;
 mod commands;
 mod error;
+mod flavor;
 mod instance_lock;
 mod media;
 mod media_proxy;

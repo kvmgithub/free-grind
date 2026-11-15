@@ -1,6 +1,4 @@
 <resources>
-    <string name="app_name">Free Grind</string>
-    <string name="main_activity_title">Free Grind</string>
     <!-- App disguise: alternate launcher names shown when a decoy identity is active (see AppDisguise.kt) -->
     <string name="disguise_name_calculator">Calculator</string>
     <string name="disguise_name_notes">Notes</string>

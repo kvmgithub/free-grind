@@ -15,6 +15,8 @@ declare const __APP_NAME__: string;
 declare const __APP_SLUG__: string;
 /** Folder name for user-visible exports (Downloads/<folder>, Documents/<folder>). */
 declare const __APP_FOLDER__: string;
+/** Name of the app binary, also its desktop icon name on Linux. */
+declare const __APP_BINARY__: string;
 /** GitHub repository as "owner/repo". */
 declare const __GITHUB_REPO__: string;
 declare const __REPO_URL__: string;

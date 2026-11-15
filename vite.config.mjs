@@ -82,6 +82,8 @@ export default defineConfig(async () => ({
 		__APP_NAME__: JSON.stringify(flavor.appName),
 		__APP_SLUG__: JSON.stringify(flavor.appSlug),
 		__APP_FOLDER__: JSON.stringify(flavor.folderName),
+		// Main binary name (Tauri default: the Cargo package name).
+		__APP_BINARY__: JSON.stringify(flavor.mainBinaryName ?? "free-grind"),
 		__GITHUB_REPO__: JSON.stringify(flavor.github),
 		__REPO_URL__: JSON.stringify(flavor.repoUrl),
 		__WEBSITE_URL__: JSON.stringify(flavor.websiteUrl),

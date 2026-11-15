@@ -77,9 +77,32 @@ val tauriProperties = Properties().apply {
     }
 }
 
+/**
+ * The app flavor (FG_FLAVOR, default grindr; see scripts/flavor.mjs): its
+ * manifest sets the application ID, and its android/res folder adds the
+ * launcher icons and name. The Kotlin package (`namespace`) stays the same
+ * for every flavor: Tauri generates code into it from tauri.conf.json's
+ * identifier, which flavor-config.mjs leaves alone on Android.
+ */
+val repoRoot = file("../../../..")
+val flavorId = (System.getenv("FG_FLAVOR") ?: "").trim().ifEmpty { "grindr" }
+val flavorDir = when (flavorId) {
+    "grindr" -> repoRoot.resolve("flavors/grindr")
+    "server" -> repoRoot.resolve("server/app-flavor")
+    else -> throw GradleException("FG_FLAVOR: unknown flavor \"$flavorId\" (expected grindr or server)")
+}
+@Suppress("UNCHECKED_CAST")
+val flavorManifest = groovy.json.JsonSlurper().parse(flavorDir.resolve("flavor.json")) as Map<String, Any?>
+val flavorApplicationId = (flavorManifest["android"] as Map<String, Any?>)["applicationId"] as String
+val flavorAppSlug = flavorManifest["appSlug"] as String
+val flavorGithub = flavorManifest["github"] as String
+
 // Without the keystore (ci/build/android.sh) the release APK comes out
 // unsigned; CI signs it once two independent builds produced the same bytes.
-val releaseKeystore = file("../../../../src-tauri/certs/free-grind-dev.jks")
+// Local release builds: src-tauri/certs/<appSlug>-dev.jks, or FG_KEYSTORE_*.
+val releaseKeystore = System.getenv("FG_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }?.let { file(it) }
+    ?: repoRoot.resolve("src-tauri/certs/$flavorAppSlug-dev.jks")
+fun signingEnv(name: String) = System.getenv(name)?.takeIf { it.isNotEmpty() } ?: "opengrind"
 
 android {
     // Keep in sync with ci/build/Dockerfile. Left unset, AGP picks (and
@@ -90,7 +113,9 @@ android {
     namespace = "dev.estopia.free_grind"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
-        applicationId = "dev.estopia.free_grind"
+        applicationId = flavorApplicationId
+        // ApkUpdater only installs APKs downloaded from this repository's releases.
+        buildConfigField("String", "RELEASES_DOWNLOAD_URL", "\"https://github.com/$flavorGithub/releases/download/\"")
         // GeckoView (Google sign-in, see GoogleOAuthActivity.kt) needs Android 8.0.
         minSdk = 26
         targetSdk = 36
@@ -100,10 +125,13 @@ android {
     signingConfigs {
         create("release") {
             storeFile = releaseKeystore
-            storePassword = "opengrind"
-            keyAlias = "opengrind"
-            keyPassword = "opengrind"
+            storePassword = signingEnv("FG_KEYSTORE_PASSWORD")
+            keyAlias = signingEnv("FG_KEY_ALIAS")
+            keyPassword = signingEnv("FG_KEY_PASSWORD")
         }
+    }
+    sourceSets.getByName("main") {
+        res.srcDir(flavorDir.resolve("android/res"))
     }
     buildTypes {
         getByName("debug") {

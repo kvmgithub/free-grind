@@ -268,7 +268,7 @@ export function PushInspectorPage() {
 	const handleExport = async () => {
 		setIsExporting(true);
 		try {
-			const fileName = `free-grind-push-log-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.json`;
+			const fileName = `${__APP_SLUG__}-push-log-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.json`;
 			await saveTextFile(fileName, exportPushEventLog(), "application/json");
 			toast.success(
 				isAndroid() || !isIos()

@@ -88,6 +88,22 @@ sed -i '' \
 	-e "s/CFBundleShortVersionString: .*/CFBundleShortVersionString: \"$short_version\"/" \
 	-e "s/CFBundleVersion: .*/CFBundleVersion: \"$build_number\"/" \
 	src-tauri/gen/apple/project.yml
+# App identity of the flavor (FG_FLAVOR, scripts/flavor.mjs): bundle ID, the
+# name under the icon, and the icon when the flavor brings its own
+# (<flavor dir>/ios/AppIcon.appiconset; otherwise the committed one stays).
+flavor_json="$(bun -e 'import { flavorDir, loadFlavor } from "./scripts/flavor.mjs"; console.log(JSON.stringify({ ...loadFlavor(), dir: flavorDir() }))')"
+bundle_id="$(jq -r '.ios.bundleId' <<<"$flavor_json")"
+app_name="$(jq -r '.appName | gsub("[\\\\/&\"]"; "")' <<<"$flavor_json")"
+sed -i '' \
+	-e "s/^  bundleIdPrefix: .*/  bundleIdPrefix: $bundle_id/" \
+	-e "s/PRODUCT_NAME: .*/PRODUCT_NAME: \"$app_name\"/" \
+	-e "s/PRODUCT_BUNDLE_IDENTIFIER: .*/PRODUCT_BUNDLE_IDENTIFIER: $bundle_id/" \
+	src-tauri/gen/apple/project.yml
+flavor_icon="$(jq -r '.dir' <<<"$flavor_json")/ios/AppIcon.appiconset"
+if [ -d "$flavor_icon" ]; then
+	rm -rf src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset
+	cp -R "$flavor_icon" src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset
+fi
 # xcodegen fails on source paths that don't exist yet; Externals is filled
 # with the prebuilt Rust library below.
 mkdir -p src-tauri/gen/apple/Externals/arm64/release \

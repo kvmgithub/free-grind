@@ -9,7 +9,7 @@
 //
 // 1. App identity from the flavor manifest (FG_FLAVOR, see scripts/flavor.mjs):
 //    product name, identifier, window title, user agent, OTA endpoint and key,
-//    WiX upgrade code.
+//    WiX upgrade code, binary name, and capabilities naming its folders (3.).
 //
 // 2. The Free Grind server built into the app. Its addresses come only from
 //    the build environment (no defaults):
@@ -41,7 +41,11 @@ const flavor = loadFlavor();
 const windows = platformConf.app?.windows ?? conf.app.windows;
 const patch = {
 	productName: flavor.appName,
-	identifier: flavor.identifier,
+	// Android: the identifier is the Kotlin package Tauri generates code into
+	// (src-tauri/gen/android), the same for every flavor. The app's real ID
+	// there is the Gradle applicationId, set from the manifest's
+	// android.applicationId by build.gradle.kts.
+	...(platform === "android" ? {} : { identifier: flavor.identifier }),
 	app: {
 		windows: windows.map((w) => ({ ...w, title: flavor.appName, userAgent: flavor.userAgent })),
 	},
@@ -72,24 +76,46 @@ if (rtc.length) {
 	patch.app.security = { csp: { ...csp, "connect-src": connect } };
 }
 
-// 2b. Media host for the frontend's HTTP plugin (chat media cache). Listing
-// capabilities replaces auto-discovery, so the existing files are listed too.
+// 3. Capabilities. Listing them replaces auto-discovery, so once anything
+// changes, every file is listed: as is (by identifier), or inline when it
+// names the app's own folders (src-tauri/capabilities is written for the
+// grindr flavor: Downloads/FreeGrind, free-grind-data-*.zip), rewritten for
+// this flavor under its own identifier.
+const capDir = new URL("../src-tauri/capabilities/", import.meta.url);
+let capabilitiesChanged = false;
+const capabilities = readdirSync(capDir)
+	.filter((f) => f.endsWith(".json"))
+	.map((f) => {
+		const text = readFileSync(new URL(f, capDir), "utf8");
+		const rewritten = text
+			.replaceAll("/FreeGrind", `/${flavor.folderName}`)
+			.replaceAll("/free-grind-data-", `/${flavor.appSlug}-data-`);
+		const capability = JSON.parse(rewritten);
+		if (rewritten === text) return capability.identifier;
+		capabilitiesChanged = true;
+		return { ...capability, identifier: `${capability.identifier}-${flavor.id}` };
+	});
+
+// 2b. Media host for the frontend's HTTP plugin (chat media cache).
 const media = env("FG_MEDIA_URL");
 if (media) {
 	const url = new URL(media);
 	if (url.protocol !== "https:") throw new Error(`FG_MEDIA_URL: expected https://, got ${media}`);
-	const capDir = new URL("capabilities/", tauriDir);
-	const existing = readdirSync(capDir)
-		.filter((f) => f.endsWith(".json"))
-		.map((f) => readJson(new URL(f, capDir)).identifier);
 	const main = readJson(new URL("default.json", capDir));
-	const inline = {
+	capabilities.push({
 		identifier: "free-grind-media",
 		description: "HTTP access to the Free Grind media host (set at build time)",
 		windows: main.windows,
 		permissions: [{ identifier: "http:default", allow: [{ url: `${url.origin}/*` }] }],
-	};
-	patch.app.security = { ...patch.app.security, capabilities: [...existing, inline] };
+	});
+	capabilitiesChanged = true;
 }
+if (capabilitiesChanged) {
+	patch.app.security = { ...patch.app.security, capabilities };
+}
+
+// Binary name (Linux packages put it in /usr/bin, so two flavors need
+// different ones). Unset: Tauri's default, the Cargo package name.
+if (flavor.mainBinaryName) patch.mainBinaryName = flavor.mainBinaryName;
 
 process.stdout.write(JSON.stringify(patch));

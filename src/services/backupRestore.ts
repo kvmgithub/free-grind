@@ -399,7 +399,7 @@ export async function exportBackup(
 	destination: BackupExportDestination = "downloads",
 	remoteEntries: Partial<Record<BackupCategoryId, unknown>> = {},
 ): Promise<boolean> {
-	const fileName = `free-grind-data-${new Date().toISOString().slice(0, 10)}.zip`;
+	const fileName = `${__APP_SLUG__}-data-${new Date().toISOString().slice(0, 10)}.zip`;
 
 	if (isIos()) {
 		if (destination === "downloads") {

@@ -293,7 +293,8 @@ fn decode_jwt(token: &str) -> Result<JwtClaims, AppError> {
 // a less secure file.
 // ---------------------------------------------------------------------------
 
-const SERVICE: &str = "free-grind";
+// Keyring service: one per app flavor, so two flavors never share sessions.
+const SERVICE: &str = crate::flavor::APP_SLUG;
 const ACTIVE_SESSION_SLOT: &str = "session";
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -350,7 +351,7 @@ fn app_support_file(name: &str) -> Result<PathBuf, AppError> {
     Ok(PathBuf::from(home)
         .join("Library")
         .join("Application Support")
-        .join("free-grind")
+        .join(crate::flavor::APP_SLUG)
         .join(name))
 }
 
@@ -590,7 +591,7 @@ const SIGN_UP_COUNT_SLOT: &str = "sign-up-count";
 #[cfg(target_os = "windows")]
 fn sign_up_count_path() -> PathBuf {
     crate::windows_instance::windows_app_data_root_dir()
-        .join("free-grind")
+        .join(crate::flavor::APP_SLUG)
         .join(format!("{SIGN_UP_COUNT_SLOT}.msgpack"))
 }
 

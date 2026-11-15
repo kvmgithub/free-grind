@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Launcher name of the grindr flavor. The rest of the app's resources are in
+     src-tauri/gen/android/app/src/main/res; build.gradle.kts adds this folder. -->
+<resources>
+    <string name="app_name">Free Grind</string>
+    <string name="main_activity_title">Free Grind</string>
+</resources>

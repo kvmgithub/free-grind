@@ -305,7 +305,7 @@ export function WebSocketExplorerPage() {
 	const handleExport = async () => {
 		setIsExporting(true);
 		try {
-			const fileName = `free-grind-ws-trace-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.json`;
+			const fileName = `${__APP_SLUG__}-ws-trace-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.json`;
 			await saveTextFile(fileName, exportWsTraceEntries(), "application/json");
 			toast.success(
 				isAndroid() || !isIos()

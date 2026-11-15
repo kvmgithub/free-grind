@@ -317,7 +317,7 @@ export function ApiInspectorPage() {
 	const handleExport = async () => {
 		setIsExporting(true);
 		try {
-			const fileName = `free-grind-api-trace-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.json`;
+			const fileName = `${__APP_SLUG__}-api-trace-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.json`;
 			await saveTextFile(fileName, exportApiTraceEntries(), "application/json");
 			toast.success(
 				isAndroid() || !isIos()
