@@ -14,7 +14,7 @@ import { useManagedGenders, useManagedPronouns, useBlockedProfileIds, useBlockPr
 import { extractMediaHashFromUrl, getProfileImageUrl, validateMediaHash } from "../../utils/media";
 import { ProfileDetailsModal, type ProfileSwipePreview } from "./gridpage/components/ProfileDetailsModal";
 import { useTapProfile } from "./gridpage/hooks/useTapProfile";
-import { useLocateProfile } from "./gridpage/hooks/useLocateProfile";
+import { useLocateProfile } from "../../grindr-workarounds";
 import { loadBrowseFiltersDraft } from "./browse-filters-storage";
 import {
 	getAllCachedBrowseCardsById,

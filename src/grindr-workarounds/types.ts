@@ -6,6 +6,12 @@ import type { ExpiringMediaKind } from "../services/expiringAllowance";
 /** A viewer the server named: the eyeball endpoint or a `viewed_me` WebSocket event. */
 export type NamedView = { profileId: string; imageHash: string | null; timestamp: number };
 
+/**
+ * A paid action that Grindr may refuse, passed to retryPaidAction. The
+ * workaround words its prompt from it, so core code carries no bypass texts.
+ */
+export type PaidActionReason = "message" | "expiring_photo" | "expiring_video" | "unsend" | "album_share" | "expiring_album_share";
+
 export type ViewsApi = {
 	getViewsEyeball(): Promise<NamedView | null>;
 	getProfilesByIds(profileIds: (string | number)[]): Promise<unknown>;
@@ -23,7 +29,7 @@ export type GrindrWorkaround = {
 
 	// --- Paid features ---
 	/** Runs a paid action; may retry it when the server refuses it as paid. Default: just runs it. */
-	retryPaidAction?: <T>(reason: string, action: () => Promise<T>) => Promise<T>;
+	retryPaidAction?: <T>(reason: PaidActionReason, action: () => Promise<T>) => Promise<T>;
 	/** Location-reporting requests wait for this. Default: resolved. */
 	awaitHomeLocation?: () => Promise<void>;
 	/** Runs before the session is signed out. */

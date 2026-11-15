@@ -13,7 +13,7 @@ import { GroupAvatar } from "./groups/GroupAvatar";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { SheetActionList, afterSheetClose } from "../../../components/ui/action-sheet";
-import { useLocateProfile } from "../gridpage/hooks/useLocateProfile";
+import { useLocateProfile } from "../../../grindr-workarounds";
 import { isLocateEnabled } from "../../../utils/optionalFeatures";
 import { usePreferences } from "../../../contexts/PreferencesContext";
 import { requestProfileShare, useCanShareProfiles } from "../../../services/profileShare";

@@ -18,6 +18,33 @@ import { coarsenGeohash, encodeGeohash } from "../../utils/geohash";
 import { appLog } from "../../utils/logger";
 import i18n from "../../i18n";
 import { isPaywallError } from "../../services/paywall";
+import type { PaidActionReason } from "../types";
+
+/** The prompt's first sentence: what Grindr refused. */
+function reasonText(reason: Exclude<PaidActionReason, "expiring_album_share">): string {
+	switch (reason) {
+		case "expiring_photo":
+			return i18n.t("grindr:entitlement_bypass.reason_expiring_photo", {
+				defaultValue: "Daily expiring photo limit reached. Sending more requires a Grindr subscription.",
+			});
+		case "expiring_video":
+			return i18n.t("grindr:entitlement_bypass.reason_expiring_video", {
+				defaultValue: "Expiring video limit reached. Sending more requires a Grindr subscription.",
+			});
+		case "message":
+			return i18n.t("grindr:entitlement_bypass.reason_message", {
+				defaultValue: "Sending this message requires a Grindr subscription.",
+			});
+		case "unsend":
+			return i18n.t("grindr:entitlement_bypass.reason_unsend", {
+				defaultValue: "Unsending a message requires a Grindr subscription.",
+			});
+		case "album_share":
+			return i18n.t("grindr:entitlement_bypass.reason_album_share", {
+				defaultValue: "Sharing this album requires a Grindr subscription.",
+			});
+	}
+}
 
 // --- Honduras location ---
 
@@ -102,12 +129,21 @@ function syncPromptToQueue(): void {
  * Runs `action`; if Grindr refuses it as a paid feature, the returned promise stays pending behind the prompt and settles
  * with the retry (or the original error if the user cancels).
  */
-export function withEntitlementBypass<T>(reason: string, action: () => Promise<T>): Promise<T> {
+export function withEntitlementBypass<T>(reason: PaidActionReason, action: () => Promise<T>): Promise<T> {
 	return action().catch((error: unknown) => {
 		if (!isPaywallError(error)) throw error;
+		// Grindr refuses expiring album shares even from Honduras: no retry
+		// offered, just a clear paid-only message.
+		if (reason === "expiring_album_share") {
+			throw new Error(
+				i18n.t("grindr:entitlement_bypass.expiring_album_no_bypass", {
+					defaultValue: "Expiring albums are a paid Grindr feature, and there's no bypass for them.",
+				}),
+			);
+		}
 		return new Promise<T>((resolve, reject) => {
 			blocked.push({
-				reason,
+				reason: reasonText(reason),
 				error,
 				retry: action,
 				resolve: resolve as (value: unknown) => void,
@@ -187,7 +223,7 @@ async function startBypass(home: string): Promise<void> {
 	}
 	if (refusedAgain) {
 		toast.error(
-			i18n.t("entitlement_bypass.still_refused", {
+			i18n.t("grindr:entitlement_bypass.still_refused", {
 				defaultValue: "Grindr still refused this paid feature",
 			}),
 			{ id: "entitlement-bypass" },
@@ -199,7 +235,7 @@ export async function runEntitlementBypass(): Promise<void> {
 	if (homeGeohash === null) {
 		dismissEntitlementBypass();
 		toast.error(
-			i18n.t("entitlement_bypass.no_location", {
+			i18n.t("grindr:entitlement_bypass.no_location", {
 				defaultValue: "Set your location before using this bypass",
 			}),
 			{ id: "entitlement-bypass" },
@@ -218,7 +254,7 @@ export async function runEntitlementBypass(): Promise<void> {
 	} catch (error) {
 		appLog.error("[entitlements] bypass failed", error);
 		toast.error(
-			i18n.t("entitlement_bypass.failed", { defaultValue: "Failed to bypass this paid feature" }),
+			i18n.t("grindr:entitlement_bypass.failed", { defaultValue: "Failed to bypass this paid feature" }),
 			{ id: "entitlement-bypass" },
 		);
 	} finally {

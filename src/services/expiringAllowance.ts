@@ -5,7 +5,7 @@
  * shape; "unlimited" is 2147483647 for both fields, a disabled feature 0/0.
  *
  * Once it's used up the two backends differ: Grindr refuses the send with a
- * paywall error, which the Honduras bypass (entitlementBypass) can get
+ * paywall error, which a Grindr workaround (entitlement bypass) may get
  * through for photos and videos — expiring albums have no bypass there. A
  * Free Grind server's limits are its own policy, with no way around them.
  */

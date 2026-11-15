@@ -35,7 +35,7 @@ export function BypassPrompt() {
 		return dismissEntitlementBypass;
 	}, [userId]);
 
-	const explanation = t("entitlement_bypass.prompt_message", {
+	const explanation = t("grindr:entitlement_bypass.prompt_message", {
 		defaultValue:
 			"{{appName}} can attempt to bypass this by momentarily spoofing your location to Honduras.",
 	});
@@ -43,15 +43,15 @@ export function BypassPrompt() {
 	return (
 		<ConfirmDialog
 			isOpen={open}
-			title={t("entitlement_bypass.prompt_title", { defaultValue: "Paid feature" })}
+			title={t("grindr:entitlement_bypass.prompt_title", { defaultValue: "Paid feature" })}
 			message={reason ? `${reason} ${explanation}` : explanation}
-			warning={t("entitlement_bypass.prompt_warning", {
+			warning={t("grindr:entitlement_bypass.prompt_warning", {
 				defaultValue:
 					"This violates Grindr's terms of service and can get your account banned. Use at your own risk.",
 			})}
-			confirmLabel={t("entitlement_bypass.prompt_confirm", { defaultValue: "Bypass anyway" })}
+			confirmLabel={t("grindr:entitlement_bypass.prompt_confirm", { defaultValue: "Bypass anyway" })}
 			confirmTone="danger"
-			cancelLabel={t("entitlement_bypass.prompt_cancel", { defaultValue: "Cancel" })}
+			cancelLabel={t("grindr:entitlement_bypass.prompt_cancel", { defaultValue: "Cancel" })}
 			onConfirm={() => runEntitlementBypass()}
 			onCancel={dismissEntitlementBypass}
 			isProcessing={busy}

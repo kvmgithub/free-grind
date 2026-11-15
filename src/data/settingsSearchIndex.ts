@@ -62,6 +62,7 @@ import { GITHUB_ISSUES_URL, GITHUB_NEW_ISSUE_URL } from "../utils/githubIssues";
 import { useMemo } from "react";
 import { RightNowIcon } from "../components/icons/RightNowIcon";
 import { isSexualHealthEnabled } from "../utils/optionalFeatures";
+import { LOCATE_PROFILE_AVAILABLE } from "../grindr-workarounds";
 import { isAndroid, isIos } from "../services/saveMedia";
 import { useCanSendExpiringAlbums } from "../services/assignmentsStore";
 import { useTranslation } from "react-i18next";
@@ -327,18 +328,22 @@ export function useSettingsSearchIndex(): SettingsSearchEntry[] {
 			icon: HeartPulse,
 			iconClass: "bg-rose-500/15 text-rose-400",
 		},
-		{
-			id: "cust-show-locate",
-			route: "/settings/optional-features",
-			anchor: "cust-show-locate",
-			label: t("customizability.show_locate", { defaultValue: "Locate" }),
-			description: t("customizability.show_locate_desc", {
-				defaultValue: "Show \"Locate\" in the profile menu to estimate a profile's position by triangulation.",
-			}),
-			section: t("settings.search_sections.optional_features"),
-			icon: LocateFixed,
-			iconClass: "bg-emerald-500/15 text-emerald-400",
-		},
+		...(LOCATE_PROFILE_AVAILABLE
+			? [
+					{
+						id: "cust-show-locate",
+						route: "/settings/optional-features",
+						anchor: "cust-show-locate",
+						label: t("grindr:customizability.show_locate", { defaultValue: "Locate" }),
+						description: t("grindr:customizability.show_locate_desc", {
+							defaultValue: "Show \"Locate\" in the profile menu to estimate a profile's position by triangulation.",
+						}),
+						section: t("settings.search_sections.optional_features"),
+						icon: LocateFixed,
+						iconClass: "bg-emerald-500/15 text-emerald-400",
+					},
+				]
+			: []),
 
 		{
 			id: "nav-regional",

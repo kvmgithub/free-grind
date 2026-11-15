@@ -41,14 +41,14 @@ function ViewsIntroPrompt({ onConfirm }: { onConfirm: () => void }) {
 		<FullscreenPrompt
 			overlay
 			icon={Eye}
-			title={t("interest_page.onboarding.title", "Profile Visitors")}
+			title={t("grindr:interest_page.onboarding.title", "Profile Visitors")}
 			description={t(
-				"interest_page.onboarding.limitation_desc",
+				"grindr:interest_page.onboarding.limitation_desc",
 				"Grindr normally only shows the very last visitor in full. Others are typically hidden behind a paywall or shown as anonymous previews.",
 			)}
 			footer={
 				<button type="button" onClick={onConfirm} className={fullscreenPrimaryButtonClass}>
-					{t("interest_page.onboarding.button", "Got it!")}
+					{t("grindr:interest_page.onboarding.button", "Got it!")}
 				</button>
 			}
 		>
@@ -59,11 +59,11 @@ function ViewsIntroPrompt({ onConfirm }: { onConfirm: () => void }) {
 					</div>
 					<div className="min-w-0 flex-1">
 						<p className="text-sm font-semibold leading-snug text-[var(--text)]">
-							{t("interest_page.onboarding.recovery_title", "Smart Recovery")}
+							{t("grindr:interest_page.onboarding.recovery_title", "Smart Recovery")}
 						</p>
 						<p className="mt-0.5 text-xs leading-relaxed text-[var(--text-muted)]">
 							{t(
-								"interest_page.onboarding.recovery_desc",
+								"grindr:interest_page.onboarding.recovery_desc",
 								"{{appName}} automatically matches anonymous previews with your local history. If we find a match, we reveal the profile for you.",
 							)}
 						</p>

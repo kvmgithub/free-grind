@@ -59,7 +59,10 @@ i18n
 		// not a region-stripped variant that doesn't exist as its own file.
 		load: "currentOnly",
 		defaultNS: "translation",
-		ns: ["translation"],
+		// "grindr": texts of the Grindr workarounds (src/grindr-workarounds,
+		// keys as "grindr:…"). Only the grindr flavor has them; the server
+		// flavor doesn't ship the files (vite.config.mjs).
+		ns: __FLAVOR__ === "grindr" ? ["translation", "grindr"] : ["translation"],
 		returnEmptyString: false,
 		interpolation: {
 			escapeValue: false,

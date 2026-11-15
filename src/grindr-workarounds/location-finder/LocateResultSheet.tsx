@@ -2,14 +2,14 @@ import { Copy, Navigation } from "lucide-react";
 import toast from "react-hot-toast";
 import { useTranslation } from "react-i18next";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { BottomSheet, SheetCloseButton, sheetButtonClass } from "../../../../components/ui/bottom-sheet";
-import { NATIVE_SHEET_BG } from "../../../../components/ui/action-sheet";
-import { isIos } from "../../../../services/saveMedia";
-import { appLog } from "../../../../utils/logger";
-import { formatDistanceForUnits } from "../../../../utils/units";
-import { usePreferences } from "../../../../contexts/PreferencesContext";
-import { MapLocationPreview } from "./MapLocationPreview";
-import { MAP_SHEET_ICON_BUTTON_CLASS, MapSheetLayout, mapSheetProps } from "./MapSheetLayout";
+import { BottomSheet, SheetCloseButton, sheetButtonClass } from "../../components/ui/bottom-sheet";
+import { NATIVE_SHEET_BG } from "../../components/ui/action-sheet";
+import { isIos } from "../../services/saveMedia";
+import { appLog } from "../../utils/logger";
+import { formatDistanceForUnits } from "../../utils/units";
+import { usePreferences } from "../../contexts/PreferencesContext";
+import { MapLocationPreview } from "../../pages/app/gridpage/components/MapLocationPreview";
+import { MAP_SHEET_ICON_BUTTON_CLASS, MapSheetLayout, mapSheetProps } from "../../pages/app/gridpage/components/MapSheetLayout";
 
 export type LocateRoundResult = {
 	round: number;
@@ -70,30 +70,30 @@ export function LocateResultSheet({ progress, onClose, onCancel, isDesktop }: Pr
 		switch (status) {
 			case "measuring":
 			case "running":
-				return t("profile_details.locating", { defaultValue: "Locating…" });
+				return t("grindr:profile_details.locating", { defaultValue: "Locating…" });
 			case "done":
-				return t("profile_details.location_finder_result_title", { defaultValue: "Location found" });
+				return t("grindr:profile_details.location_finder_result_title", { defaultValue: "Location found" });
 			case "cancelled":
 			case "error":
-				return t("profile_details.location_finder_status_cancelled", { defaultValue: "Stopped" });
+				return t("grindr:profile_details.location_finder_status_cancelled", { defaultValue: "Stopped" });
 		}
 	})();
 
 	const statusDetail = (() => {
 		switch (status) {
 			case "measuring":
-				return t("profile_details.location_finder_status_measuring", {
+				return t("grindr:profile_details.location_finder_status_measuring", {
 					defaultValue: "Measuring initial distance…",
 				});
 			case "running":
-				return t("profile_details.location_finder_status_round", {
+				return t("grindr:profile_details.location_finder_status_round", {
 					round: round + 1,
 					rounds: totalRounds,
 					point: Math.min(step + 1, POINTS_PER_ROUND),
 					defaultValue: "Round {{round}} of {{rounds}} · point {{point}} of 3",
 				});
 			case "error":
-				return progress.errorMessage ?? t("profile_details.location_finder_error_general");
+				return progress.errorMessage ?? t("grindr:profile_details.location_finder_error_general");
 			case "done":
 				// e.g. the note that an age-verification region capped the accuracy
 				return progress.errorMessage;
@@ -106,10 +106,10 @@ export function LocateResultSheet({ progress, onClose, onCancel, isDesktop }: Pr
 	const initialDistanceText =
 		progress.initialDistance !== null ? formatMeters(progress.initialDistance) : null;
 	const errorText = hasEstimate && errorMeters !== null ? formatMeters(errorMeters) : null;
-	const initialDistanceLabel = t("profile_details.location_finder_label_initial_distance", {
+	const initialDistanceLabel = t("grindr:profile_details.location_finder_label_initial_distance", {
 		defaultValue: "Initial distance",
 	});
-	const errorLabel = t("profile_details.location_finder_label_accuracy", { defaultValue: "Accuracy" });
+	const errorLabel = t("grindr:profile_details.location_finder_label_accuracy", { defaultValue: "Accuracy" });
 	// Accuracy once there's an estimate, the starting distance before that.
 	const metric = errorText
 		? { value: `±${errorText}`, label: errorLabel }
@@ -117,7 +117,7 @@ export function LocateResultSheet({ progress, onClose, onCancel, isDesktop }: Pr
 			? { value: initialDistanceText, label: initialDistanceLabel }
 			: null;
 	const restoringText = isRestoring
-		? t("profile_details.location_finder_restoring", { defaultValue: "Restoring your location…" })
+		? t("grindr:profile_details.location_finder_restoring", { defaultValue: "Restoring your location…" })
 		: null;
 	// Running: "Locating… 83%" over the round info. Otherwise the sheet's own
 	// title comes back and the outcome ("Location found", "Stopped") is the
@@ -143,7 +143,7 @@ export function LocateResultSheet({ progress, onClose, onCancel, isDesktop }: Pr
 	const handleCopy = async () => {
 		try {
 			await navigator.clipboard.writeText(coords);
-			toast.success(t("profile_details.location_finder_location_copied"));
+			toast.success(t("grindr:profile_details.location_finder_location_copied"));
 		} catch (error) {
 			appLog.error("Failed to copy location to clipboard", error);
 		}
@@ -167,7 +167,7 @@ export function LocateResultSheet({ progress, onClose, onCancel, isDesktop }: Pr
 							<span className="truncate">
 								{isRunning
 									? statusTitle
-									: t("profile_details.location_finder", { defaultValue: "Location finder" })}
+									: t("grindr:profile_details.location_finder", { defaultValue: "Location finder" })}
 							</span>
 							{isRunning ? (
 								<span className="shrink-0 text-xs font-medium tabular-nums text-[var(--text-muted)]">{percent}%</span>
@@ -226,7 +226,7 @@ export function LocateResultSheet({ progress, onClose, onCancel, isDesktop }: Pr
 					// While running there's only Stop; copy and Maps come once it's over.
 					isRunning ? (
 						<button type="button" onClick={onCancel} className={sheetButtonClass("secondary")}>
-							<span className="truncate">{t("profile_details.location_finder_stop", { defaultValue: "Stop" })}</span>
+							<span className="truncate">{t("grindr:profile_details.location_finder_stop", { defaultValue: "Stop" })}</span>
 						</button>
 					) : (
 						<>
@@ -235,7 +235,7 @@ export function LocateResultSheet({ progress, onClose, onCancel, isDesktop }: Pr
 									type="button"
 									onClick={() => void handleCopy()}
 									className={MAP_SHEET_ICON_BUTTON_CLASS}
-									aria-label={t("profile_details.location_finder_copy", { defaultValue: "Copy coordinates" })}
+									aria-label={t("grindr:profile_details.location_finder_copy", { defaultValue: "Copy coordinates" })}
 								>
 									<Copy className="h-4 w-4" />
 								</button>
@@ -247,7 +247,7 @@ export function LocateResultSheet({ progress, onClose, onCancel, isDesktop }: Pr
 								className={sheetButtonClass()}
 							>
 								<Navigation className="h-4 w-4" />
-								<span className="truncate">{t("profile_details.location_finder_open_maps", { defaultValue: "Open in Maps" })}</span>
+								<span className="truncate">{t("grindr:profile_details.location_finder_open_maps", { defaultValue: "Open in Maps" })}</span>
 							</button>
 						</>
 					)

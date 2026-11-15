@@ -12,7 +12,7 @@
  * stub.check.ts keeps the two in sync.
  */
 import { createElement, Fragment } from "react";
-import type { GrindrWorkaround, NamedView, ViewsApi } from "./types";
+import type { GrindrWorkaround, NamedView, PaidActionReason, ViewsApi } from "./types";
 import type { InterestItem } from "../pages/app/interest/interestUtils";
 import { mergeViews, sortByNewest } from "../pages/app/interest/interestUtils";
 import type { BrowseCard } from "../pages/app/GridPage.types";
@@ -24,7 +24,7 @@ import { blockAnyProfile } from "./block-any-profile";
 
 const WORKAROUNDS: readonly GrindrWorkaround[] = [entitlementBypass, viewRecovery, lockedPreviewPhotos, blockAnyProfile];
 
-export type { NamedView, ViewsApi } from "./types";
+export type { NamedView, PaidActionReason, ViewsApi } from "./types";
 
 function active(): readonly GrindrWorkaround[] {
 	return WORKAROUNDS;
@@ -46,7 +46,7 @@ function find<K extends keyof GrindrWorkaround>(key: K): NonNullable<GrindrWorka
 
 // --- Paid features ---
 
-export function retryPaidAction<T>(reason: string, action: () => Promise<T>): Promise<T> {
+export function retryPaidAction<T>(reason: PaidActionReason, action: () => Promise<T>): Promise<T> {
 	const retry = find("retryPaidAction");
 	return retry ? retry(reason, action) : action();
 }
@@ -131,3 +131,9 @@ export function GrindrWorkaroundBridges() {
 		),
 	);
 }
+
+// --- Location finder (estimates a profile's position from its distance) ---
+
+export { useLocateProfile, LocateProfileHost } from "./location-finder/useLocateProfile";
+/** Whether "Locate" exists in this build (offered under Optional Features). */
+export const LOCATE_PROFILE_AVAILABLE: boolean = true;

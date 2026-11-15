@@ -3,7 +3,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import toast from "react-hot-toast";
 import { GridTileContextMenu } from "../gridpage/components/GridTileContextMenu";
-import { useLocateProfile } from "../gridpage/hooks/useLocateProfile";
+import { useLocateProfile } from "../../../grindr-workarounds";
 import { usePresence } from "../../../hooks/usePresence";
 import { getNicknameRename } from "../../../hooks/useNicknameNameChange";
 import { useApiFunctions } from "../../../hooks/useApiFunctions";

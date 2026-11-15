@@ -5,17 +5,17 @@
  * every import from outside this folder. stub.check.ts keeps the two in sync.
  */
 import { createElement, Fragment } from "react";
-import type { ViewsApi } from "./types";
+import type { PaidActionReason, ViewsApi } from "./types";
 import type { InterestItem } from "../pages/app/interest/interestUtils";
 import { mergeViews, sortByNewest } from "../pages/app/interest/interestUtils";
 
-export type { NamedView, ViewsApi } from "./types";
+export type { NamedView, PaidActionReason, ViewsApi } from "./types";
 
 // Parameters the official behaviour doesn't need are left out (a function
 // with fewer parameters fits every call site; call sites type-check against
 // index.ts).
 
-export function retryPaidAction<T>(...[, action]: [reason: string, action: () => Promise<T>]): Promise<T> {
+export function retryPaidAction<T>(...[, action]: [reason: PaidActionReason, action: () => Promise<T>]): Promise<T> {
 	return action();
 }
 
@@ -60,5 +60,20 @@ export function GrindrWorkaroundOverlays() {
 }
 
 export function GrindrWorkaroundBridges() {
+	return createElement(Fragment);
+}
+
+/** No "Locate": the toggle under Optional Features is hidden and stays off. */
+export const LOCATE_PROFILE_AVAILABLE: boolean = false;
+
+export function useLocateProfile() {
+	return {
+		locatingProfileId: null as string | null,
+		handleTriangleProfile: () => {},
+		locateLabelFor: () => "",
+	};
+}
+
+export function LocateProfileHost() {
 	return createElement(Fragment);
 }

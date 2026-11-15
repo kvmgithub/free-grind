@@ -61,6 +61,8 @@ The app's identity (name, identifier, user agent, update endpoint and key, repos
 
 Texts never hardcode the app's name: translations use `{{appName}}` (and `{{appFolder}}` for the export folder, as in `Downloads/{{appFolder}}`), which i18next fills in for every string.
 
+The Grindr workarounds (`src/grindr-workarounds`) exist only in the `grindr` flavor. Other flavors build with `src/grindr-workarounds/stub.ts` instead, and without their texts (`public/locales/<locale>/grindr.json`, keys as `grindr:…`).
+
 ## Development builds
 
 ### Toolchain

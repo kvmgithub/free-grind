@@ -1,15 +1,15 @@
 import { useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 import toast from "react-hot-toast";
-import { useApiFunctions } from "../../../../hooks/useApiFunctions";
-import { useDesktopBreakpoint } from "../../../../hooks/useDesktopBreakpoint";
-import { usePreferences } from "../../../../contexts/PreferencesContext";
-import { decodeGeohash, encodeGeohash } from "../../../../utils/geohash";
-import { getAgeVerificationRegion } from "../../../../utils/ageVerificationRegions";
-import { appLog } from "../../../../utils/logger";
-import { ConfirmDialog } from "../../../../components/ui/confirm-dialog";
-import { afterSheetClose } from "../../../../components/ui/action-sheet";
-import { LocateResultSheet, locatePercent, type LocateProgress, type LocateRoundResult } from "../components/LocateResultSheet";
+import { useApiFunctions } from "../../hooks/useApiFunctions";
+import { useDesktopBreakpoint } from "../../hooks/useDesktopBreakpoint";
+import { usePreferences } from "../../contexts/PreferencesContext";
+import { decodeGeohash, encodeGeohash } from "../../utils/geohash";
+import { getAgeVerificationRegion } from "../../utils/ageVerificationRegions";
+import { appLog } from "../../utils/logger";
+import { ConfirmDialog } from "../../components/ui/confirm-dialog";
+import { afterSheetClose } from "../../components/ui/action-sheet";
+import { LocateResultSheet, locatePercent, type LocateProgress, type LocateRoundResult } from "./LocateResultSheet";
 
 // One "Locate" (trilateration) run at a time, app-wide: the state lives here
 // rather than in each page, so every menu (grid tile, profile, chat list)
@@ -173,7 +173,7 @@ export function useLocateProfile() {
 	const handleTriangleProfile = (targetProfileId: string) => {
 		if (locateState.runningProfileId) {
 			if (locateState.runningProfileId !== targetProfileId) {
-				toast(t("profile_details.location_finder_busy", {
+				toast(t("grindr:profile_details.location_finder_busy", {
 					defaultValue: "Locate is already running for another profile.",
 				}));
 			}
@@ -193,7 +193,7 @@ export function useLocateProfile() {
 	/** "Locating… 45%" for the profile being located, "Locate" for any other. */
 	const locateLabelFor = (profileId: string | number | null | undefined) =>
 		runningProfileId !== null && profileId != null && String(profileId) === runningProfileId && progress
-			? `${t("profile_details.locating")} ${locatePercent(progress)}%`
+			? `${t("grindr:profile_details.locating")} ${locatePercent(progress)}%`
 			: t("profile_details.locate");
 
 	return { locatingProfileId: runningProfileId, handleTriangleProfile, locateLabelFor };
@@ -306,7 +306,7 @@ export function LocateProfileHost() {
 
         const putServerLocation = async (lat: number, lon: number, targetGeohash: string) => {
             if (!isSafeLocation(lat, lon)) {
-                throw new Error(t("profile_details.location_finder_error_age_verification_region", {
+                throw new Error(t("grindr:profile_details.location_finder_error_age_verification_region", {
                     defaultValue: "Stopped: this profile is in or near a region where Grindr requires age verification. Moving your location there would lock your account.",
                 }));
             }
@@ -389,7 +389,7 @@ export function LocateProfileHost() {
         // Shown as the detail line of the finished result, not as an error.
         const notifyRegionLimit = () => {
             updateProgress({
-                errorMessage: t("profile_details.location_finder_region_limited", {
+                errorMessage: t("grindr:profile_details.location_finder_region_limited", {
                     defaultValue: "Accuracy is limited: this profile is in or near a region where Grindr requires age verification, and moving closer would lock your account.",
                 }),
             });
@@ -399,7 +399,7 @@ export function LocateProfileHost() {
             const initialDist = await getDistanceFromProfile();
             throwIfCancelled();
             if (initialDist === null) {
-                throw new Error(t("profile_details.location_finder_error_distance"));
+                throw new Error(t("grindr:profile_details.location_finder_error_distance"));
             }
 
             const targetPrecision = 15;
@@ -508,7 +508,7 @@ export function LocateProfileHost() {
                 updateProgress({
                     status: "error",
                     isRestoring: true,
-                    errorMessage: error instanceof Error ? error.message : t("profile_details.location_finder_error_general"),
+                    errorMessage: error instanceof Error ? error.message : t("grindr:profile_details.location_finder_error_general"),
                 });
             }
         } finally {
@@ -530,18 +530,18 @@ export function LocateProfileHost() {
 		<>
 			<ConfirmDialog
 				isOpen={pendingProfileId !== null}
-				title={t("profile_details.location_finder_confirm_title", { defaultValue: "Location finder" })}
-				message={t("profile_details.location_finder_confirm_message", {
+				title={t("grindr:profile_details.location_finder_confirm_title", { defaultValue: "Location finder" })}
+				message={t("grindr:profile_details.location_finder_confirm_message", {
 					defaultValue:
 						"{{appName}} can triangulate this profile's position by repeatedly changing your location on the server. This takes a few minutes; your location is restored afterwards.",
 				})}
-				warning={t("profile_details.location_finder_confirm_warning", {
+				warning={t("grindr:profile_details.location_finder_confirm_warning", {
 					defaultValue:
 						"This violates Grindr's terms of service and can get your account banned. Use at your own risk.",
 				})}
-				confirmLabel={t("profile_details.location_finder_confirm_start", { defaultValue: "Locate anyway" })}
+				confirmLabel={t("grindr:profile_details.location_finder_confirm_start", { defaultValue: "Locate anyway" })}
 				confirmTone="danger"
-				cancelLabel={t("entitlement_bypass.prompt_cancel", { defaultValue: "Cancel" })}
+				cancelLabel={t("grindr:entitlement_bypass.prompt_cancel", { defaultValue: "Cancel" })}
 				onConfirm={() => {
 					const targetProfileId = pendingProfileId;
 					setLocateState({ pendingProfileId: null });

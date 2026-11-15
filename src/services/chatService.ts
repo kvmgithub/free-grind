@@ -400,21 +400,10 @@ export function createChatService(
 				}
 			};
 			const expiringKind = expiringKindOfMessage(safePayload.type, safePayload.body);
-			const reason =
-				expiringKind === "pics"
-					? t("entitlement_bypass.reason_expiring_photo", {
-							defaultValue:
-								"Daily expiring photo limit reached. Sending more requires a Grindr subscription.",
-						})
-					: expiringKind === "videos"
-						? t("entitlement_bypass.reason_expiring_video", {
-								defaultValue:
-									"Expiring video limit reached. Sending more requires a Grindr subscription.",
-							})
-						: t("entitlement_bypass.reason_message", {
-								defaultValue: "Sending this message requires a Grindr subscription.",
-							});
-			const sent = retryPaidAction(reason, send);
+			const sent = retryPaidAction(
+				expiringKind === "pics" ? "expiring_photo" : expiringKind === "videos" ? "expiring_video" : "message",
+				send,
+			);
 			// Sent or refused, the counters shown next to the expiry toggles changed.
 			if (expiringKind) void sent.then(() => markExpiringAllowanceStale(expiringKind), () => markExpiringAllowanceStale(expiringKind));
 			return sent;
@@ -506,9 +495,7 @@ export function createChatService(
 			const safePayload = chatMessageMutationSchema.parse(payload);
 			try {
 				await retryPaidAction(
-					t("entitlement_bypass.reason_unsend", {
-						defaultValue: "Unsending a message requires a Grindr subscription.",
-					}),
+					"unsend",
 					async () => {
 						const response = await fetchRest("/v4/chat/message/unsend", {
 							method: "POST",
@@ -798,30 +785,16 @@ export function createChatService(
 				);
 				await assertSuccess(response, t("chat.errors.album_share_failed"));
 			};
-			// Sharing an *expiring* album is paid-only and no Grindr workaround
-			// unlocks it, so don't offer a retry for that — show a clear paid-only
-			// message instead. Non-expiring (INDEFINITE) shares can be retried.
+			// An *expiring* share also uses up the expiring-album allowance.
 			const isExpiringShare = safePayload.profiles.some(
 				(profile) => profile.expirationType !== "INDEFINITE" && profile.expirationType !== 0,
 			);
 			if (isExpiringShare) {
-				await share().finally(() => markExpiringAllowanceStale("albums")).catch((error: unknown) => {
-					if (isPaywallError(error)) {
-						throw new Error(
-							t("entitlement_bypass.expiring_album_no_bypass", {
-								defaultValue:
-									"Expiring albums are a paid Grindr feature, and there's no bypass for them.",
-							}),
-						);
-					}
-					throw error;
-				});
+				await retryPaidAction("expiring_album_share", share).finally(() => markExpiringAllowanceStale("albums"));
 				return;
 			}
 			await retryPaidAction(
-				t("entitlement_bypass.reason_album_share", {
-					defaultValue: "Sharing this album requires a Grindr subscription.",
-				}),
+				"album_share",
 				share,
 			);
 		},

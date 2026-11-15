@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import type { ExpiringAllowanceInfo } from "../hooks/queries/useEntitlementQueries";
+import { IS_GRINDR } from "../services/serverConfig";
 
 /*
  * Shared bits for showing an expiring media allowance next to an expiry
@@ -24,8 +25,9 @@ export function useAllowanceHint(info: ExpiringAllowanceInfo | undefined): strin
 			defaultValue: "Expiring limit reached. You can't send more expiring media right now.",
 		});
 	}
-	if (info.needsBypass) {
-		return t("expiring_allowance.exhausted_bypass", {
+	// needsBypass comes from a Grindr workaround (useCanBypassExpiringLimit).
+	if (IS_GRINDR && info.needsBypass) {
+		return t("grindr:expiring_allowance.exhausted_bypass", {
 			defaultValue: "Expiring limit reached. Grindr wants a subscription for more; sending offers the Honduras bypass.",
 		});
 	}
