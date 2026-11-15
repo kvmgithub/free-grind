@@ -22,7 +22,8 @@ The flavor sets the app's identity. Product features are switched by the server'
 | `clientProduct` | Optional; product token at the start of the API `User-Agent` (`<token>/<version>;…`) for flavors without the official client's identity (cargo feature `flavor-server`). Lowercase letters and digits; default `grindr3`. The server must accept the token. |
 | `github` | `owner/repo` for releases, the in-app updater and links |
 | `websiteUrl` | About page |
-| `ota.endpoint`, `ota.pubkey` | Frontend OTA updates (hotswap); each flavor needs its own key |
+| `ota.endpoint`, `ota.pubkey` | Frontend OTA updates (hotswap); each flavor needs its own key. A surge.sh endpoint is deployed to by `scripts/publish-ota.mjs`; any other (`https://…/ota/{{channel}}/latest.json`) gets its files in `OTA_OUT_DIR` to upload |
+| `updates.feedUrl`, `updates.downloadUrl`, `updates.pageUrl` | Optional; for releases that aren't on GitHub: a feed in the GitHub releases API format (newest first), the URL prefix APKs are downloaded from (Android updater), and the page people download from. Default: the `github` repository's releases |
 | `android.applicationId` | Android package ID |
 | `ios.bundleId` | iOS bundle ID |
 | `windows.wixUpgradeCode` | Optional; pins MSI upgrades (Tauri derives it from the name otherwise) |
