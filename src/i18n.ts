@@ -61,15 +61,14 @@ i18n
 		load: "currentOnly",
 		defaultNS: "translation",
 		// "grindr": texts of the Grindr workarounds (src/grindr-workarounds,
-		// keys as "grindr:…"). Only the grindr flavor has them; the server
-		// flavor doesn't ship the files (vite.config.mjs).
-		ns: __FLAVOR__ === "grindr" ? ["translation", "grindr"] : ["translation"],
+		// keys as "grindr:…").
+		ns: ["translation", "grindr"],
 		returnEmptyString: false,
 		interpolation: {
 			escapeValue: false,
-			// Available in every string: the flavor's app name and export folder, and where
-			// the source and its CI live (GitLab or GitHub)
-			// (flavors/<flavor>/flavor.json), so texts never hardcode them.
+			// Available in every string: the app name and export folder, and where
+			// the source and its CI live (GitLab or GitHub) (manifest/app.json),
+			// so texts never hardcode them.
 			defaultVariables: { appName: __APP_NAME__, appFolder: __APP_FOLDER__, forge: FORGE_NAME, ci: CI_NAME },
 		},
 		detection: {

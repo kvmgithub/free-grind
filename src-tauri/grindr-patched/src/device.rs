@@ -1,6 +1,3 @@
-// With own-identity, the imitated device profiles below go unused.
-#![cfg_attr(feature = "own-identity", allow(dead_code))]
-
 use serde::{Deserialize, Serialize};
 
 struct DeviceProfile {
@@ -502,12 +499,8 @@ pub struct DeviceInfo {
 }
 
 impl DeviceInfo {
-	/// The device this client presents: with `own-identity` the real platform
-	/// (see [`crate::identity`]), otherwise an imitated Android device.
+	/// A random, believable Android device (see [`Self::imitated`]).
 	pub fn generate() -> Self {
-		#[cfg(feature = "own-identity")]
-		return crate::identity::honest_device();
-		#[cfg(not(feature = "own-identity"))]
 		Self::imitated()
 	}
 
@@ -549,7 +542,6 @@ impl Default for DeviceInfo {
 mod tests {
 	use super::*;
 
-	#[cfg(not(feature = "own-identity"))] // checks the imitated identity
 	#[test]
 	fn generate_is_valid() {
 		let d = DeviceInfo::generate();
@@ -581,7 +573,6 @@ mod tests {
 		}
 	}
 
-	#[cfg(not(feature = "own-identity"))] // checks the imitated identity
 	#[test]
 	fn a_generated_device_always_carries_its_build_id() {
 		for _ in 0..200 {

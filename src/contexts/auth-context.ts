@@ -60,8 +60,6 @@ export interface SignUpData {
 	password: string;
 	/** Unix milliseconds. */
 	birthday: number;
-	/** Registration invite (Free Grind servers in invite mode require one). */
-	inviteCode?: string;
 }
 
 /**

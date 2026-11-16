@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { Mail, Lock, Cake, Eye, EyeOff, LogIn, ShieldAlert, Smartphone, Ticket } from "lucide-react";
+import { Mail, Lock, Cake, Eye, EyeOff, LogIn, ShieldAlert, Smartphone } from "lucide-react";
 import { AuthShell } from "../../components/ui/auth-shell";
 import { BugReportButton } from "../../components/ui/BugReportButton";
 import { useAuth } from "../../contexts/useAuth";
@@ -11,10 +11,9 @@ import { SmsVerificationRequiredError, type SignInRefusal } from "../../contexts
 import { AuthAltAction, AuthCancelAction, AuthSubmitSection, IconInput } from "./auth-form";
 import { useAddProfileMode } from "./useAddProfileMode";
 import { SmsVerificationPanel } from "./SmsVerificationPanel";
-import { IS_GRINDR } from "../../services/serverConfig";
 
 const MIN_AGE = 18;
-// Earliest date of birth the Free Grind server accepts; anything before is a typo.
+// Earliest plausible date of birth; anything before is a typo.
 const MIN_BIRTHDAY = "1900-01-01";
 
 /** Latest birthday (YYYY-MM-DD) that is MIN_AGE today, for the date input's max. */
@@ -40,9 +39,7 @@ export function SignUpPage() {
 	const { callMethod } = useApi();
 	// Accounts this app created so far; null until loaded.
 	const [quota, setQuota] = useState<{ used: number; limit: number } | null>(null);
-	const isCustom = !IS_GRINDR;
-	// The local limit only applies to accounts on the official servers.
-	const isLimitReached = !isCustom && quota !== null && quota.used >= quota.limit;
+	const isLimitReached = quota !== null && quota.used >= quota.limit;
 
 	const refreshQuota = useCallback(() => {
 		void callMethod("sign_up_quota")
@@ -55,36 +52,11 @@ export function SignUpPage() {
 	const [password, setPassword] = useState("");
 	const [showPassword, setShowPassword] = useState(false);
 	const [birthday, setBirthday] = useState("");
-	// `?invite=` prefills the code (e.g. from a shared invite).
-	const [searchParams] = useSearchParams();
-	const [inviteCode, setInviteCode] = useState(() => searchParams.get("invite") ?? "");
-	// Free Grind servers: "invite" requires a code, "closed" takes no sign-ups.
-	// The official servers are always "open" and never see the field.
-	const [registrationMode, setRegistrationMode] = useState<"open" | "invite" | "closed">("open");
-	useEffect(() => {
-		if (!isCustom) {
-			setRegistrationMode("open");
-			return;
-		}
-		let cancelled = false;
-		void callMethod("registration_mode")
-			.then((mode) => {
-				if (!cancelled) setRegistrationMode(mode);
-			})
-			// Unknown: keep the optional field; the server still decides.
-			.catch(() => undefined);
-		return () => {
-			cancelled = true;
-		};
-	}, [callMethod, isCustom]);
-	const inviteRequired = registrationMode === "invite";
 	const [isLoading, setIsLoading] = useState(false);
 	// Set when the sign-in after creating the account asks for SMS verification.
 	const [verification, setVerification] = useState<{ profileId: string; signIn: SignInRefusal } | null>(null);
-	// Sign-up on the official servers sends a reCAPTCHA token, which only
-	// Android can mint; a self-hosted server needs none.
-	const [recaptchaAvailable] = useState(() => IS_GRINDR && isRecaptchaAvailable());
-	const hasRecaptcha = isCustom || recaptchaAvailable;
+	// Sign-up sends a reCAPTCHA token, which only Android can mint.
+	const [hasRecaptcha] = useState(isRecaptchaAvailable);
 	const footer = (
 		<div className="flex flex-wrap items-center justify-center gap-1">
 			{addProfileMode ? null : <BugReportButton />}
@@ -93,9 +65,7 @@ export function SignUpPage() {
 	const title = addProfileMode ? t("auth.sign_in.add_profile_title", { defaultValue: "Add Profile" }) : t("auth.sign_up.title");
 	const subtitle = addProfileMode
 		? t("auth.sign_up.add_profile_subtitle", { defaultValue: "Create a new account to add it to this app." })
-		: IS_GRINDR
-			? t("auth.sign_up.subtitle", { defaultValue: "Create a new Grindr account with your email and password." })
-			: t("auth.sign_up.subtitle_server", { defaultValue: "Create a new {{appName}} account with your email and password." });
+		: t("auth.sign_up.subtitle", { defaultValue: "Create a new Grindr account with your email and password." });
 	const cancelAction = addProfileMode ? <AuthCancelAction onClick={() => void cancelAddProfile()} /> : null;
 
 	const maxBirthday = latestAllowedBirthday();
@@ -107,8 +77,7 @@ export function SignUpPage() {
 		password.length > 0 &&
 		birthdayMillis !== null &&
 		!isTooYoung &&
-		!isTooOld &&
-		(!inviteRequired || inviteCode.trim().length > 0);
+		!isTooOld;
 
 	const handleSubmit = async (e: React.FormEvent) => {
 		e.preventDefault();
@@ -119,7 +88,6 @@ export function SignUpPage() {
 				email: email.trim(),
 				password,
 				birthday: birthdayMillis,
-				inviteCode: isCustom ? inviteCode.trim() || undefined : undefined,
 			});
 			navigate("/");
 		} catch (error) {
@@ -174,19 +142,7 @@ export function SignUpPage() {
 
 	return (
 		<AuthShell title={title} subtitle={subtitle} footer={footer}>
-			{registrationMode === "closed" ? (
-				<div className="animate-fade-in flex items-start gap-2.5 rounded-2xl bg-red-500/12 px-3 py-3 text-sm text-[var(--text)]">
-					<ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-[#f87171]" />
-					<div className="space-y-1">
-						<p className="font-semibold">
-							{t("auth.sign_up.closed_title", { defaultValue: "Registration closed" })}
-						</p>
-						<p className="leading-relaxed text-[var(--text-muted)]">
-							{t("auth.sign_up.closed_desc", { defaultValue: "This server isn't accepting new accounts right now." })}
-						</p>
-					</div>
-				</div>
-			) : isLimitReached ? (
+			{isLimitReached ? (
 				<div className="animate-fade-in flex items-start gap-2.5 rounded-2xl bg-red-500/12 px-3 py-3 text-sm text-[var(--text)]">
 					<ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-[#f87171]" />
 					<div className="space-y-1">
@@ -255,32 +211,6 @@ export function SignUpPage() {
 							<p className="text-xs text-[#f87171]">{t("auth.sign_up.invalid_birthday", { defaultValue: "Please enter a valid date of birth." })}</p>
 						) : null}
 					</div>
-					{isCustom ? (
-						<div className="space-y-1.5">
-							<label htmlFor="sign-up-invite" className="block text-xs font-medium text-[var(--text-muted)]">
-								{inviteRequired
-									? t("auth.sign_up.invite_label_required", { defaultValue: "Invite code" })
-									: t("auth.sign_up.invite_label_optional", { defaultValue: "Invite code (optional)" })}
-							</label>
-							<IconInput
-								id="sign-up-invite"
-								icon={<Ticket className="h-4 w-4" />}
-								value={inviteCode}
-								onChange={(e) => setInviteCode(e.target.value.toUpperCase())}
-								required={inviteRequired}
-								autoComplete="off"
-								autoCapitalize="characters"
-								spellCheck={false}
-								maxLength={40}
-								placeholder="XXXXX-XXXXX"
-							/>
-							{inviteRequired ? (
-								<p className="text-xs text-[var(--text-muted)]">
-									{t("auth.sign_up.invite_hint", { defaultValue: "This server only accepts new accounts with an invite from an existing member." })}
-								</p>
-							) : null}
-						</div>
-					) : null}
 					<AuthSubmitSection
 						error={error}
 						loading={isLoading}

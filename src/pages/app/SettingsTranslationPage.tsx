@@ -10,7 +10,6 @@ import { SelectSheet } from "../../components/ui/select-sheet";
 import { SHEET_FIELD_CLASS } from "../../components/ui/sheet-section";
 import { useDesktopBreakpoint } from "../../hooks/useDesktopBreakpoint";
 import { useSettingsHighlight } from "../../hooks/useSettingsHighlight";
-import { IS_GRINDR } from "../../services/serverConfig";
 import {
 	TRANSLATION_PROVIDERS,
 	type ApiKeyTranslationProvider,
@@ -509,13 +508,9 @@ export function SettingsTranslationPage() {
 							<div className="flex items-start gap-2.5 px-4 py-3">
 								<Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]" />
 								<p className="text-xs leading-relaxed text-[var(--text-muted)]">
-									{IS_GRINDR
-										? t("auto_translate.server_info_official", {
-												defaultValue: "Messages are translated by the server. This is a paid feature: without a subscription, translating fails.",
-											})
-										: t("auto_translate.server_info_custom", {
-												defaultValue: "Messages are translated by the server you're signed in to. If it has no translation set up, translating fails with a notice.",
-											})}
+									{t("auto_translate.server_info_official", {
+										defaultValue: "Messages are translated by the server. This is a paid feature: without a subscription, translating fails.",
+									})}
 								</p>
 							</div>
 						)}

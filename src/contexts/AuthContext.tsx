@@ -43,13 +43,10 @@ import { runRestoredFavorites } from "../services/restoredFavorites";
 import { runTapsAutomationSync } from "../services/tapsSync";
 import { syncSavedPhrasesFromServer } from "../services/savedPhrases";
 import { mintRecaptchaToken, recaptchaFailureMessage, RecaptchaError } from "../services/recaptcha";
-import { IS_GRINDR } from "../services/serverConfig";
 import i18n from "../i18n";
 
 const AUTH_USER_ID_STORAGE_KEY = "fg-user-id";
 const PUSH_TOKEN_STORAGE_KEY = "fg-fcm-token";
-// Self-hosted server: token of its own Firebase project (see SelfHostedPushBridge).
-const SELF_HOSTED_PUSH_TOKEN_STORAGE_KEY = "fg-fcm-token-selfhosted";
 const PUSH_TOKEN_SYNCED_STORAGE_KEY = "fg-fcm-token-synced";
 
 // A hard ban clears the session (grindr.rs drops it on the ban response), so
@@ -87,8 +84,6 @@ function writeStoredBan(status: AccountStatus) {
 
 /** The FCM token Android handed over, cached or still waiting on window. */
 function cachedPushToken(): string | null {
-	// Each server only ever gets the token of the Firebase project it sends with.
-	if (!IS_GRINDR) return window.localStorage.getItem(SELF_HOSTED_PUSH_TOKEN_STORAGE_KEY) || null;
 	const fallback = (window as Window & { __FG_FCM_TOKEN?: unknown }).__FG_FCM_TOKEN;
 	return window.localStorage.getItem(PUSH_TOKEN_STORAGE_KEY) || (typeof fallback === "string" ? fallback : null) || null;
 }
@@ -373,9 +368,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 				// Accounts with Grindr's first-party reCAPTCHA fail the plain
 				// /v8 sign-in as invalid credentials. Open Grind retries those
 				// with a reCAPTCHA token via /v9 once the assignment says so.
-				// Grindr only: other flavors mint no tokens. (A literal check, so the
-				// rest of this branch is dropped from their bundle.)
-				if (__FLAVOR__ !== "grindr") throw error;
 				const firstError = asAppError(error);
 				if (firstError?.kind === "VerificationRequired" || !isInvalidCredentials(firstError)) throw error;
 				const required = await callMethod("recaptcha_first_party_enabled").catch((checkError) => {
@@ -563,22 +555,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		}
 	};
 
-	const signUp = async ({ email, password, birthday, inviteCode }: SignUpData) => {
+	const signUp = async ({ email, password, birthday }: SignUpData) => {
 		try {
 			appLog.info("[Auth] signUp: creating email account");
 			dispatch({ type: "SET_LOADING", payload: true });
 			dispatch({ type: "SET_ERROR", payload: null });
 
-			// Official servers: sign-up is Android-only (rejects with a RecaptchaError
-			// elsewhere). A self-hosted server needs no reCAPTCHA token.
-			const captchaToken = IS_GRINDR ? await mintRecaptchaToken("sign_up") : "";
+			// Sign-up is Android-only (rejects with a RecaptchaError elsewhere).
+			const captchaToken = await mintRecaptchaToken("sign_up");
 			const profileId = await callMethod("create_account", {
 				email,
 				password,
 				birthday,
 				captchaToken,
 				pushToken: cachedPushToken(),
-				inviteCode: inviteCode?.trim() || null,
 			});
 			appLog.info("[Auth] signUp: account created", { profileId });
 			toast.success(i18n.t("auth.toasts.account_created"));
@@ -911,10 +901,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 			appLog.debug(`[PUSH_SYNC] Received native FCM token event (len=${token.length})`);
 
-			const selfHosted = event.type === "fg:fcm-token-selfhosted";
-			window.localStorage.setItem(selfHosted ? SELF_HOSTED_PUSH_TOKEN_STORAGE_KEY : PUSH_TOKEN_STORAGE_KEY, token);
-			// Grindr's token goes to the official server only, ours to ours only.
-			if (selfHosted === IS_GRINDR) return;
+			window.localStorage.setItem(PUSH_TOKEN_STORAGE_KEY, token);
 
 			if (!state.userId || state.isLoading) {
 				appLog.debug("[PUSH_SYNC] Token cached; waiting for authenticated session before sync");
@@ -940,10 +927,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		};
 
 		window.addEventListener("fg:fcm-token", onFcmToken as EventListener);
-		window.addEventListener("fg:fcm-token-selfhosted", onFcmToken as EventListener);
 		return () => {
 			window.removeEventListener("fg:fcm-token", onFcmToken as EventListener);
-			window.removeEventListener("fg:fcm-token-selfhosted", onFcmToken as EventListener);
 		};
 	}, [callMethod, asAppError, state.userId, state.isLoading]);
 
@@ -960,16 +945,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 				return;
 			}
 
-			if (!IS_GRINDR) {
-				const own = window.localStorage.getItem(SELF_HOSTED_PUSH_TOKEN_STORAGE_KEY);
-				if (!own) return;
-				const marker = `${own}::${state.userId}`;
-				if (window.localStorage.getItem(PUSH_TOKEN_SYNCED_STORAGE_KEY) === marker) return;
-				void callMethod("sync_push_token", { token: own })
-					.then(() => window.localStorage.setItem(PUSH_TOKEN_SYNCED_STORAGE_KEY, marker))
-					.catch((error) => appLog.warn("[PUSH_SYNC] Failed to sync self-hosted push token", asAppError(error)?.prettyMessage || error));
-				return;
-			}
 			const token = window.localStorage.getItem(PUSH_TOKEN_STORAGE_KEY);
 			const fallbackToken =
 				typeof (window as Window & { __FG_FCM_TOKEN?: unknown }).__FG_FCM_TOKEN ===

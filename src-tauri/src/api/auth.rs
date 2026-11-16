@@ -293,8 +293,8 @@ fn decode_jwt(token: &str) -> Result<JwtClaims, AppError> {
 // a less secure file.
 // ---------------------------------------------------------------------------
 
-// Keyring service: one per app flavor, so two flavors never share sessions.
-const SERVICE: &str = crate::flavor::APP_SLUG;
+// Keyring service: the app slug.
+const SERVICE: &str = crate::app_identity::APP_SLUG;
 const ACTIVE_SESSION_SLOT: &str = "session";
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -351,7 +351,7 @@ fn app_support_file(name: &str) -> Result<PathBuf, AppError> {
     Ok(PathBuf::from(home)
         .join("Library")
         .join("Application Support")
-        .join(crate::flavor::APP_SLUG)
+        .join(crate::app_identity::APP_SLUG)
         .join(name))
 }
 
@@ -591,7 +591,7 @@ const SIGN_UP_COUNT_SLOT: &str = "sign-up-count";
 #[cfg(target_os = "windows")]
 fn sign_up_count_path() -> PathBuf {
     crate::windows_instance::windows_app_data_root_dir()
-        .join(crate::flavor::APP_SLUG)
+        .join(crate::app_identity::APP_SLUG)
         .join(format!("{SIGN_UP_COUNT_SLOT}.msgpack"))
 }
 
@@ -789,13 +789,6 @@ fn persist(session: &grindr::Session, device: &grindr::DeviceInfo) {
     }
     if let Err(e) = AuthStorage::save_account(session, device) {
         eprintln!("[auth] failed to register account in switcher: {e}");
-    }
-    // Remember which backend this account lives on, so switching to it later
-    // talks to the right server.
-    if let Some(profile_id) = session.credentials.profile_id.as_deref() {
-        if let Err(e) = super::server::ServerStorage::save_for_account(profile_id, &grindr::server_config()) {
-            eprintln!("[auth] failed to remember the account's server: {e}");
-        }
     }
 }
 
@@ -1044,27 +1037,6 @@ pub async fn sign_up_quota() -> Result<SignUpQuota, AppError> {
     })
 }
 
-/// How a Free Grind server lets new accounts in: `"open"`, `"invite"` (an
-/// invite code is required) or `"closed"`. Read from the public assignments
-/// before sign-in; the official servers are always `"open"`.
-#[tauri::command]
-pub async fn registration_mode(state: tauri::State<'_, AppState>) -> Result<String, AppError> {
-    if grindr::server_config().is_official() {
-        return Ok("open".to_owned());
-    }
-    let client = state.client()?;
-    let mode = client
-        .public_assignment("registration_mode")
-        .await
-        .map_err(|e| AppError::from_client_error(e, &client))?;
-    Ok(match mode.as_deref() {
-        Some("invite") => "invite",
-        Some("closed") => "closed",
-        _ => "open",
-    }
-    .to_owned())
-}
-
 /// First-party account creation with email and password. Returns the new
 /// profile id; the response carries no session, so the caller signs in
 /// afterwards with `login` and `keep_device`.
@@ -1076,22 +1048,16 @@ pub async fn create_account(
     birthday: i64,
     captcha_token: String,
     push_token: Option<String>,
-    invite_code: Option<String>,
 ) -> Result<String, AppError> {
-    // The local sign-up limit and the reCAPTCHA requirement protect accounts on
-    // the official servers. A self-hosted server uses neither (it rate-limits
-    // and gates registration itself).
-    let official = grindr::server_config().is_official();
-
     // Enforced here, not just in the UI. An unreadable count refuses too.
-    if official && SignUpCounter::count()? >= SIGN_UP_LIMIT {
+    if SignUpCounter::count()? >= SIGN_UP_LIMIT {
         return Err(AppError::SignUpLimitReached);
     }
 
     let client = state.client()?;
 
     let captcha = captcha_token.trim();
-    if official && captcha.is_empty() {
+    if captcha.is_empty() {
         return Err(AppError::Api {
             code: 400,
             message: "A reCAPTCHA token is required to create an account".to_owned(),
@@ -1113,19 +1079,11 @@ pub async fn create_account(
             push_token: push_token.as_deref().map(str::trim).unwrap_or(""),
             // Never sign up for Grindr's marketing email.
             opt_in: false,
-            // Free Grind servers only; the official API knows no invites.
-            invite_code: invite_code
-                .as_deref()
-                .map(str::trim)
-                .filter(|code| !official && !code.is_empty()),
         })
         .await
         .map_err(|e| AppError::from_client_error(e, &client))?;
 
     // The account exists either way; a failed write only loses the count.
-    if !official {
-        return Ok(profile_id);
-    }
     if let Err(e) = SignUpCounter::record() {
         eprintln!("[auth] failed to record sign-up: {e}");
     }

@@ -3,7 +3,7 @@ mod api;
 mod app_disguise;
 mod commands;
 mod error;
-mod flavor;
+mod app_identity;
 mod instance_lock;
 mod media;
 mod media_proxy;
@@ -85,8 +85,8 @@ fn create_linux_main_window(app: &tauri::App) -> tauri::Result<()> {
 /// websocket-bridge tasks it spawns run in the background from here on.
 fn init_client(app: &tauri::AppHandle) {
     api::auth::SigningKeyStorage::forget_unscoped();
-    // The backend (fixed by the app flavor) must be set before any request.
-    api::server::apply_flavor_server();
+    // A session of another backend (older builds) never reaches Grindr.
+    api::server::drop_other_backend_session();
     let device = api::auth::DeviceStorage::load().ok().flatten();
     let session = api::auth::AuthStorage::get_session().ok().flatten();
     if let Err(e) = api::auth::adopt_client(app, device, session) {
@@ -259,7 +259,6 @@ pub fn run() {
                 api::auth::login_with_facebook,
                 api::auth::login_with_google_window,
                 api::auth::sign_up_quota,
-                api::auth::registration_mode,
                 api::auth::create_account,
                 api::auth::forgot_password,
                 api::auth::send_sms_verification_code,
@@ -282,7 +281,6 @@ pub fn run() {
                 api::auth::switch_account,
                 api::auth::remove_saved_account,
                 api::auth::create_transfer_code,
-                api::server::get_server_config,
                 api::auth::sign_in_with_transfer_code,
                 api::rest::request,
                 api::rest::fetch_external,
@@ -404,7 +402,6 @@ pub fn run() {
                 api::auth::login_with_facebook,
                 api::auth::login_with_google_window,
                 api::auth::sign_up_quota,
-                api::auth::registration_mode,
                 api::auth::create_account,
                 api::auth::forgot_password,
                 api::auth::send_sms_verification_code,
@@ -427,7 +424,6 @@ pub fn run() {
                 api::auth::switch_account,
                 api::auth::remove_saved_account,
                 api::auth::create_transfer_code,
-                api::server::get_server_config,
                 api::auth::sign_in_with_transfer_code,
                 api::rest::request,
                 api::rest::fetch_external,

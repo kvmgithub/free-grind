@@ -1,7 +1,6 @@
 import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { useFeatureFlag } from "../../../../services/assignmentsStore";
-import { IS_GRINDR } from "../../../../services/serverConfig";
 import type { ProfileDetail } from "../../../../types/grid";
 import { estimateAccountCreationTimestamp, formatAccountCreationDate } from "../utils";
 
@@ -22,7 +21,6 @@ export function useAccountCreationLabel(): (profile: Pick<ProfileDetail, "profil
 			if (realDates && typeof profile.created === "number" && profile.created > 0) {
 				return t("profile_details.joined", { date: formatAccountCreationDate(profile.created) });
 			}
-			if (!IS_GRINDR) return null;
 			const estimate = estimateAccountCreationTimestamp(profile.profileId);
 			return estimate == null ? null : t("profile_details.estimated_joined", { date: formatAccountCreationDate(estimate) });
 		},

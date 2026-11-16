@@ -1,11 +1,9 @@
 /**
- * Native parts only the grindr flavor has: push through Grindr's own Firebase
+ * Native parts that pose as Grindr: push through Grindr's own Firebase
  * project behind a spoofed package identity (SpoofedContext.kt) and reCAPTCHA
  * minting posing as the Grindr app (RecaptchaMintActivity.kt), with Grindr's
- * credentials and the proprietary reCAPTCHA SDK. settings.gradle includes
- * this module, and app/build.gradle.kts depends on it, only for
- * FG_FLAVOR=grindr; the app reaches it through FlavorNative
- * (app/src/flavor-grindr). Other flavors contain none of it.
+ * credentials and the proprietary reCAPTCHA SDK. The app reaches it through
+ * GrindrNative.
  */
 plugins {
     id("com.android.library")

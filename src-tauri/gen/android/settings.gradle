@@ -1,8 +1,6 @@
 include ':app'
-// Native parts only the grindr flavor has (spoofed Firebase, reCAPTCHA
-// minting): see grindr/build.gradle.kts.
-if (((System.getenv('FG_FLAVOR') ?: '').trim() ?: 'grindr') == 'grindr') {
-    include ':grindr'
-}
+// Native parts that pose as Grindr (spoofed Firebase, reCAPTCHA minting):
+// see grindr/build.gradle.kts.
+include ':grindr'
 
 apply from: 'tauri.settings.gradle'

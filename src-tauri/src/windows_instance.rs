@@ -110,14 +110,14 @@ pub fn normalize_label(raw: impl AsRef<str>) -> String {
 pub fn instance_data_root(base_dir: impl Into<PathBuf>, label: &str) -> PathBuf {
     base_dir
         .into()
-        .join(crate::flavor::APP_SLUG)
+        .join(crate::app_identity::APP_SLUG)
         .join("instances")
         .join(label)
 }
 
 #[allow(dead_code)]
 pub fn instances_root(base_dir: impl Into<PathBuf>) -> PathBuf {
-    base_dir.into().join(crate::flavor::APP_SLUG).join("instances")
+    base_dir.into().join(crate::app_identity::APP_SLUG).join("instances")
 }
 
 fn detect_mode() -> WindowsRuntimeMode {
@@ -184,7 +184,7 @@ fn manager_force_enabled() -> bool {
 
 fn write_runtime_mode_trace(mode: WindowsRuntimeMode, label: &str, data_root: &PathBuf) {
     let base = windows_app_data_root();
-    let manager_dir = base.join(crate::flavor::APP_SLUG).join("manager");
+    let manager_dir = base.join(crate::app_identity::APP_SLUG).join("manager");
     let trace_path = manager_dir.join("runtime-mode.txt");
 
     let _ = std::fs::create_dir_all(&manager_dir);
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn builds_instance_paths_from_base_dir() {
         let root = instance_data_root(PathBuf::from("/tmp"), "alpha");
-        let expected = PathBuf::from("/tmp").join(crate::flavor::APP_SLUG).join("instances").join("alpha");
+        let expected = PathBuf::from("/tmp").join(crate::app_identity::APP_SLUG).join("instances").join("alpha");
         assert_eq!(root, expected);
         assert_eq!(
             root.join("session.msgpack"),

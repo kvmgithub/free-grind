@@ -50,11 +50,11 @@ fi
 # cargo would otherwise quietly re-resolve an outdated Cargo.lock.
 cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
 bun install --frozen-lockfile
-# App identity of the flavor being built (FG_FLAVOR, default grindr) and the
+# App identity (manifest/app.json) and the
 # build variables its manifest brings: FG_APP_NAME, FG_APP_SLUG, FG_APP_BINARY,
-# FG_APP_REPO_URL, … (scripts/flavor-env.mjs). Artifacts are named <slug>-v….
-eval "$(bun --no-env-file scripts/flavor-env.mjs)"
-TAURI_CONFIG="$(bun --no-env-file scripts/flavor-config.mjs macos)"
+# FG_APP_REPO_URL, … (scripts/manifest-env.mjs). Artifacts are named <slug>-v….
+eval "$(bun --no-env-file scripts/manifest-env.mjs)"
+TAURI_CONFIG="$(bun --no-env-file scripts/tauri-config.mjs macos)"
 export TAURI_CONFIG
 
 # Per-target flags rather than RUSTFLAGS, which would drop target.*.rustflags

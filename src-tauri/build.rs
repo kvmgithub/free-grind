@@ -13,7 +13,7 @@ const EXTENSION_LIBRARIES: [&str; 4] = [
 
 fn main() {
     embed_commit_hash();
-    embed_flavor();
+    embed_manifest();
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
         build_webkit_extension();
     }
@@ -37,32 +37,13 @@ fn embed_commit_hash() {
     println!("cargo:rustc-env=FG_COMMIT_HASH={hash}");
 }
 
-/// The app flavor's identity (src/flavor.rs) from its manifest, selected by
-/// FG_FLAVOR like everywhere else (scripts/flavor.mjs): FG_APP_NAME and
-/// FG_APP_SLUG. The cargo feature `flavor-server` must match FG_FLAVOR, so
-/// the backend and the identity can't come from different flavors.
-fn embed_flavor() {
-    println!("cargo:rerun-if-env-changed=FG_FLAVOR");
-    let flavor = std::env::var("FG_FLAVOR").ok().map(|f| f.trim().to_owned()).filter(|f| !f.is_empty());
-    let flavor = flavor.as_deref().unwrap_or("grindr");
-    let manifest = match flavor {
-        "grindr" => "../flavors/grindr/flavor.json",
-        "server" => "../server/app-flavor/flavor.json",
-        other => panic!("FG_FLAVOR: unknown flavor {other:?} (expected grindr or server)"),
-    };
-    let server_feature = std::env::var_os("CARGO_FEATURE_FLAVOR_SERVER").is_some();
-    if server_feature != (flavor == "server") {
-        panic!(
-            "FG_FLAVOR={flavor} but the cargo feature flavor-server is {}; build through \
-             scripts/tauri.sh (or set both)",
-            if server_feature { "on" } else { "off" }
-        );
-    }
+/// The app's identity (src/app_identity.rs) from its manifest
+/// (manifest/app.json): FG_APP_NAME and FG_APP_SLUG.
+fn embed_manifest() {
+    let manifest = "../manifest/app.json";
     println!("cargo:rerun-if-changed={manifest}");
-    let text = std::fs::read_to_string(manifest)
-        .unwrap_or_else(|e| panic!("FG_FLAVOR={flavor}: can't read {manifest}: {e}"));
-    let json: serde_json::Value =
-        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{manifest}: {e}"));
+    let text = std::fs::read_to_string(manifest).unwrap_or_else(|e| panic!("can't read {manifest}: {e}"));
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{manifest}: {e}"));
     for (key, env) in [("appName", "FG_APP_NAME"), ("appSlug", "FG_APP_SLUG")] {
         let value = json[key]
             .as_str()
@@ -70,12 +51,6 @@ fn embed_flavor() {
             .unwrap_or_else(|| panic!("{manifest}: missing {key}"));
         println!("cargo:rustc-env={env}={value}");
     }
-    // User-Agent product token of an own-identity client (optional).
-    let product = json["clientProduct"].as_str().unwrap_or("grindr3");
-    if product.is_empty() || !product.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
-        panic!("{manifest}: clientProduct must be lowercase letters and digits, got {product:?}");
-    }
-    println!("cargo:rustc-env=FG_CLIENT_PRODUCT={product}");
 }
 
 /// Without the GStreamer headers the build still goes through: it leaves an

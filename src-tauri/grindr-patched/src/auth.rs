@@ -196,9 +196,6 @@ pub struct NewEmailAccount<'a> {
 	pub push_token: &'a str,
 	/// Marketing email opt-in.
 	pub opt_in: bool,
-	/// Registration invite code. Free Grind servers only (`inviteCode`, a
-	/// server extension); `None` leaves the field out, as the official app does.
-	pub invite_code: Option<&'a str>,
 }
 
 /// `POST /v8/users` body, in the order the app's Moshi adapter writes it.
@@ -212,8 +209,6 @@ struct CreateAccountEmailRequest<'a> {
 	token: &'a str,
 	opt_in: bool,
 	session_id: Option<&'a str>,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	invite_code: Option<&'a str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -621,7 +616,6 @@ pub(crate) async fn create_account_with_email(
 		token: account.push_token,
 		opt_in: account.opt_in,
 		session_id: None,
-		invite_code: account.invite_code,
 	};
 
 	let bytes = serde_json::to_vec(&body)
@@ -1028,27 +1022,6 @@ async fn assignment_enabled(
 		.any(|a| a.key == key && a.value == "on"))
 }
 
-/// The value of a public assignment (`GET /public/v1/assignments`), fetched
-/// without a session; `None` when the server doesn't assign the key.
-pub(crate) async fn public_assignment(
-	inner: &InnerClient,
-	key: &str,
-) -> Result<Option<String>, GrindrError> {
-	let resp: AssignmentsResponse = inner
-		.request_no_auth::<(), _>(
-			wreq::Method::GET,
-			"/public/v1/assignments",
-			None,
-			crate::rest::RequiredDeviceInfo::Anonymous,
-		)
-		.await?;
-	Ok(resp
-		.assignments
-		.into_iter()
-		.find(|a| a.key == key)
-		.map(|a| a.value))
-}
-
 pub(crate) async fn recaptcha_first_party_enabled(
 	inner: &InnerClient,
 ) -> Result<bool, GrindrError> {
@@ -1153,7 +1126,6 @@ mod tests {
 			token: "fcm",
 			opt_in: false,
 			session_id: None,
-			invite_code: None,
 		};
 		assert_eq!(
 			serde_json::to_string(&body).unwrap(),

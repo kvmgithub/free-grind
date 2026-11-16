@@ -23,7 +23,6 @@ declare global {
 		FreeGrindBridge?: {
 			setActiveRoute?: (route: string) => void;
 			postLocalNotification?: (payloadJson: string) => void;
-			configureSelfHostedPush?: (configJson: string) => void;
 		};
 	}
 }

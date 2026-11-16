@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import toast from "react-hot-toast";
 import { getMessageTranslations, upsertMessageTranslations } from "../services/chatDb";
-import { IS_GRINDR } from "../services/serverConfig";
 import { useApiFunctions } from "./useApiFunctions";
 import type { StoredMessageTranslation } from "../types/chat-db";
 import type { UiMessage } from "../types/chat-page";
@@ -150,9 +149,7 @@ export function useMessageTranslations(
 					isTranslationLimitError(error)
 						? t("auto_translate.error_server_limit", { defaultValue: "You've reached your translation limit. Try again later." })
 						: isTranslationPaywallError(error)
-						? !IS_GRINDR
-							? t("auto_translate.error_server_not_included", { defaultValue: "Translation isn't available for your account on this server." })
-							: t("auto_translate.error_server_paywall", { defaultValue: "Translation requires a subscription." })
+							? t("auto_translate.error_server_paywall", { defaultValue: "Translation requires a subscription." })
 						: isTranslationNotConfiguredError(error)
 							? t("auto_translate.error_server_not_configured", { defaultValue: "Translation isn't set up on this server. Pick another provider in Settings → Translation." })
 							: t("auto_translate.error_generic", { defaultValue: "Translation failed: {{message}}",

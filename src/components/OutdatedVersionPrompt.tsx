@@ -79,7 +79,7 @@ function buildDismissStorageKey(appVersion: string): string {
 
 /**
  * The main app's APK (arm64-v8a only) is published as
- * `<slug>-v<version>.apk` (slug of the app flavor, e.g. `free-grind`). Prefers
+ * `<slug>-v<version>.apk` (the app slug, e.g. `free-grind`). Prefers
  * the exact name for this release, then any `<slug>-v<x.y.z[-pre]>.apk` —
  * never some other `.apk` that might get attached to a release later.
  */

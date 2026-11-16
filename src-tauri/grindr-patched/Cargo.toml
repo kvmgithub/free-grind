@@ -14,7 +14,6 @@ edition = "2021"
 rust-version = "1.88"
 name = "grindr"
 version = "0.34.0+26.24.0.195444"
-build = "build.rs"
 exclude = [
     ".forgejo",
     ".gitignore",
@@ -156,18 +155,6 @@ features = [
     "json",
     "websocket",
 ]
-
-[dependencies.iana-time-zone]
-version = "0.1.65"
-optional = true
-
-# Patched in: without it, the client imitates the official Android app (its
-# version, a real Android device profile, okhttp's TLS/HTTP2 fingerprint
-# and header order). With it, the client identifies honestly: the embedding
-# app's own version (set_client_version), the real platform, device and time
-# zone, plain TLS. The server flavor enables it (src-tauri flavor-server).
-[features]
-own-identity = ["dep:iana-time-zone"]
 
 [dev-dependencies.http]
 version = "1"

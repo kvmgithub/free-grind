@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { SelfHostedPushBridge } from "./components/SelfHostedPushBridge";
 import { Routes, Route, Link, Navigate, useLocation, type Location } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import semver from "semver";
@@ -252,7 +251,6 @@ export default function App() {
 					{renderPhase >= 2 && <NotificationReplyBridge />}
 					{renderPhase >= 2 && <ManagedOptionsCacheBridge />}
 					{renderPhase >= 2 && <AssignmentsBridge />}
-					{renderPhase >= 2 && <SelfHostedPushBridge />}
 					{renderPhase >= 2 && <LgbtqRiskCountryWarning />}
 					{renderPhase >= 3 && <ChatRealtimeBridge />}
 					{renderPhase >= 3 && <VideoCallManager />}

@@ -23,19 +23,13 @@ tokio = { version = "1", features = ["test-util", "rt-multi-thread"] }
 tauri-build = { version = "2", features = [] }
 # Compiles the Linux video extension (webkit-extension/fgmedia.c).
 cc = "1"
-# Reads the app flavor's manifest (flavors/<flavor>/flavor.json).
+# Reads the app manifest (manifest/app.json).
 serde_json = "1"
 
 [features]
 # This feature is used for production builds to enable custom protocol support (tauri://).
 # It's automatically enabled by the Tauri CLI during "tauri build".
 custom-protocol = ["tauri/custom-protocol"]
-# App flavor (see scripts/flavor.mjs). Without it the app talks to Grindr's
-# servers; with it only to the Free Grind server (FG_API_URL / FG_MEDIA_URL
-# required). Set by scripts/flavor-config.mjs (build.features) for FG_FLAVOR=server.
-# The grindr crate then identifies honestly (own-identity: own version, real
-# platform, no imitated Android device or okhttp fingerprint).
-flavor-server = ["grindr/own-identity"]
 
 [dependencies]
 # custom-protocol is removed from here and moved to [features].

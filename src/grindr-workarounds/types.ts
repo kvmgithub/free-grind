@@ -19,9 +19,7 @@ export type ViewsApi = {
 
 /**
  * What a Grindr workaround can plug into. Every hook is optional, and the app
- * behaves like the official one where none is given. Workarounds only exist
- * in the grindr flavor (see index.ts), so a Free Grind server's limits
- * always apply as they are.
+ * behaves like the official one where none is given.
  */
 export type GrindrWorkaround = {
 	/** Kebab-case name, for logs. */

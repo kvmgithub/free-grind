@@ -5,11 +5,6 @@
  *
  * Removing one: delete its folder and its line in WORKAROUNDS below. Every
  * hook falls back to the official app's behaviour, so nothing else changes.
- *
- * Only the grindr flavor contains them. The server flavor (a Free Grind
- * server's limits are its own policy) builds with stub.ts instead of this file
- * (vite.config.mjs), which has the same API and the official behaviour only;
- * stub.check.ts keeps the two in sync.
  */
 import { createElement, Fragment } from "react";
 import type { GrindrWorkaround, NamedView, PaidActionReason, ViewsApi } from "./types";

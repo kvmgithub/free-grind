@@ -8,7 +8,7 @@ import dev.estopia.free_grind.grindr.R
 /**
  * Grindr's own Firebase project as the default FirebaseApp, registered under
  * a spoofed package identity (SpoofedContext), so Grindr's push servers reach
- * this app. Grindr flavor only.
+ * this app.
  */
 object GrindrPush {
     /** Returns whether the default app is set up. */

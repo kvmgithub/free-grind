@@ -80,43 +80,36 @@ val tauriProperties = Properties().apply {
 }
 
 /**
- * The app flavor (FG_FLAVOR, default grindr; see scripts/flavor.mjs): its
- * manifest sets the application ID, and its android/res folder adds the
- * launcher icons and name. The Kotlin package (`namespace`) stays the same
- * for every flavor: Tauri generates code into it from tauri.conf.json's
- * identifier, which flavor-config.mjs leaves alone on Android.
+ * The app manifest (manifest/app.json): it sets the application ID, and
+ * manifest/android/res adds the launcher icons and name.
  */
 val repoRoot = file("../../../..")
-val flavorId = (System.getenv("FG_FLAVOR") ?: "").trim().ifEmpty { "grindr" }
-val flavorDir = when (flavorId) {
-    "grindr" -> repoRoot.resolve("flavors/grindr")
-    "server" -> repoRoot.resolve("server/app-flavor")
-    else -> throw GradleException("FG_FLAVOR: unknown flavor \"$flavorId\" (expected grindr or server)")
-}
+val manifestDir = repoRoot.resolve("manifest")
 @Suppress("UNCHECKED_CAST")
-val flavorManifest = groovy.json.JsonSlurper().parse(flavorDir.resolve("flavor.json")) as Map<String, Any?>
-val flavorApplicationId = (flavorManifest["android"] as Map<String, Any?>)["applicationId"] as String
-val flavorAppSlug = flavorManifest["appSlug"] as String
-// Repository web URL, GitLab (also self-hosted) or GitHub, see scripts/flavor.mjs.
-val flavorRepoUrl = (flavorManifest["repository"] as String).trimEnd('/')
-val flavorRepoHost = URI(flavorRepoUrl).host
-val flavorRepoPath = URI(flavorRepoUrl).path.trim('/')
-// APKs the in-app updater may install: the flavor's own download location
+val appManifest = groovy.json.JsonSlurper().parse(manifestDir.resolve("app.json")) as Map<String, Any?>
+@Suppress("UNCHECKED_CAST")
+val appApplicationId = (appManifest["android"] as Map<String, Any?>)["applicationId"] as String
+val appSlug = appManifest["appSlug"] as String
+// Repository web URL, GitLab (also self-hosted) or GitHub, see scripts/manifest.mjs.
+val appRepoUrl = (appManifest["repository"] as String).trimEnd('/')
+val appRepoHost = URI(appRepoUrl).host
+val appRepoPath = URI(appRepoUrl).path.trim('/')
+// APKs the in-app updater may install: the app's own download location
 // (manifest updates.downloadUrl), else where its repository's release CI puts
 // them (GitLab: the project's generic package registry; GitHub: releases).
 @Suppress("UNCHECKED_CAST")
-val flavorDownloadUrl = ((flavorManifest["updates"] as Map<String, Any?>?)?.get("downloadUrl") as String?)
-    ?: if (flavorRepoHost == "github.com") {
-        "https://github.com/$flavorRepoPath/releases/download/"
+val appDownloadUrl = ((appManifest["updates"] as Map<String, Any?>?)?.get("downloadUrl") as String?)
+    ?: if (appRepoHost == "github.com") {
+        "https://github.com/$appRepoPath/releases/download/"
     } else {
-        "https://$flavorRepoHost/api/v4/projects/${URLEncoder.encode(flavorRepoPath, "UTF-8")}/packages/generic/"
+        "https://$appRepoHost/api/v4/projects/${URLEncoder.encode(appRepoPath, "UTF-8")}/packages/generic/"
     }
 
 // Without the keystore (ci/build/android.sh) the release APK comes out
 // unsigned; CI signs it once two independent builds produced the same bytes.
 // Local release builds: src-tauri/certs/<appSlug>-dev.jks, or FG_KEYSTORE_*.
 val releaseKeystore = System.getenv("FG_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }?.let { file(it) }
-    ?: repoRoot.resolve("src-tauri/certs/$flavorAppSlug-dev.jks")
+    ?: repoRoot.resolve("src-tauri/certs/$appSlug-dev.jks")
 fun signingEnv(name: String) = System.getenv(name)?.takeIf { it.isNotEmpty() } ?: "opengrind"
 
 android {
@@ -128,9 +121,9 @@ android {
     namespace = "dev.estopia.free_grind"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
-        applicationId = flavorApplicationId
+        applicationId = appApplicationId
         // ApkUpdater only installs APKs downloaded from this repository's releases.
-        buildConfigField("String", "RELEASES_DOWNLOAD_URL", "\"$flavorDownloadUrl\"")
+        buildConfigField("String", "RELEASES_DOWNLOAD_URL", "\"$appDownloadUrl\"")
         // GeckoView (Google sign-in, see GoogleOAuthActivity.kt) needs Android 8.0.
         minSdk = 26
         targetSdk = 36
@@ -146,9 +139,7 @@ android {
         }
     }
     sourceSets.getByName("main") {
-        res.srcDir(flavorDir.resolve("android/res"))
-        // FlavorNative: the flavor's own native parts (src/flavor-<flavor>).
-        java.srcDir("src/flavor-$flavorId/java")
+        res.srcDir(manifestDir.resolve("android/res"))
     }
     buildTypes {
         getByName("debug") {
@@ -237,8 +228,8 @@ dependencies {
     implementation("androidx.core:core-splashscreen:1.0.1")
     implementation("com.google.android.material:material:1.12.0")
     implementation("com.google.firebase:firebase-messaging-ktx:24.1.2")
-    // Grindr-only native parts (spoofed Firebase, reCAPTCHA minting).
-    if (flavorId == "grindr") implementation(project(":grindr"))
+    // Native parts that pose as Grindr (spoofed Firebase, reCAPTCHA minting).
+    implementation(project(":grindr"))
     // Google sign-in, see GoogleOAuthActivity.kt. ~85 MB of the APK; releases
     // ship arm64-v8a only (see release.yml).
     implementation("org.mozilla.geckoview:geckoview:152.0.20260629141727")

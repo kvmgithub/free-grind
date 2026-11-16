@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Grindr flavor only: Grindr's Firebase project (push via a spoofed package
+<!-- Grindr's Firebase project (push via a spoofed package
      identity, see SpoofedContext.kt) and the reCAPTCHA minting activity's theme. -->
 <resources>
     <!-- Grindr FCM credentials (spoofed Firebase) -->

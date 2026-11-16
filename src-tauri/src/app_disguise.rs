@@ -117,7 +117,7 @@ mod imp {
 
     fn state_dir() -> PathBuf {
         crate::windows_instance::windows_app_data_root_dir()
-            .join(crate::flavor::APP_SLUG)
+            .join(crate::app_identity::APP_SLUG)
             .join("disguise")
     }
 

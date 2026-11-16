@@ -16,9 +16,8 @@ export FG_REQUIRE_MEDIA_EXTENSION=1
 target="$CARGO_TARGET_DIR/release"
 rm -rf "$target/bundle" "$out/linux"
 mkdir -p "$out/linux"
-# Free Grind server (optional): FG_API_URL / FG_MEDIA_URL / FG_RTC_URL, see
-# scripts/flavor-config.mjs. Unset → the build has no Free Grind server.
-TAURI_CONFIG="$(bun --no-env-file scripts/flavor-config.mjs linux)"
+# App identity patch (scripts/tauri-config.mjs).
+TAURI_CONFIG="$(bun --no-env-file scripts/tauri-config.mjs linux)"
 export TAURI_CONFIG
 
 bunx tauri build --bundles deb

@@ -14,10 +14,10 @@ use crate::error::{BanInfo, BanKind, BlockKind, GrindrError};
 use crate::request::{Access, Body, Request};
 use crate::signing::{DeviceKey, DeviceSigningKey};
 
-/// The active backend's API origin (official by default, see [`crate::server`]).
+/// The API origin (see [`crate::server`]).
 #[cfg(not(test))]
 pub(crate) fn base_url() -> String {
-	crate::server::server_config().api_base().to_owned()
+	crate::server::OFFICIAL_API_BASE.to_owned()
 }
 
 #[cfg(test)]

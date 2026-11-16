@@ -41,10 +41,10 @@ export VITE_HOTSWAP_CHANNEL="${FG_CHANNEL:?FG_CHANNEL must be set}"
 export NODE_OPTIONS="--max-old-space-size=4096"
 
 version="$(node -p 'require("./package.json").version')"
-# App identity of the flavor being built (FG_FLAVOR, default grindr) and the
+# App identity (manifest/app.json) and the
 # build variables its manifest brings: FG_APP_NAME, FG_APP_SLUG, FG_APP_BINARY,
-# FG_APP_REPO_URL, … (scripts/flavor-env.mjs). Artifacts are named <slug>-v….
-eval "$(bun --no-env-file scripts/flavor-env.mjs)"
+# FG_APP_REPO_URL, … (scripts/manifest-env.mjs). Artifacts are named <slug>-v….
+eval "$(bun --no-env-file scripts/manifest-env.mjs)"
 out="/work/out"
 
 # bun's hardlinking install fails across the container's overlay and the
@@ -52,7 +52,7 @@ out="/work/out"
 export BUN_INSTALL_CACHE_DIR=/work/.bun-cache
 bun install --frozen-lockfile --backend copyfile
 
-echo "Building $FG_APP_NAME $version (flavor $FG_FLAVOR, channel $FG_CHANNEL, SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)"
+echo "Building $FG_APP_NAME $version (channel $FG_CHANNEL, SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)"
 echo "  node $(node --version), bun $(bun --version)"
 if command -v cargo >/dev/null 2>&1; then
 	echo "  $(rustc --version)"

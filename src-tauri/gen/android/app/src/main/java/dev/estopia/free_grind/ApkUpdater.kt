@@ -54,7 +54,7 @@ object ApkUpdater {
     SELF(
       "app",
       "free-grind-update.apk",
-      // This app flavor's repository (build.gradle.kts, from its manifest).
+      // The app's repository (build.gradle.kts, from its manifest).
       BuildConfig.RELEASES_DOWNLOAD_URL,
     );
 

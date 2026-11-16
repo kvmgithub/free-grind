@@ -72,7 +72,6 @@ pub use captcha::{CaptchaAction, CaptchaTokenProvider};
 pub use client::{probe_emulation, GrindrClient};
 pub use device::DeviceInfo;
 pub use error::{BanInfo, BanKind, BlockKind, GrindrError, TimeoutPhase};
-pub use identity::set_client_identity;
 pub use headers::{
 	build_device_info_header, build_platform_user_agent, build_user_agent,
 	GrindrHeaders, APP_VERSION,
@@ -82,7 +81,6 @@ pub use media::{
 };
 pub use request::RequestBuilder;
 pub use rest::RawResponse;
-pub use server::{extra_cert_store, free_grind_available, server_config, set_server_config, ServerConfig};
 pub use signing::DeviceSigningKey;
 pub use stream::BodySource;
 pub use ws::{WsCommand, WsConnectionState, WsEvent};

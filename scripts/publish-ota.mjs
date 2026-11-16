@@ -11,13 +11,11 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { resolveAutoMinBinaryVersion } from "./min-binary-version.mjs";
-import { loadFlavor } from "./flavor.mjs";
+import { loadManifest } from "./manifest.mjs";
 
 // Publishes the frontend as a signed OTA bundle: `latest.json` plus the bundle,
-// next to each other at the app flavor's OTA endpoint (FG_FLAVOR,
-// flavors/README.md: manifest ota.endpoint, e.g.
-// https://freegrind-ota-{{channel}}.surge.sh/latest.json). Each flavor has its
-// own endpoint and key, so an update of one never reaches the other app.
+// next to each other at the app's OTA endpoint (manifest/app.json
+// ota.endpoint, e.g. https://example.org/ota/{{channel}}/latest.json).
 //
 // - surge.sh endpoint: deployed to surge. Every channel is its own surge
 //   project, because a surge deploy replaces the whole site; this way a
@@ -27,9 +25,9 @@ import { loadFlavor } from "./flavor.mjs";
 //   directory for the channel.
 
 const OTA_ENDPOINT_TEMPLATE = (() => {
-  const endpoint = loadFlavor().ota.endpoint;
+  const endpoint = loadManifest().ota.endpoint;
   if (!/^https:\/\/[^/]+\/(.+\/)?latest\.json$/.test(endpoint) || !endpoint.includes("{{channel}}")) {
-    throw new Error(`flavor ota.endpoint ${endpoint}: expected https://…{{channel}}…/latest.json`);
+    throw new Error(`manifest ota.endpoint ${endpoint}: expected https://…{{channel}}…/latest.json`);
   }
   return endpoint;
 })();
@@ -164,7 +162,7 @@ const notes = process.env.OTA_NOTES || `OTA ${otaChannel} ${new Date().toISOStri
 const mandatory = process.env.OTA_MANDATORY === "true";
 
 // A key file named explicitly wins over HOTSWAP_PRIVATE_KEY, which may come
-// from .env.local and belong to another app flavor.
+// from .env.local and belong to another app.
 const keyPath = process.env.HOTSWAP_PRIVATE_KEY_PATH;
 let keyValue =
   keyPath && existsSync(path.resolve(keyPath))

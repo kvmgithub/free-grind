@@ -1,14 +1,13 @@
-# CI of the Free Grind client (the grindr flavor), on gitlab.com/hookrapp/free-grind.
+# CI of the Free Grind client, on gitlab.com/hookrapp/free-grind.
 # Replaces the former GitHub workflows (release, ota-branches, build-artifacts,
-# build-ios/-macos, the reproducibility checks, deploy-docs, repo-guard).
+# build-ios/-macos, the reproducibility checks, deploy-docs).
 #
 # Runners: our own (tag hookr-build: Linux, shell executor with Docker, set up
-# with ci/runner/setup.sh in the Hookr repository). iOS and macOS builds need a
+# with server/ci/runner/setup.sh in the Hookr repository). iOS and macOS builds need a
 # Mac runner (tag macos, Xcode 26.6); they only run when the CI/CD variable
 # MACOS_RUNNER is "true".
 #
 # What runs:
-#   every pipeline        repo-guard
 #   push main             release (always), OTA main (unless [skip ota])
 #   push development      release (only for a pre-release version bump that
 #                         changes native code, or with [skip ota]),
@@ -54,17 +53,6 @@ default:
     FG_CHANNEL: main
 
 # --- check ---------------------------------------------------------------------
-
-repo-guard:
-  stage: check
-  script:
-    # The server flavor's code, branding and backend live in the private Hookr
-    # repository (checked out at server/, gitignored here).
-    - |
-      tracked="$(git ls-files -- server flavors/server)"
-      if [ -n "$tracked" ]; then
-        echo "Files of the private server repository are tracked here:"; echo "$tracked"; exit 1
-      fi
 
 # main releases on every push. development only releases when a push changes
 # the version to a pre-release (`bun run set-version beta`) AND native code
@@ -243,7 +231,7 @@ publish-release:
     - |
       bunx tauri signer sign release/SHA256SUMS -k "$HOTSWAP_PRIVATE_KEY" -p "$HOTSWAP_PRIVATE_KEY_PASSWORD" > /dev/null
       base64 -d release/SHA256SUMS.sig > release/SHA256SUMS.minisig && rm release/SHA256SUMS.sig
-      minisign -Vm release/SHA256SUMS -x release/SHA256SUMS.minisig -P "$(jq -r '.ota.pubkey' flavors/grindr/flavor.json)"
+      minisign -Vm release/SHA256SUMS -x release/SHA256SUMS.minisig -P "$(jq -r '.ota.pubkey' manifest/app.json)"
     # Files into the package registry, then the release linking them.
     - |
       encoded_path=$(printf '%s' "$CI_PROJECT_PATH" | jq -sRr @uri)

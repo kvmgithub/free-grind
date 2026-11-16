@@ -69,15 +69,14 @@ fi
 # cargo would otherwise quietly re-resolve an outdated Cargo.lock.
 cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
 bun install --frozen-lockfile
-# App identity of the flavor being built (FG_FLAVOR, default grindr) and the
+# App identity (manifest/app.json) and the
 # build variables its manifest brings: FG_APP_NAME, FG_APP_SLUG, FG_APP_BINARY,
-# FG_APP_REPO_URL, … (scripts/flavor-env.mjs). Artifacts are named <slug>-v….
-eval "$(bun --no-env-file scripts/flavor-env.mjs)"
+# FG_APP_REPO_URL, … (scripts/manifest-env.mjs). Artifacts are named <slug>-v….
+eval "$(bun --no-env-file scripts/manifest-env.mjs)"
 bun run build
 
-# Free Grind server (optional): FG_API_URL / FG_MEDIA_URL / FG_RTC_URL, see
-# scripts/flavor-config.mjs. Unset → the build has no Free Grind server.
-TAURI_CONFIG="$(bun --no-env-file scripts/flavor-config.mjs ios)"
+# App identity patch (scripts/tauri-config.mjs).
+TAURI_CONFIG="$(bun --no-env-file scripts/tauri-config.mjs ios)"
 export TAURI_CONFIG
 
 # `tauri ios init` regenerates gen/apple from Tauri's templates, which drops
@@ -92,21 +91,21 @@ sed -i '' \
 	-e "s/CFBundleShortVersionString: .*/CFBundleShortVersionString: \"$short_version\"/" \
 	-e "s/CFBundleVersion: .*/CFBundleVersion: \"$build_number\"/" \
 	src-tauri/gen/apple/project.yml
-# App identity of the flavor (FG_FLAVOR, scripts/flavor.mjs): bundle ID, the
-# name under the icon, and the icon when the flavor brings its own
-# (<flavor dir>/ios/AppIcon.appiconset; otherwise the committed one stays).
-flavor_json="$(bun -e 'import { flavorDir, loadFlavor } from "./scripts/flavor.mjs"; console.log(JSON.stringify({ ...loadFlavor(), dir: flavorDir() }))')"
-bundle_id="$(jq -r '.ios.bundleId' <<<"$flavor_json")"
-app_name="$(jq -r '.appName | gsub("[\\\\/&\"]"; "")' <<<"$flavor_json")"
+# App identity (manifest/app.json, scripts/manifest.mjs): bundle ID, the
+# name under the icon, and the icon when the manifest brings its own
+# (manifest/ios/AppIcon.appiconset; otherwise the committed one stays).
+manifest_json="$(bun -e 'import { manifestDir, loadManifest } from "./scripts/manifest.mjs"; console.log(JSON.stringify({ ...loadManifest(), dir: manifestDir() }))')"
+bundle_id="$(jq -r '.ios.bundleId' <<<"$manifest_json")"
+app_name="$(jq -r '.appName | gsub("[\\\\/&\"]"; "")' <<<"$manifest_json")"
 sed -i '' \
 	-e "s/^  bundleIdPrefix: .*/  bundleIdPrefix: $bundle_id/" \
 	-e "s/PRODUCT_NAME: .*/PRODUCT_NAME: \"$app_name\"/" \
 	-e "s/PRODUCT_BUNDLE_IDENTIFIER: .*/PRODUCT_BUNDLE_IDENTIFIER: $bundle_id/" \
 	src-tauri/gen/apple/project.yml
-flavor_icon="$(jq -r '.dir' <<<"$flavor_json")/ios/AppIcon.appiconset"
-if [ -d "$flavor_icon" ]; then
+manifest_icon="$(jq -r '.dir' <<<"$manifest_json")/ios/AppIcon.appiconset"
+if [ -d "$manifest_icon" ]; then
 	rm -rf src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset
-	cp -R "$flavor_icon" src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset
+	cp -R "$manifest_icon" src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset
 fi
 # xcodegen fails on source paths that don't exist yet; Externals is filled
 # with the prebuilt Rust library below.

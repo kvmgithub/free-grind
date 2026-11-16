@@ -1,6 +1,3 @@
-// With own-identity, the okhttp fingerprint below goes unused.
-#![cfg_attr(feature = "own-identity", allow(dead_code))]
-
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
@@ -185,11 +182,8 @@ pub(crate) struct ClientSetup {
 
 /// Shared `wreq` setup: the emulation profile plus gzip-only encoding.
 fn grindr_client_builder() -> wreq::ClientBuilder {
-	let builder = Client::builder();
-	// Own identity: plain TLS and HTTP/2, no imitated okhttp fingerprint.
-	#[cfg(not(feature = "own-identity"))]
-	let builder = builder.emulation(grindr_emulation());
-	builder
+	Client::builder()
+		.emulation(grindr_emulation())
 		.gzip(true)
 		.no_deflate()
 		.no_brotli()
@@ -198,7 +192,6 @@ fn grindr_client_builder() -> wreq::ClientBuilder {
 		.pool_idle_timeout(OKHTTP_POOL_IDLE)
 		.pool_max_idle_per_host(OKHTTP_MAX_IDLE_CONNECTIONS)
 		.tcp_keepalive(None)
-		.cert_store(crate::server::extra_cert_store())
 }
 
 fn build_http_client(read_timeout: Duration) -> Result<Client, GrindrError> {
@@ -236,10 +229,8 @@ pub(crate) fn build_media_client(
 
 fn build_ws_client() -> Result<Client, GrindrError> {
 	// Websocket endpoint is http/1.1
-	let builder = grindr_client_builder();
-	#[cfg(not(feature = "own-identity"))]
-	let builder = builder.emulation(grindr_ws_emulation());
-	builder
+	grindr_client_builder()
+		.emulation(grindr_ws_emulation())
 		.http1_only()
 		.build()
 		.map_err(Into::into)
@@ -836,14 +827,6 @@ impl GrindrClient {
 		crate::auth::recaptcha_first_party_enabled(&self.inner).await
 	}
 
-	/// The value the server assigns `key` before sign-in (public
-	/// assignments), e.g. a Free Grind server's `registration_mode`.
-	pub async fn public_assignment(
-		&self,
-		key: &str,
-	) -> Result<Option<String>, GrindrError> {
-		crate::auth::public_assignment(&self.inner, key).await
-	}
 }
 
 #[cfg(test)]

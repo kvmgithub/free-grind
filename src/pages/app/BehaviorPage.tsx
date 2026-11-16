@@ -11,7 +11,6 @@ import { usePreferences } from "../../contexts/PreferencesContext";
 import { useIsFreeTier } from "../../services/assignmentsStore";
 import { useSettingsHighlight } from "../../hooks/useSettingsHighlight";
 import { getTapEmoji, tapLabel } from "./interest/interestUtils";
-import { IS_GRINDR } from "../../services/serverConfig";
 import { isAndroid, isIos } from "../../services/saveMedia";
 import {
 	SKIP_BLOCK_CONFIRM_KEY,
@@ -41,7 +40,7 @@ export function BehaviorPage() {
 	const isDesktop = useDesktopBreakpoint();
 	const isFreeTier = useIsFreeTier();
 	// The free-tier warning is about Grindr's limit and the Honduras bypass.
-	const showFreeTierWarning = IS_GRINDR && isFreeTier;
+	const showFreeTierWarning = isFreeTier;
 	const canSendExpiringAlbums = !isFreeTier;
 	const {
 		defaultExpiringPhotos,

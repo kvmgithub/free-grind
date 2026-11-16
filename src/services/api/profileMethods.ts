@@ -38,7 +38,6 @@ import { profileDetailItemSchema } from "../../types/grid";
 import { getIncognitoMode, isRecordProfileViewsEnabled } from "../../utils/privacy";
 import { appLog } from "../../utils/logger";
 import { isRecaptchaAvailable, mintRecaptchaToken } from "../recaptcha";
-import { IS_GRINDR } from "../serverConfig";
 
 export function createProfileMethods(fetchRest: RestFetcher, t: (key: string, options?: { defaultValue?: string }) => string) {
 	/**
@@ -184,8 +183,8 @@ export function createProfileMethods(fetchRest: RestFetcher, t: (key: string, op
 		 */
 		async reportProfile(profileId: string, report: ProfileReportRequest): Promise<{ ok: true }> {
 			const id = encodeURIComponent(profileId);
-			// Grindr asks for a reCAPTCHA token on reports (/v5); other flavors use /v3.1.
-			if (IS_GRINDR && isRecaptchaAvailable()) {
+			// Grindr asks for a reCAPTCHA token on reports (/v5); without one, /v3.1.
+			if (isRecaptchaAvailable()) {
 				const captchaToken = await mintRecaptchaToken("report").catch((error) => {
 					appLog.warn("[Report] reCAPTCHA token unavailable, using v3.1", error);
 					return null;

@@ -47,20 +47,15 @@ FG_CHANNEL=main sh ci/build/run.sh android   # or: windows, linux, frontend
 
 The outputs land in `out/<artifact>/`. [REPRODUCIBILITY.md](./REPRODUCIBILITY.md) explains `FG_CHANNEL` and how to compare the outputs with a release.
 
-## App flavor
+## App identity
 
-The app's identity (name, identifier, user agent, update endpoint and key, repository links) comes from a flavor manifest, selected with `FG_FLAVOR`:
+The app's identity (name, identifier, user agent, update endpoint and key, repository links) comes from [`manifest/app.json`](./manifest/app.json); `manifest/android/res` holds the Android launcher icons and name.
 
-| `FG_FLAVOR` | Manifest |
-|---|---|
-| `grindr` (default) | [`flavors/grindr/flavor.json`](./flavors/grindr/flavor.json) |
-| `server` | `server/app-flavor/flavor.json` (private repository, checked out at `server/`) |
-
-`scripts/flavor-config.mjs` turns it into the Tauri config patch (`TAURI_CONFIG`), and `vite.config.mjs` into the frontend constants `__APP_NAME__`, `__REPO_URL__` and so on (declared in `src/vite-env.d.ts`). Builds of this repository need nothing extra; the default is `grindr`.
+`scripts/tauri-config.mjs` turns it into the Tauri config patch (`TAURI_CONFIG`), and `vite.config.mjs` into the frontend constants `__APP_NAME__`, `__REPO_URL__` and so on (declared in `src/vite-env.d.ts`).
 
 Texts never hardcode the app's name: translations use `{{appName}}` (and `{{appFolder}}` for the export folder, as in `Downloads/{{appFolder}}`), which i18next fills in for every string.
 
-The Grindr workarounds (`src/grindr-workarounds`) exist only in the `grindr` flavor. Other flavors build with `src/grindr-workarounds/stub.ts` instead, and without their texts (`public/locales/<locale>/grindr.json`, keys as `grindr:…`).
+The Grindr workarounds live in `src/grindr-workarounds`, their texts in `public/locales/<locale>/grindr.json` (keys as `grindr:…`).
 
 ## Development builds
 

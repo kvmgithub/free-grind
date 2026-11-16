@@ -1,5 +1,5 @@
-// Repository, website and release links of the app flavor
-// (flavors/<flavor>/flavor.json). The repository is on GitLab (also
+// Repository, website and release links of the app
+// (manifest/app.json). The repository is on GitLab (also
 // self-hosted) or GitHub; everything that builds a link or calls its API goes
 // through here, so nothing else needs to know which.
 
@@ -38,7 +38,7 @@ export function compareUrl(from: string | null | undefined, to: string | null | 
 	return `${pages}/compare/${from}...${to}`;
 }
 
-/** Where people download releases: the flavor's own page, or the repository's releases. */
+/** Where people download releases: the app's own page, or the repository's releases. */
 export const RELEASES_URL = __RELEASES_PAGE_URL__ || `${pages}/releases`;
 
 /** A published release, the same whichever feed it came from. */
@@ -98,7 +98,7 @@ function fromGitLab(release: GitLabRelease): Release {
 }
 
 /**
- * The newest releases, newest first: the flavor's own feed (manifest
+ * The newest releases, newest first: the app's own feed (manifest
  * updates.feedUrl, in the GitHub releases format), or the repository's.
  */
 export async function fetchReleases(signal?: AbortSignal): Promise<Release[]> {

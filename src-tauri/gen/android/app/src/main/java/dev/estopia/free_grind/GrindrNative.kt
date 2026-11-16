@@ -4,11 +4,10 @@ import android.content.Context
 import android.content.Intent
 
 /**
- * The grindr flavor's native parts (module :grindr): push through Grindr's
- * Firebase project and reCAPTCHA minting. The server flavor's FlavorNative
- * (src/flavor-server) has the same API and none of it.
+ * Native parts in module :grindr: push through Grindr's Firebase project and
+ * reCAPTCHA minting.
  */
-object FlavorNative {
+object GrindrNative {
     /**
      * The package name a process reports. The ":recaptcha" process poses as
      * Grindr towards the reCAPTCHA SDK, which keys its tokens to it; null

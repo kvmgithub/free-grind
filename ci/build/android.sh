@@ -29,9 +29,8 @@ cp ci/build/android/network_security_config.xml "$nsc"
 # A fresh Gradle home per build, so nothing cached from another project leaks in.
 export GRADLE_USER_HOME=/root/.gradle
 
-# Free Grind server (optional): FG_API_URL / FG_MEDIA_URL / FG_RTC_URL, see
-# scripts/flavor-config.mjs. Unset → the build has no Free Grind server.
-TAURI_CONFIG="$(bun --no-env-file scripts/flavor-config.mjs android)"
+# App identity patch (scripts/tauri-config.mjs).
+TAURI_CONFIG="$(bun --no-env-file scripts/tauri-config.mjs android)"
 export TAURI_CONFIG
 
 bunx tauri android init --ci --skip-targets-install

@@ -11,7 +11,6 @@ import { useTranslation } from "react-i18next";
 import { Mail, Lock, KeyRound, Eye, EyeOff, UserPlus, ChevronDown, QrCode, ScanLine } from "lucide-react";
 import { SmsVerificationRequiredError, type SignInRefusal } from "../../contexts/auth-context";
 import { SmsVerificationPanel } from "./SmsVerificationPanel";
-import { IS_GRINDR } from "../../services/serverConfig";
 import { isAndroid } from "../../services/saveMedia";
 import { isTauriRuntime } from "../../services/tauriWebSocket";
 import { cancelQrScan, isQrScanSupported, QrScanError, scanQrCode } from "../../services/qrScanner";
@@ -450,7 +449,7 @@ export function SignInPage() {
 		<>
 			<AuthShell
 				title={addProfileMode ? t("auth.sign_in.add_profile_title", { defaultValue: "Add Profile" }) : t("auth.sign_in.title")}
-				subtitle={addProfileMode ? t("auth.sign_in.add_profile_subtitle", { defaultValue: "Sign in with the account you want to add." }) : IS_GRINDR ? t("auth.sign_in.subtitle", { defaultValue: "Use your Grindr email and password, or sign in with Google." }) : t("auth.sign_in.subtitle_server", { defaultValue: "Use your {{appName}} email and password." })}
+				subtitle={addProfileMode ? t("auth.sign_in.add_profile_subtitle", { defaultValue: "Sign in with the account you want to add." }) : t("auth.sign_in.subtitle", { defaultValue: "Use your Grindr email and password, or sign in with Google." })}
 				footer={
 					<div className="flex flex-wrap items-center justify-center gap-1">
 						<button

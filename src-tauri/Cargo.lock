@@ -2131,7 +2131,6 @@ dependencies = [
  "http-body",
  "http2",
  "httpdate",
- "iana-time-zone",
  "jsonwebtoken",
  "p256",
  "rand 0.10.1",

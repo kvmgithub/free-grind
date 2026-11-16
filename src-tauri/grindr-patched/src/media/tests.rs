@@ -111,7 +111,6 @@ fn platform_media_headers_are_the_dalvik_ua_and_nothing_else() {
 	);
 }
 
-#[cfg(not(feature = "own-identity"))] // checks the imitated identity
 #[test]
 fn plain_headers_are_gzip_then_the_okhttp_ua() {
 	let headers = GrindrHeaders::build_plain(None).unwrap();
@@ -121,7 +120,6 @@ fn plain_headers_are_gzip_then_the_okhttp_ua() {
 	assert_eq!(header_value(&headers, "user-agent"), Some("okhttp/5.5.1"));
 }
 
-#[cfg(not(feature = "own-identity"))] // checks the imitated identity
 #[test]
 fn a_ranged_plain_request_sends_the_range_before_the_ua() {
 	let headers = GrindrHeaders::build_plain(Some("bytes=0-99")).unwrap();
@@ -131,7 +129,6 @@ fn a_ranged_plain_request_sends_the_range_before_the_ua() {
 	assert_eq!(header_value(&headers, "user-agent"), Some("okhttp/5.5.1"));
 }
 
-#[cfg(not(feature = "own-identity"))] // checks the imitated identity
 #[tokio::test]
 async fn a_plain_fetch_goes_out_as_a_bare_okhttp_client() {
 	let url = media_url(7);
@@ -159,7 +156,6 @@ async fn a_plain_fetch_goes_out_as_a_bare_okhttp_client() {
 	assert!(app_headers.is_empty(), "sent {app_headers:?}");
 }
 
-#[cfg(not(feature = "own-identity"))] // checks the imitated identity
 #[tokio::test]
 async fn album_video_goes_out_as_the_platform_stack() {
 	let url = media_url(5);

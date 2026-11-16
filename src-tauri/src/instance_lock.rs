@@ -111,10 +111,10 @@ pub fn show_lock_error_dialog(message: &str) {
 
     let text = to_wide(&format!(
         "{} is already running for this account.\n\n{}",
-        crate::flavor::APP_NAME,
+        crate::app_identity::APP_NAME,
         message
     ));
-    let caption = to_wide(crate::flavor::APP_NAME);
+    let caption = to_wide(crate::app_identity::APP_NAME);
 
     unsafe {
         MessageBoxW(
