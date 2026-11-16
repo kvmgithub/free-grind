@@ -23,8 +23,8 @@
 # the in-app updater reads the releases API.
 #
 # CI/CD variables (protected + masked; main and development are protected):
-#   ANDROID_KEYSTORE (file)            APK signing key (alias/passwords: KEYS.md)
-#   HOTSWAP_PRIVATE_KEY (file), HOTSWAP_PRIVATE_KEY_PASSWORD   OTA + SHA256SUMS
+#   ANDROID_KEYSTORE_BASE64            APK signing key, the .jks base64-encoded (alias/passwords: KEYS.md)
+#   HOTSWAP_PRIVATE_KEY, HOTSWAP_PRIVATE_KEY_PASSWORD   OTA + SHA256SUMS (tauri signer key)
 #   SURGE_LOGIN, SURGE_TOKEN           OTA hosting (surge.sh)
 
 workflow:
@@ -206,10 +206,13 @@ publish-release:
     - |
       unsigned="verified/android/free-grind-v$version-android-arm64-unsigned.apk"
       signed="release/free-grind-v$version.apk"
-      apksigner sign --ks "$ANDROID_KEYSTORE" --ks-key-alias "${ANDROID_KEY_ALIAS:-opengrind}" \
+      keystore="$(mktemp)"
+      echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$keystore"
+      apksigner sign --ks "$keystore" --ks-key-alias "${ANDROID_KEY_ALIAS:-opengrind}" \
         --ks-pass "pass:${ANDROID_KEYSTORE_PASSWORD:-opengrind}" --key-pass "pass:${ANDROID_KEYSTORE_PASSWORD:-opengrind}" \
         --v1-signing-enabled false --v2-signing-enabled true --v3-signing-enabled false --v4-signing-enabled false \
         --alignment-preserved --out "$signed" "$unsigned"
+      rm -f "$keystore"
       apksigner verify --print-certs "$signed"
       # What REPRODUCIBILITY.md tells users to run.
       apksigcopier copy "$signed" "$unsigned" check.apk && cmp check.apk "$signed" && rm check.apk
@@ -238,7 +241,7 @@ publish-release:
       cat release/SHA256SUMS
     # Checksums signed with the OTA key (KEYS.md), checked against the key every app trusts.
     - |
-      bunx tauri signer sign release/SHA256SUMS -k "$(cat "$HOTSWAP_PRIVATE_KEY")" -p "$HOTSWAP_PRIVATE_KEY_PASSWORD" > /dev/null
+      bunx tauri signer sign release/SHA256SUMS -k "$HOTSWAP_PRIVATE_KEY" -p "$HOTSWAP_PRIVATE_KEY_PASSWORD" > /dev/null
       base64 -d release/SHA256SUMS.sig > release/SHA256SUMS.minisig && rm release/SHA256SUMS.sig
       minisign -Vm release/SHA256SUMS -x release/SHA256SUMS.minisig -P "$(jq -r '.ota.pubkey' flavors/grindr/flavor.json)"
     # Files into the package registry, then the release linking them.
@@ -271,7 +274,7 @@ publish-ota-main:
     - '[ "$SHOULD_RELEASE" = true ] || { echo "No release for this push"; exit 0; }'
     - bun install --frozen-lockfile
     - |
-      HOTSWAP_PRIVATE_KEY_PATH="$HOTSWAP_PRIVATE_KEY" OTA_BUNDLE=verified/frontend/frontend.tar.gz \
+      OTA_BUNDLE=verified/frontend/frontend.tar.gz \
         OTA_NOTES="Automated OTA upload for $CI_COMMIT_SHA" bun --no-env-file scripts/publish-ota.mjs --channel main
 
 # OTA for development pushes (and Run pipeline with OTA_CHANNEL): the frontend
@@ -306,7 +309,7 @@ ota-publish:
     - sh ci/compare.sh ota/verified ota/frontend-1 ota/frontend-2
     - bun install --frozen-lockfile
     - |
-      HOTSWAP_PRIVATE_KEY_PATH="$HOTSWAP_PRIVATE_KEY" OTA_BUNDLE=ota/verified/frontend.tar.gz \
+      OTA_BUNDLE=ota/verified/frontend.tar.gz \
         OTA_NOTES="Automated OTA upload for $CI_COMMIT_SHA" bun --no-env-file scripts/publish-ota.mjs --channel "$FG_CHANNEL"
 
 # Unsigned test builds of any branch (Run pipeline with DEV_BUILD=true).
