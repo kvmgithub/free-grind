@@ -1431,7 +1431,7 @@ export function ProfileDetailsModal({
 	// Layout effects: the index is fixed before the browser paints. With a
 	// plain effect the new order showed first under the old index for a frame,
 	// so a moved photo slid away and back.
-	const shownCarouselSlideRef = useRef<{ hash: string; profileId: unknown } | null>(null);
+	const shownCarouselSlideRef = useRef<{ hash: string; profileId: unknown; slides: string[] } | null>(null);
 	// The slides jump to their new places without sliding while the set
 	// changes — a swapped neighbour would otherwise glide across the photo
 	// in view (from above it to below it). Back on two frames later.
@@ -1450,6 +1450,15 @@ export function ProfileDetailsModal({
 	useLayoutEffect(() => {
 		const shown = shownCarouselSlideRef.current;
 		if (!shown || shown.profileId !== activeProfile?.profileId) return;
+		// On the add-photo slide when a photo comes in (an upload or one picked
+		// from the pool): show that photo, not the add slide it pushed back.
+		if (shown.hash === ADD_PHOTO_SLIDE_HASH) {
+			const added = carouselHashes.findIndex((hash) => hash !== ADD_PHOTO_SLIDE_HASH && !shown.slides.includes(hash));
+			if (added !== -1) {
+				setMobileCarouselPhotoIndex(added);
+				return;
+			}
+		}
 		const found = carouselHashes.indexOf(shown.hash);
 		if (found !== -1) {
 			setMobileCarouselPhotoIndex(found);
@@ -1462,7 +1471,7 @@ export function ProfileDetailsModal({
 	// After the effect above, so it still sees the slide from before the change.
 	useLayoutEffect(() => {
 		const hash = carouselHashes[mobileCarouselPhotoIndex];
-		shownCarouselSlideRef.current = hash ? { hash, profileId: activeProfile?.profileId } : null;
+		shownCarouselSlideRef.current = hash ? { hash, profileId: activeProfile?.profileId, slides: carouselHashes } : null;
 	}, [carouselHashes, mobileCarouselPhotoIndex, activeProfile?.profileId]);
 
 	// Moves one of your photos to another slot (0 = main photo); the carousel follows it.
