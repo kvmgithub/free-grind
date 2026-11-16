@@ -17,11 +17,11 @@ import { VPButton } from "vitepress/theme";
 					icon='<span class="vp-icon i-download"></span>'
 				/>
 				<VPButton
-					href="https://gitlab.com/hookrapp/free-grind"
-					text="Star on GitLab"
+					href="https://github.com/fdev8975/free-grind"
+					text="Star on GitHub"
 					size="big"
 					theme="alt"
-					icon='<span class="vp-icon i-gitlab"></span>'
+					icon='<span class="vp-icon i-github"></span>'
 				/>
 			</div>
 		</div>

@@ -1,6 +1,6 @@
 // Repository, website and release links of the app
-// (manifest/app.json). The repository is on GitLab (also
-// self-hosted) or GitHub; everything that builds a link or calls its API goes
+// (manifest/app.json). The repository is on GitHub or GitLab (also
+// self-hosted); everything that builds a link or calls its API goes
 // through here, so nothing else needs to know which.
 
 export const REPO_URL = __REPO_URL__;

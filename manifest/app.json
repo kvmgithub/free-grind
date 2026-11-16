@@ -5,8 +5,8 @@
 	"folderName": "FreeGrind",
 	"identifier": "dev.estopia.free-grind",
 	"userAgent": "FreeGrind/1.0.0 (+https://freegrind.imaoreo.dev/; contact: support@imaoreo.dev)",
-	"repository": "https://gitlab.com/hookrapp/free-grind",
-	"websiteUrl": "https://hookrapp.gitlab.io/free-grind/",
+	"repository": "https://github.com/fdev8975/free-grind",
+	"websiteUrl": "https://fdev8975.github.io/free-grind/",
 	"ota": {
 		"endpoint": "https://freegrind-ota-{{channel}}.surge.sh/latest.json",
 		"pubkey": "RWQfowNcYziP1BnTEyNrdZk2MymsuGVoCeqqtGE3OfpYfLqnvAvCS9JX"

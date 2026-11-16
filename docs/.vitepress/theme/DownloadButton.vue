@@ -10,7 +10,7 @@ const props = defineProps<{
 	theme?: "brand" | "alt";
 }>();
 
-// Until the release list arrives (or if GitLab is unreachable) the button
+// Until the release list arrives (or if GitHub is unreachable) the button
 // opens the releases page, so it always leads somewhere useful.
 const href = ref(RELEASES_URL);
 
