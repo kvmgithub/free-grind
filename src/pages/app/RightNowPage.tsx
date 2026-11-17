@@ -322,8 +322,9 @@ function RightNowRow({
 	const { ref, revealClass } = useRevealOnScroll();
 	const name = getItemName(item, t);
 	const isHosting = item.hosting;
-	const imageUrl = getItemDisplayImageUrl(item);
-	const avatarClassName = useAvatarPostMediaClass(item, imageUrl);
+	// The post's photos show in the media grid beside the avatar, so the avatar
+	// keeps the profile photo instead of repeating the first post photo.
+	const imageUrl = getRightNowProfileImageUrl(item);
 
 	const timeAgo = formatRelativeTime(item.postedAt);
 	const distance =
@@ -354,7 +355,7 @@ function RightNowRow({
 				onClick={() => onSelect(item.profileId)}
 			>
 				<div className="h-15 w-15 rounded-full overflow-hidden drop-shadow-sm bg-[var(--surface-2)]">
-					<ProfileImage src={imageUrl} alt={name || ""} className={avatarClassName} />
+					<ProfileImage src={imageUrl} alt={name || ""} />
 				</div>
 				{isOnline ? (
 					<span className={`absolute circle-badge-br h-3 w-3 rounded-full border-[1.5px] border-[var(--bg)] shadow-sm z-10 ${isEndingSoon ? "bg-amber-500" : "bg-green-500"}`} />
