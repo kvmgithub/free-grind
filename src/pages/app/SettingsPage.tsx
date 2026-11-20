@@ -1041,11 +1041,11 @@ export function SettingsPage() {
 									</div>
 									<div className="min-w-0 flex-1">
 										<p className="text-sm font-semibold leading-snug text-yellow-500">
-											{t("settings.repo_moved", { defaultValue: "{{appName}} Has Moved" })}
+											{t("settings.repo_moved", { defaultValue: "{{appName}} Has Moved Again" })}
 										</p>
 										<p className="mt-0.5 break-words text-xs leading-snug text-yellow-500/80">
 											{t("settings.repo_moved_desc", {
-												defaultValue: "New versions are now published at {{repo}}. Tap to open its releases page.",
+												defaultValue: "GitHub doesn't like us, so new versions are now published at {{repo}}. Tap to open its releases page.",
 												repo: REPO_DISPLAY_NAME,
 											})}
 										</p>

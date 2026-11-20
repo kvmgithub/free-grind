@@ -13,9 +13,10 @@ import { openExternalUrl } from "../utils/externalUrl";
 /**
  * First app release published from the new repository (tidyzulu on GitHub).
  * Installed apps older than this look for updates where the old one was and
- * have to be replaced by hand; the hint reaches them over OTA.
+ * have to be replaced by hand; the hint reaches them over OTA. Up to beta.53
+ * that includes the fdev8975 repository, which no longer exists.
  */
-const FIRST_VERSION_FROM_NEW_REPO = "1.0.0-beta.53";
+const FIRST_VERSION_FROM_NEW_REPO = "1.0.0-beta.54";
 
 /** Repository address without the scheme, for display. */
 export const REPO_DISPLAY_NAME = REPO_URL.replace(/^https:\/\//, "");
@@ -102,10 +103,10 @@ export function RepoMovedPromptView({ onDismiss }: { onDismiss: () => void }) {
 		<FullscreenPrompt
 			icon={TriangleAlert}
 			iconTileClass={warningIconTileClass}
-			title={t("settings.repo_moved", { defaultValue: "{{appName}} Has Moved" })}
+			title={t("settings.repo_moved", { defaultValue: "{{appName}} Has Moved Again" })}
 			description={t("settings.repo_moved_prompt_desc", {
 				defaultValue:
-					"{{appName}} now lives at {{repo}}. Download the latest release from there to keep getting updates.",
+					"GitHub doesn't like us, so {{appName}} has moved again and now lives at {{repo}}. Download the latest release from there to keep getting updates.",
 				repo: REPO_DISPLAY_NAME,
 			})}
 			footer={
