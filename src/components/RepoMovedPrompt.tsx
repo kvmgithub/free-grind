@@ -16,7 +16,7 @@ import { openExternalUrl } from "../utils/externalUrl";
  * have to be replaced by hand; the hint reaches them over OTA. Up to beta.53
  * that includes the fdev8975 repository, which no longer exists.
  */
-const FIRST_VERSION_FROM_NEW_REPO = "1.0.0-beta.54";
+const FIRST_VERSION_FROM_NEW_REPO = "1.0.0";
 
 /** Repository address without the scheme, for display. */
 export const REPO_DISPLAY_NAME = REPO_URL.replace(/^https:\/\//, "");
