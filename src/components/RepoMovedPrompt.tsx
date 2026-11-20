@@ -11,7 +11,7 @@ import { RELEASES_URL, REPO_URL, fetchReleases } from "../config/links-config";
 import { openExternalUrl } from "../utils/externalUrl";
 
 /**
- * First app release published from the new repository (fdev8975 on GitHub).
+ * First app release published from the new repository (tidyzulu on GitHub).
  * Installed apps older than this look for updates where the old one was and
  * have to be replaced by hand; the hint reaches them over OTA.
  */

@@ -37,7 +37,7 @@ Every release lists what it was built from in two assets:
 As a reference, on a 3-core machine with 11 GB of RAM the Rust part of the Linux build took 6½ minutes, the Windows build 7 minutes from scratch, the Android build 12 minutes from scratch, and the OTA bundle under a minute. Building the container image the first time adds a few minutes.
 
 ```bash
-git clone https://github.com/fdev8975/free-grind.git
+git clone https://github.com/tidyzulu/free-grind.git
 cd free-grind
 git checkout <commit from BUILDINFO.txt>
 ```

@@ -34,7 +34,7 @@ To bump Rust, Bun or Node, change the version in its file. The container build t
 ## Getting the source
 
 ```bash
-git clone https://github.com/fdev8975/free-grind.git
+git clone https://github.com/tidyzulu/free-grind.git
 cd free-grind
 ```
 

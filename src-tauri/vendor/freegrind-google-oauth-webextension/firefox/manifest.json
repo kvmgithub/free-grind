@@ -1,7 +1,7 @@
 {
 	"manifest_version": 2,
 	"name": "Free Grind Google OAuth",
-	"homepage_url": "https://github.com/fdev8975/free-grind/tree/development/src-tauri/vendor/freegrind-google-oauth-webextension",
+	"homepage_url": "https://github.com/tidyzulu/free-grind/tree/development/src-tauri/vendor/freegrind-google-oauth-webextension",
 	"version": "1.0.6",
 	"description": "Gets a Google OAuth token for signing in to Free Grind",
 	"browser_specific_settings": {
