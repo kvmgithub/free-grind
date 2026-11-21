@@ -210,23 +210,54 @@ const PAGE_CAROUSEL_HEIGHT = "min(78dvh, calc(100vw * 1.55))";
 
 // A single touchpad swipe fires dozens of wheel events (and keeps firing while it
 // coasts), so a run of events without a pause this long counts as one gesture.
-const WHEEL_GESTURE_GAP_MS = 200;
+const WHEEL_GESTURE_GAP_MS = 150;
+// Inside such a run, another photo no sooner than this after the last one
+// (the slide takes 300 ms).
+const WHEEL_FLIP_COOLDOWN_MS = 300;
 
-type WheelGestureState = { lastEventAt: number; direction: number; captured: boolean };
+type WheelGestureState = {
+	lastEventAt: number;
+	lastFlipAt: number;
+	direction: number;
+	/** |deltaY| of the previous event and a running average of the run. */
+	lastAbs: number;
+	avgAbs: number;
+	captured: boolean;
+};
 
 function createWheelGestureState(): WheelGestureState {
-	return { lastEventAt: -Infinity, direction: 0, captured: false };
+	return { lastEventAt: -Infinity, lastFlipAt: -Infinity, direction: 0, lastAbs: 0, avgAbs: 0, captured: false };
 }
 
-/** Returns the scroll direction if this wheel event starts a new gesture, otherwise 0. */
-function startsWheelGesture(state: WheelGestureState, deltaY: number): number {
-	const direction = Math.sign(deltaY);
+/** Returns the scroll direction if this wheel event should move to the next
+ * photo, otherwise 0. A pause or a change of direction starts a new gesture.
+ * Without a pause it also flips again (after a cooldown) when a new push shows:
+ * a touchpad swipe made while the last one still coasts (its deltas jump well
+ * above the fading ones), or a mouse wheel turned on in steady notches — a
+ * run without a pause used to swallow every one of those. */
+function startsWheelGesture(state: WheelGestureState, e: WheelEvent): number {
+	const direction = Math.sign(e.deltaY);
 	if (direction === 0) return 0;
 	const now = performance.now();
-	const isNew = now - state.lastEventAt > WHEEL_GESTURE_GAP_MS || direction !== state.direction;
+	const abs = Math.abs(e.deltaY);
+	let flip = now - state.lastEventAt > WHEEL_GESTURE_GAP_MS || direction !== state.direction;
+	if (!flip && now - state.lastFlipAt > WHEEL_FLIP_COOLDOWN_MS) {
+		const freshPush = abs >= 10 && abs > state.avgAbs * 2;
+		// A mouse wheel moves in lines, or in equal pixel steps with a pause
+		// between them; a touchpad's coast fires every frame with changing deltas.
+		const wheelNotch = (e.deltaMode !== 0 || (abs >= 50 && abs === state.lastAbs)) && now - state.lastEventAt > 20;
+		flip = freshPush || wheelNotch;
+	}
+	if (flip) {
+		state.lastFlipAt = now;
+		state.avgAbs = abs;
+	} else {
+		state.avgAbs = state.avgAbs * 0.7 + abs * 0.3;
+	}
 	state.lastEventAt = now;
 	state.direction = direction;
-	return isNew ? direction : 0;
+	state.lastAbs = abs;
+	return flip ? direction : 0;
 }
 
 /** Neighbouring profile's photo and name, sitting just off-screen next to the swipeable page. */
@@ -760,6 +791,13 @@ export function ProfileDetailsModal({
 		typeof window !== "undefined" && window.innerWidth >= 900
 	);
 	const mobileCarouselRef = useRef<HTMLDivElement | null>(null);
+	// The same element as state too, so effects that listen on it follow it
+	// when it is replaced (see the wheel handler).
+	const [mobileCarouselEl, setMobileCarouselEl] = useState<HTMLDivElement | null>(null);
+	const setMobileCarouselRef = useCallback((el: HTMLDivElement | null) => {
+		mobileCarouselRef.current = el;
+		setMobileCarouselEl(el);
+	}, []);
 	const carouselIndexRef = useRef(0);
 	const carouselTotalRef = useRef(0);
 	const splitWheelGestureRef = useRef<WheelGestureState>(createWheelGestureState());
@@ -1334,12 +1372,15 @@ export function ProfileDetailsModal({
 	// Keep refs in sync so the wheel handler always sees current values
 	carouselIndexRef.current = mobileCarouselPhotoIndex;
 
+	// Tied to the element itself: the carousel is unmounted while a profile
+	// loads (every switch to another one), and a listener set up once on
+	// open stayed on the old element, so the wheel stopped flipping photos.
 	useEffect(() => {
-		const el = mobileCarouselRef.current;
+		const el = mobileCarouselEl;
 		if (!el || isModalSplit) return;
 		const gesture = createWheelGestureState();
 		const onWheel = (e: WheelEvent) => {
-			const direction = startsWheelGesture(gesture, e.deltaY);
+			const direction = startsWheelGesture(gesture, e);
 			if (direction !== 0) {
 				const idx = carouselIndexRef.current;
 				const total = carouselTotalRef.current;
@@ -1354,7 +1395,7 @@ export function ProfileDetailsModal({
 		};
 		el.addEventListener("wheel", onWheel, { passive: false });
 		return () => el.removeEventListener("wheel", onWheel);
-	}, [isModalSplit]);
+	}, [isModalSplit, mobileCarouselEl]);
 
 	// Profile videos (self-hosted server, type 2): played muted and looping over
 	// their poster, which the media hash resolves to as an image.
@@ -2834,7 +2875,7 @@ export function ProfileDetailsModal({
 				)}
 				{!isLoadingActiveProfile && !activeProfileError && activeProfile && (
 					<div
-						ref={mobileCarouselRef}
+						ref={setMobileCarouselRef}
 						className="relative overflow-hidden bg-black"
 						style={{
 							height: variant === "page" ? PAGE_CAROUSEL_HEIGHT : "min(55dvh, calc((100vw - 3rem) * 1.25))",
@@ -3091,7 +3132,7 @@ export function ProfileDetailsModal({
 						style={{ width: "54%" }}
 						onWheel={(e) => {
 							e.preventDefault();
-							const direction = startsWheelGesture(splitWheelGestureRef.current, e.deltaY);
+							const direction = startsWheelGesture(splitWheelGestureRef.current, e.nativeEvent);
 							if (direction !== 0) {
 								setMobileCarouselPhotoIndex((i) => Math.min(Math.max(i + direction, 0), carouselHashes.length - 1));
 							}
