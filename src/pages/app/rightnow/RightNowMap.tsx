@@ -702,7 +702,15 @@ export function RightNowMap({
 
 		// The page header / nav can still be settling when the map is created.
 		const resizeObserver = "ResizeObserver" in window && container
-			? new ResizeObserver(() => mapRef.current?.resize())
+			? new ResizeObserver(() => {
+					const map = mapRef.current;
+					if (!map) return;
+					// Only resize on a real size change: resize() reallocates the
+					// canvas, which shows blank for a frame.
+					const canvas = map.getCanvas();
+					if (container.clientWidth === canvas.clientWidth && container.clientHeight === canvas.clientHeight) return;
+					map.resize();
+				})
 			: null;
 		if (container) resizeObserver?.observe(container);
 

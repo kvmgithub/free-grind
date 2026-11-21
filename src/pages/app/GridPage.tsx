@@ -328,8 +328,8 @@ export function GridPage() {
 	const [isDistanceSheetOpen, setIsDistanceSheetOpen] = useState(false);
 
 	const isDesktop = useDesktopBreakpoint();
-	// Viewport y of the header's bottom edge: the full-bleed grid map is pulled
-	// up by this much (like Right Now's map) and keeps its center below it.
+	// Viewport y of the header's bottom edge: the full-bleed grid map runs up
+	// behind the header (like Right Now's map) and keeps its center below it.
 	const [headerBottom, setHeaderBottom] = useState(0);
 	useLayoutEffect(() => {
 		const header = headerRef.current;
@@ -2166,8 +2166,11 @@ export function GridPage() {
 					<div
 						// Full bleed like Right Now's map: up behind the header and, on
 						// desktop, on under the nav rail.
-						className="relative flex-1 min-h-0 rail:-ms-[var(--nav-rail-width)]"
-						style={{ marginTop: -headerBottom }}
+						// Placed absolutely (not after the header in the flow) so a
+						// growing header (favorites/name search) can't push it down
+						// for a frame before headerBottom catches up. The content layer
+						// (transformed, so the containing block) starts at --header-top.
+						className="absolute inset-x-0 bottom-0 top-[calc(-1*var(--header-top))] rail:-start-[var(--nav-rail-width)]"
 					>
 						<GridMap
 							cards={mapCards}

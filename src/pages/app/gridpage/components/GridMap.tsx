@@ -247,7 +247,18 @@ export function GridMap({
 			}
 		};
 		void init();
-		const resizeObserver = "ResizeObserver" in window && container ? new ResizeObserver(() => mapRef.current?.resize()) : null;
+		// Only resize when the size really changed: resize() reallocates the
+		// canvas, which shows blank for a frame.
+		const resizeObserver =
+			"ResizeObserver" in window && container
+				? new ResizeObserver(() => {
+						const map = mapRef.current;
+						if (!map) return;
+						const canvas = map.getCanvas();
+						if (container.clientWidth === canvas.clientWidth && container.clientHeight === canvas.clientHeight) return;
+						map.resize();
+					})
+				: null;
 		if (container) resizeObserver?.observe(container);
 		const markers = markersRef.current;
 		return () => {
@@ -277,7 +288,15 @@ export function GridMap({
 	}, [explorePin?.lat, explorePin?.lon, syncPin]);
 
 	useEffect(() => {
-		mapRef.current?.setPadding({ top: topInset, left: leftInset, right: 0, bottom: 0 });
+		const map = mapRef.current;
+		if (!map) return;
+		const previous = map.getPadding();
+		map.setPadding({ top: topInset, left: leftInset, right: 0, bottom: 0 });
+		// The header growing or shrinking (e.g. the favorites search showing up)
+		// would slide the map by half the change: pan it back so nothing moves.
+		const dx = (leftInset - (previous.left ?? 0)) / 2;
+		const dy = (topInset - (previous.top ?? 0)) / 2;
+		if (dx || dy) map.panBy([dx, dy], { animate: false });
 	}, [topInset, leftInset]);
 
 	return (

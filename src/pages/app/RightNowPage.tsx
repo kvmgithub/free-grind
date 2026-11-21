@@ -1336,9 +1336,9 @@ export function RightNowPage() {
 	const [fabPhase, setFabPhase] = useState<RightNowFABPhase>("idle");
 	const feedContainerRef = useRef<HTMLDivElement | null>(null);
 	const headerRef = useRef<HTMLElement | null>(null);
-	// Viewport y of the header's bottom edge. The map is pulled up by exactly
-	// this much so it reaches the screen top (behind .app-screen's top padding
-	// and the header, whose pill row can wrap), and its overlays sit below it.
+	// Viewport y of the header's bottom edge (its pill row can wrap). The map
+	// runs up behind the header to the screen top; its fits and overlays keep
+	// below this.
 	const [headerBottom, setHeaderBottom] = useState(0);
 
 	useLayoutEffect(() => {
@@ -1843,8 +1843,11 @@ export function RightNowPage() {
 				<div
 					// Full bleed, running up behind the header and, on desktop, on under
 					// the (unfilled) nav rail instead of being cut off at its edge.
-					className="relative flex-1 min-h-0 rail:-ms-[var(--nav-rail-width)]"
-					style={{ marginTop: -headerBottom }}
+					// Placed absolutely (not after the header in the flow) so a growing
+					// header can't push it down for a frame before headerBottom catches
+					// up. The content layer (transformed, so the containing block)
+					// starts at --header-top.
+					className="absolute inset-x-0 bottom-0 top-[calc(-1*var(--header-top))] rail:-start-[var(--nav-rail-width)]"
 				>
 					<RightNowMap
 						items={mapItems}
