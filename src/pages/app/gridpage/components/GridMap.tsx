@@ -138,6 +138,31 @@ export function GridMap({
 	const ownCenterRef = useRef(extras.ownCenter);
 	ownCenterRef.current = extras.ownCenter;
 
+	/** Markers playing their exit animation, each with a function removing it at once. */
+	const leavingRef = useRef(new Map<string, () => void>());
+	/** Takes a profile off the map with the pop-in reversed (at once with reduced motion). */
+	const removeAnimated = useCallback((id: string, marker: Marker) => {
+		const pop = marker.getElement().querySelector<HTMLElement>(".rn-marker-pop");
+		if (!pop || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+			marker.remove();
+			return;
+		}
+		let timer = 0;
+		const finish = () => {
+			window.clearTimeout(timer);
+			marker.remove();
+			if (leavingRef.current.get(id) === finish) leavingRef.current.delete(id);
+		};
+		leavingRef.current.get(id)?.();
+		leavingRef.current.set(id, finish);
+		// Not tappable while it fades out.
+		marker.getElement().style.pointerEvents = "none";
+		pop.classList.add("rn-marker-out");
+		pop.addEventListener("animationend", finish, { once: true });
+		// animationend doesn't come when the tab is hidden or the element is off screen.
+		timer = window.setTimeout(finish, 400);
+	}, []);
+
 	const syncMarkers = useCallback(() => {
 		const map = mapRef.current;
 		const maplibregl = maplibreRef.current;
@@ -149,6 +174,8 @@ export function GridMap({
 			next.add(id);
 			const label = labelFor.current(card);
 			const signature = [card.fuzzedLat, card.fuzzedLon, card.primaryImageUrl ?? "", isCardOnline(card), label, privacyRef.current].join("|");
+			// Back before its exit animation ended: drop the leaving one, pop in anew.
+			leavingRef.current.get(id)?.();
 			const existing = markers.get(id);
 			if (existing?.signature === signature) continue;
 			existing?.marker.remove();
@@ -157,12 +184,12 @@ export function GridMap({
 		}
 		for (const [id, entry] of markers) {
 			if (!next.has(id)) {
-				entry.marker.remove();
 				markers.delete(id);
+				removeAnimated(id, entry.marker);
 			}
 		}
 		setCrashContext("gridMapMarkers", markers.size);
-	}, []);
+	}, [removeAnimated]);
 
 	const syncPin = useCallback(() => {
 		const map = mapRef.current;
@@ -261,11 +288,13 @@ export function GridMap({
 				: null;
 		if (container) resizeObserver?.observe(container);
 		const markers = markersRef.current;
+		const leaving = leavingRef.current;
 		return () => {
 			mounted = false;
 			resizeObserver?.disconnect();
 			for (const entry of markers.values()) entry.marker.remove();
 			markers.clear();
+			for (const remove of [...leaving.values()]) remove();
 			extrasRef.current.teardown();
 			pinRef.current?.remove();
 			pinRef.current = null;
