@@ -5,7 +5,7 @@ import { BananaFilled, EyeFilled, HomeFilled, MapPinFilled, StickyNoteFilled, Ey
 import { useCanBlockProfile } from "../../../../grindr-workarounds";
 import { RightNowIcon } from "../../../../components/icons/RightNowIcon";
 import toast from "react-hot-toast";
-import { Fragment, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, Fragment, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { useDesktopBreakpoint } from "../../../../hooks/useDesktopBreakpoint";
@@ -2836,7 +2836,11 @@ export function ProfileDetailsModal({
 					<div
 						ref={mobileCarouselRef}
 						className="relative overflow-hidden bg-black"
-						style={{ height: variant === "page" ? PAGE_CAROUSEL_HEIGHT : "min(55dvh, calc((100vw - 3rem) * 1.25))" }}
+						style={{
+							height: variant === "page" ? PAGE_CAROUSEL_HEIGHT : "min(55dvh, calc((100vw - 3rem) * 1.25))",
+							// Read by the slides; a swipe sets it on the element at once (see useCarouselSwipe).
+							"--carousel-index": mobileCarouselPhotoIndex,
+						} as CSSProperties}
 					>
 						{isRightNowSlideActive && (
 							<div
@@ -2853,11 +2857,12 @@ export function ProfileDetailsModal({
 						{carouselHashes.map((hash, index) => (
 							<div
 								key={hash}
+								data-carousel-slide={index}
 								className="absolute inset-0 overflow-hidden"
 								style={{
-									// --carousel-drag / --carousel-transition are set on the
-									// carousel by ProfileDetailsContent's touch handler.
-									transform: `translateY(calc(${(index - mobileCarouselPhotoIndex) * 100}% + var(--carousel-drag, 0px)))`,
+									// --carousel-index / --carousel-drag / --carousel-transition are
+									// set on the carousel by its touch handler (useCarouselSwipe).
+									transform: `translateY(calc((${index} - var(--carousel-index, ${mobileCarouselPhotoIndex})) * 100% + var(--carousel-drag, 0px)))`,
 									transition: isSlideSetChanging ? "none" : "var(--carousel-transition, transform 300ms ease-out)",
 								}}
 							>

@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 import { HomeFilled, MapPinFilled } from "../../../../components/icons/FilledIcons";
 import { FacebookIcon, InstagramIcon, XIcon } from "../../../../components/icons/BrandIcons";
-import { type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "react-hot-toast";
 import type { ProfileDetail } from "../../GridPage.types";
@@ -346,12 +346,14 @@ export function ProfileDetailsContent({
 									<div
 										ref={mobileCarouselRef}
 										className="relative h-[min(78dvh,calc(100vw*1.55))] overflow-hidden"
+										style={{ "--carousel-index": mobileCarouselPhotoIndex } as CSSProperties}
 									>
 										{visiblePhotoHashes.map((hash, index) => (
 											<div
 												key={hash}
+												data-carousel-slide={index}
 												style={{
-													transform: `translateY(calc(${(index - mobileCarouselPhotoIndex) * 100}% + var(--carousel-drag, 0px)))`,
+													transform: `translateY(calc((${index} - var(--carousel-index, ${mobileCarouselPhotoIndex})) * 100% + var(--carousel-drag, 0px)))`,
 													transition: "var(--carousel-transition, transform 300ms ease-out)",
 												}}
 												className="absolute inset-0 overflow-hidden"
