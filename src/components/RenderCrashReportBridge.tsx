@@ -2,7 +2,9 @@
  * RenderCrashReportBridge — after the Android WebView's renderer died (e.g.
  * out of memory, which takes the app down), shows what the native side
  * recorded (RenderProcessGuard.kt) once on the next start, laid out like
- * AccountStatusPrompt, with the raw report behind Copy for bug reports. Also
+ * AccountStatusPrompt, with the raw report behind Copy for bug reports.
+ * Renderers the system killed while the app was in the background are only
+ * logged, not shown. Also
  * keeps the JS heap size in the crash context.
  *
  * Outside the Android WebView the bridge is missing and this does nothing.
@@ -24,6 +26,7 @@ type ChromeMemory = { usedJSHeapSize: number; jsHeapSizeLimit: number };
 type RenderCrashReport = {
 	didCrash?: boolean;
 	route?: string;
+	foreground?: boolean;
 	memory?: { availMb?: number; totalMb?: number; lowMemory?: boolean };
 	lastTrim?: { level?: string; secondsAgo?: number };
 	device?: { manufacturer?: string; model?: string; sdk?: number; webView?: string };
@@ -140,15 +143,31 @@ function RenderCrashPrompt({ raw, onClose }: { raw: string; onClose: () => void 
 	);
 }
 
+/**
+ * Android killing the renderer of an app that sits in the background is
+ * routine (HyperOS does it even with gigabytes free), so that only gets
+ * logged. Older reports without `foreground` still show the prompt.
+ */
+function isBackgroundKill(raw: string): boolean {
+	const report = parseReport(raw);
+	return report.didCrash === false && report.foreground === false;
+}
+
 export function RenderCrashReportBridge() {
 	// Taken (and cleared natively) once per start.
-	const [report, setReport] = useState<string | null>(() => takeRenderCrashReport());
+	const [initialReport] = useState<string | null>(() => takeRenderCrashReport());
+	const [report, setReport] = useState<string | null>(() =>
+		initialReport && !isBackgroundKill(initialReport) ? initialReport : null,
+	);
 
 	useEffect(() => {
-		if (report) appLog.error("[RenderCrashReportBridge] renderer died last session", report);
-		// Only the report found at start is logged.
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, []);
+		if (!initialReport) return;
+		if (isBackgroundKill(initialReport)) {
+			appLog.warn("[RenderCrashReportBridge] renderer was killed in the background last session", initialReport);
+		} else {
+			appLog.error("[RenderCrashReportBridge] renderer died last session", initialReport);
+		}
+	}, [initialReport]);
 
 	useEffect(() => {
 		const memory = (performance as unknown as { memory?: ChromeMemory }).memory;
