@@ -34,6 +34,27 @@ export function getReverseSearchableUrl(url: string | null | undefined): string 
 	}
 }
 
+/**
+ * Engines that can search `imageUrl`: upload engines take any picture we can
+ * read (chat and album media are mostly local data: URIs), the others need a
+ * public URL they can fetch themselves.
+ */
+export function getReverseSearchEngines(imageUrl: string | null | undefined): ReverseImageSearchEngine[] {
+	if (!imageUrl) return [];
+	const isPublic = getReverseSearchableUrl(imageUrl) !== null;
+	return REVERSE_IMAGE_SEARCH_ENGINES.filter((engine) => isPublic || reverseSearchNeedsUpload(engine));
+}
+
+async function readImageBytes(imageUrl: string): Promise<{ bytes: Uint8Array; mimeType: string }> {
+	// Remote pictures go through the HTTP plugin (CORS); data:/blob: URIs are
+	// read by the webview itself.
+	const response = getReverseSearchableUrl(imageUrl) ? await fetch(imageUrl) : await window.fetch(imageUrl);
+	if (!response.ok) throw new Error(`Failed to read photo (${response.status})`);
+	const bytes = new Uint8Array(await response.arrayBuffer());
+	const mimeType = response.headers.get("content-type")?.split(";")[0].trim() || "image/jpeg";
+	return { bytes, mimeType };
+}
+
 export function buildReverseImageSearchUrl(engine: ReverseImageSearchEngine, imageUrl: string): string {
 	const encoded = encodeURIComponent(imageUrl);
 	switch (engine) {
@@ -58,10 +79,7 @@ export async function openUploadImageSearch(engine: ReverseImageSearchEngine, im
 		await openReverseImageSearch(engine, imageUrl);
 		return;
 	}
-	const response = await fetch(imageUrl);
-	if (!response.ok) throw new Error(`Failed to download photo (${response.status})`);
-	const bytes = new Uint8Array(await response.arrayBuffer());
-	const mimeType = response.headers.get("content-type")?.split(";")[0].trim() || "image/jpeg";
+	const { bytes, mimeType } = await readImageBytes(imageUrl);
 	await invoke("open_upload_image_search", { engine, imageBase64: bytesToBase64(bytes), mimeType });
 }
 

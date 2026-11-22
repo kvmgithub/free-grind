@@ -12,8 +12,7 @@ import { useDesktopBreakpoint } from "../hooks/useDesktopBreakpoint";
 import { menuTransitionStyle, usePresence } from "../hooks/usePresence";
 import { proxyMediaUrl } from "../utils/mediaProxy";
 import {
-	REVERSE_IMAGE_SEARCH_ENGINES,
-	getReverseSearchableUrl,
+	getReverseSearchEngines,
 	openReverseImageSearch,
 	openUploadImageSearch,
 	reverseSearchNeedsUpload,
@@ -971,9 +970,12 @@ export function PhotoViewer({
 		}
 	};
 
-	// Reverse image search (fake-profile check): images only, and only with a
-	// public URL the search engine can fetch itself.
-	const reverseSearchUrl = currentMedia?.type === "image" ? getReverseSearchableUrl(currentMedia.url) : null;
+	// Reverse image search (fake-profile check): images only. Upload engines
+	// take any picture (chat/album media are mostly local data: URIs); the
+	// others only show for a public URL they can fetch themselves.
+	const reverseSearchUrl = currentMedia?.type === "image" && currentMedia.url ? currentMedia.url : null;
+	const reverseSearchEngines = getReverseSearchEngines(reverseSearchUrl);
+	const hasReverseSearch = reverseSearchEngines.length > 0;
 	// Brand names only: full "Search with …" labels wrap and make the menu too wide.
 	const reverseSearchLabel = (engine: ReverseImageSearchEngine) =>
 		engine === "google" ? "Google Lens" : engine === "yandex" ? "Yandex" : "PimEyes";
@@ -1242,7 +1244,7 @@ export function PhotoViewer({
 							)}
 						</div>
 
-						{(canSave || visibleMenuActions.length > 0 || reverseSearchUrl) && (
+						{(canSave || visibleMenuActions.length > 0 || hasReverseSearch) && (
 						<div ref={menuRef} className="relative shrink-0">
 							<button
 								type="button"
@@ -1269,7 +1271,7 @@ export function PhotoViewer({
 										{t("profile_details.save")}
 									</button>
 									)}
-									{reverseSearchUrl && REVERSE_IMAGE_SEARCH_ENGINES.map((engine) => (
+									{reverseSearchEngines.map((engine) => (
 										<button
 											key={`reverse-search-${engine}`}
 											type="button"
@@ -1314,12 +1316,12 @@ export function PhotoViewer({
 						<ChevronLeft className="h-4 w-4" />
 					</button>
 
-					{(canSave || reverseSearchUrl) && (
+					{(canSave || hasReverseSearch) && (
 					<div
 						className={`absolute right-[var(--app-px)] z-[83] flex items-center gap-2 ${chromeFadeClass}`}
 						style={{ top: chromeButtonTop }}
 					>
-						{reverseSearchUrl && (
+						{hasReverseSearch && (
 						<div ref={menuRef} className="relative">
 							<button
 								type="button"
@@ -1338,7 +1340,7 @@ export function PhotoViewer({
 										{t("photo_viewer.reverse_search", { defaultValue: "Reverse image search" })}
 									</p>
 									<div className="flex flex-col gap-1 px-2">
-										{REVERSE_IMAGE_SEARCH_ENGINES.map((engine) => (
+										{reverseSearchEngines.map((engine) => (
 											<button
 												key={engine}
 												type="button"
