@@ -29,6 +29,7 @@ import {
 	NotebookPen,
 	PanelBottom,
 	Reply,
+	ScanSearch,
 	Scissors,
 	ScrollText,
 	Share,
@@ -372,5 +373,19 @@ export const VERSION_ANNOUNCEMENTS: VersionAnnouncement[] = [
 			},
 		],
 	},
+	{
+		version: "1.0.1",
+		items: [
+			{
+				icon: ScanSearch,
+				title: "Reverse Image Search with PimEyes",
+				description: "Reverse image search now includes PimEyes next to Google and Yandex, and works on album and chat photos too, not just profile pictures.",
+			},
+			{
+				icon: Wrench,
+				title: "Fixes & Polish",
+				description: "Swiping and scrolling through profile photos works reliably again, maps no longer jump when the header grows, profiles leaving the grid map shrink away smoothly, and the app no longer crashes on startup when its storage is full. The crash screen no longer appears just because Android closed the app in the background.",
+			},
+		],
+	},
 ];
-
