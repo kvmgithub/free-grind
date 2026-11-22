@@ -10,28 +10,34 @@ export function processDismissCountdown(key: string): boolean {
 		return false;
 	}
 
-	const storedValue = window.localStorage.getItem(key);
+	// Runs inside useState initializers: a full storage (WebKit throws
+	// QuotaExceededError on setItem) must not take the whole app down.
+	try {
+		const storedValue = window.localStorage.getItem(key);
 
-	if (!storedValue) {
+		if (!storedValue) {
+			return false;
+		}
+
+		let reopensRemaining = parseInt(storedValue, 10);
+		if (isNaN(reopensRemaining)) {
+			return false;
+		}
+
+		reopensRemaining -= 1;
+
+		if (reopensRemaining <= 0) {
+			// Countdown finished! Remove the flag so the prompt shows again.
+			window.localStorage.removeItem(key);
+			return false;
+		}
+
+		window.localStorage.setItem(key, reopensRemaining.toString());
+
+		return reopensRemaining > 0;
+	} catch {
 		return false;
 	}
-
-	let reopensRemaining = parseInt(storedValue, 10);
-	if (isNaN(reopensRemaining)) {
-		return false;
-	}
-
-	reopensRemaining -= 1;
-
-	if (reopensRemaining <= 0) {
-		// Countdown finished! Remove the flag so the prompt shows again.
-		window.localStorage.removeItem(key);
-		return false;
-	}
-
-	window.localStorage.setItem(key, reopensRemaining.toString());
-
-	return reopensRemaining > 0;
 }
 
 export function writeDismissedFlag(key: string, reopens: number): void {
