@@ -15,6 +15,8 @@ import {
 	REVERSE_IMAGE_SEARCH_ENGINES,
 	getReverseSearchableUrl,
 	openReverseImageSearch,
+	openUploadImageSearch,
+	reverseSearchNeedsUpload,
 	type ReverseImageSearchEngine,
 } from "../utils/reverseImageSearch";
 
@@ -973,10 +975,26 @@ export function PhotoViewer({
 	// public URL the search engine can fetch itself.
 	const reverseSearchUrl = currentMedia?.type === "image" ? getReverseSearchableUrl(currentMedia.url) : null;
 	// Brand names only: full "Search with …" labels wrap and make the menu too wide.
-	const reverseSearchLabel = (engine: ReverseImageSearchEngine) => (engine === "google" ? "Google Lens" : "Yandex");
-	const handleReverseSearch = (engine: ReverseImageSearchEngine) => {
+	const reverseSearchLabel = (engine: ReverseImageSearchEngine) =>
+		engine === "google" ? "Google Lens" : engine === "yandex" ? "Yandex" : "PimEyes";
+	const handleReverseSearch = async (engine: ReverseImageSearchEngine) => {
 		setIsMenuOpen(false);
 		if (!reverseSearchUrl) return;
+		if (reverseSearchNeedsUpload(engine)) {
+			// Upload-only engine: in-app window that uploads the photo itself.
+			try {
+				await openUploadImageSearch(engine, reverseSearchUrl);
+			} catch (e) {
+				appLog.error("Failed to open upload image search", e);
+				toast.error(
+					t("photo_viewer.reverse_search_failed", {
+						defaultValue: "Couldn't open {{engine}}",
+						engine: reverseSearchLabel(engine),
+					}),
+				);
+			}
+			return;
+		}
 		void openReverseImageSearch(engine, reverseSearchUrl);
 	};
 

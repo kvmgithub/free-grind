@@ -3813,7 +3813,8 @@
         "send": "Senden",
         "reacted": "Reaktion gesendet",
         "react": "Reagieren",
-        "reverse_search": "Bildersuche"
+        "reverse_search": "Bildersuche",
+        "reverse_search_failed": "{{engine}} konnte nicht geöffnet werden"
     },
     "render_crash": {
         "title": "App unerwartet beendet",

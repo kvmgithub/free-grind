@@ -3811,7 +3811,8 @@
     "send": "Send",
     "reacted": "Reaction sent",
     "react": "React",
-    "reverse_search": "Reverse image search"
+    "reverse_search": "Reverse image search",
+    "reverse_search_failed": "Couldn't open {{engine}}"
   },
   "render_crash": {
     "title": "App Closed Unexpectedly",

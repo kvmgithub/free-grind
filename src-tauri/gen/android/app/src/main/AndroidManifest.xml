@@ -163,6 +163,15 @@
             android:exported="false"
             android:excludeFromRecents="true" />
 
+        <!-- Hosts the reverse image search window (PimEyes upload) opened
+             from Rust (reverse_image_search); not reachable from outside the app. -->
+        <activity
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|layoutDirection|smallestScreenSize|screenLayout|uiMode"
+            android:label="@string/main_activity_title"
+            android:name=".ReverseImageSearchActivity"
+            android:exported="false"
+            android:excludeFromRecents="true" />
+
         <!-- "Sign in with Google" in GeckoView, in its own process so Gecko
              never shares one with the app's WebView; not reachable from
              outside the app. See GoogleOAuthActivity.kt. -->

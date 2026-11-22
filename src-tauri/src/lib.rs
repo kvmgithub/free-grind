@@ -7,6 +7,7 @@ mod app_identity;
 mod instance_lock;
 mod media;
 mod media_proxy;
+mod reverse_image_search;
 mod state;
 mod storage;
 mod upload;
@@ -156,6 +157,7 @@ pub fn run() {
             .plugin(tauri_plugin_dialog::init())
             .plugin(api::facebook_oauth::plugin())
             .plugin(api::google_oauth::plugin())
+            .plugin(reverse_image_search::plugin())
             .manage(AppState::default())
             .manage(upload::UploadLock::default())
             .manage(media_proxy::MediaProxy::default())
@@ -258,6 +260,7 @@ pub fn run() {
                 api::auth::login_with_google,
                 api::auth::login_with_facebook,
                 api::auth::login_with_google_window,
+                reverse_image_search::open_upload_image_search,
                 api::auth::sign_up_quota,
                 api::auth::create_account,
                 api::auth::forgot_password,
@@ -359,6 +362,7 @@ pub fn run() {
             .plugin(tauri_plugin_opener::init())
             .plugin(api::facebook_oauth::plugin())
             .plugin(api::google_oauth::plugin())
+            .plugin(reverse_image_search::plugin())
             .plugin(tauri_plugin_barcode_scanner::init());
 
         #[cfg(target_os = "ios")]
@@ -401,6 +405,7 @@ pub fn run() {
                 api::auth::login_with_google,
                 api::auth::login_with_facebook,
                 api::auth::login_with_google_window,
+                reverse_image_search::open_upload_image_search,
                 api::auth::sign_up_quota,
                 api::auth::create_account,
                 api::auth::forgot_password,

@@ -1,9 +1,21 @@
+import { invoke } from "@tauri-apps/api/core";
+import { fetch } from "@tauri-apps/plugin-http";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { isTauriRuntime } from "../services/tauriWebSocket";
+import { bytesToBase64 } from "../services/stagedVideoUpload";
 import { appLog } from "./logger";
 
-export type ReverseImageSearchEngine = "google" | "yandex";
+export type ReverseImageSearchEngine = "google" | "yandex" | "pimeyes";
 
-export const REVERSE_IMAGE_SEARCH_ENGINES: ReverseImageSearchEngine[] = ["google", "yandex"];
+export const REVERSE_IMAGE_SEARCH_ENGINES: ReverseImageSearchEngine[] = ["google", "yandex", "pimeyes"];
+
+/**
+ * Engines that only take a file upload (no search-by-URL link): they open in
+ * an in-app window that uploads the photo itself (see openUploadImageSearch).
+ */
+export function reverseSearchNeedsUpload(engine: ReverseImageSearchEngine): boolean {
+	return engine === "pimeyes";
+}
 
 /**
  * Reverse image search runs on the engine's side, which fetches the picture
@@ -29,7 +41,28 @@ export function buildReverseImageSearchUrl(engine: ReverseImageSearchEngine, ima
 			return `https://lens.google.com/uploadbyurl?url=${encoded}`;
 		case "yandex":
 			return `https://yandex.com/images/search?rpt=imageview&url=${encoded}`;
+		case "pimeyes":
+			// Upload only; see reverseSearchNeedsUpload.
+			return "https://pimeyes.com/en";
 	}
+}
+
+/**
+ * Opens an upload-only engine in an in-app window (reverse_image_search in
+ * Rust) whose init script uploads the photo. Outside Tauri there is no such
+ * window, so only the engine's start page opens. Throws if the photo cannot
+ * be downloaded or the window does not open.
+ */
+export async function openUploadImageSearch(engine: ReverseImageSearchEngine, imageUrl: string): Promise<void> {
+	if (!isTauriRuntime()) {
+		await openReverseImageSearch(engine, imageUrl);
+		return;
+	}
+	const response = await fetch(imageUrl);
+	if (!response.ok) throw new Error(`Failed to download photo (${response.status})`);
+	const bytes = new Uint8Array(await response.arrayBuffer());
+	const mimeType = response.headers.get("content-type")?.split(";")[0].trim() || "image/jpeg";
+	await invoke("open_upload_image_search", { engine, imageBase64: bytesToBase64(bytes), mimeType });
 }
 
 /** Opens the engine's results for `imageUrl` in the system browser (fake-profile check). */
