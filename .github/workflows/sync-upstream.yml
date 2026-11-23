@@ -11,23 +11,23 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
-      - name: Import the verified upstream revision and preserve both histories
+      - name: Import the verified source into the prepared branch
         env:
           FORK_HEAD: 508a379d5c4dd049980dc030e44485555b48da52
+          STAGING_HEAD: 32c6d713576ce3732acb789bec10cc9ece994098
           UPSTREAM_HEAD: 1f80753420f495bb0205bfbc5faf378c7f354c4f
           UPSTREAM_EQUIVALENT: 1fccc3320468371c71d1d3c2de24a0c9ee472c2b
         run: |
           set -euo pipefail
-          git fetch --no-tags origin refs/heads/development:refs/remotes/origin/development
-          test "$(git rev-parse origin/development)" = "$FORK_HEAD"
+          git fetch --no-tags origin refs/heads/work/import-free-grind:refs/remotes/origin/work/import-free-grind
+          test "$(git rev-parse origin/work/import-free-grind)" = "$STAGING_HEAD"
           git fetch --no-tags https://github.com/tidyzulu/free-grind.git refs/heads/development:refs/remotes/upstream/development
           test "$(git rev-parse upstream/development)" = "$UPSTREAM_HEAD"
           git merge-base --is-ancestor "$UPSTREAM_EQUIVALENT" "$UPSTREAM_HEAD"
           test "$(git rev-parse "${FORK_HEAD}^{tree}")" = "$(git rev-parse "${UPSTREAM_EQUIVALENT}^{tree}")"
+          git diff --exit-code "$STAGING_HEAD" "$UPSTREAM_HEAD" -- .github/workflows
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git switch --detach "$UPSTREAM_HEAD"
-          git merge --strategy=ours --allow-unrelated-histories --no-edit \
-            -m 'Sync Free Grind 1.0.1 from tidyzulu [skip ota]' "$FORK_HEAD"
-          test "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse "${UPSTREAM_HEAD}^{tree}")"
-          git push origin HEAD:refs/heads/development
+          tree=$(git rev-parse "${UPSTREAM_HEAD}^{tree}")
+          commit=$(git commit-tree "$tree" -p "$STAGING_HEAD" -p "$UPSTREAM_HEAD" -m 'Sync Free Grind 1.0.1 from tidyzulu [skip ci]')
+          git push origin "$commit:refs/heads/work/import-free-grind"
