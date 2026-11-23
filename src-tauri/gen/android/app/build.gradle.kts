@@ -143,9 +143,6 @@ android {
     }
     buildTypes {
         getByName("debug") {
-            val debugAppName = "${appManifest["appName"]} Debug"
-            resValue("string", "app_name", debugAppName)
-            resValue("string", "main_activity_title", debugAppName)
             manifestPlaceholders["usesCleartextTraffic"] = "true"
             isDebuggable = true
             isJniDebuggable = true
