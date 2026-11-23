@@ -1,0 +1,362 @@
+import { useState } from "react";
+import { ArrowDownWideNarrow, ArrowLeft, ArrowRight, Ban, CornerDownLeft, ExternalLink, FoldHorizontal, MoveHorizontal, Reply, SwitchCamera, UnfoldHorizontal, Video } from "lucide-react";
+import { useDesktopBreakpoint } from "../../hooks/useDesktopBreakpoint";
+import { FlameFilled, ImagesFilled, LayoutGridFilled, MapPinFilled, MessageSquareQuoteFilled, SunFilled, TimerFilled, Trash2Filled } from "../../components/icons/FilledIcons";
+import { PageHeader } from "../../components/PageHeader";
+import { ToggleRow } from "../../components/ui/toggle-row";
+import { RightNowIcon } from "../../components/icons/RightNowIcon";
+import { SelectRow } from "../../components/ui/select-row";
+import { useTranslation } from "react-i18next";
+import { usePreferences } from "../../contexts/PreferencesContext";
+import { useIsFreeTier } from "../../services/assignmentsStore";
+import { useSettingsHighlight } from "../../hooks/useSettingsHighlight";
+import { getTapEmoji, tapLabel } from "./interest/interestUtils";
+import { isAndroid, isIos } from "../../services/saveMedia";
+import {
+	SKIP_BLOCK_CONFIRM_KEY,
+	SKIP_DELETE_CONVERSATION_CONFIRM_KEY,
+	SKIP_LINK_OPEN_CONFIRM_KEY,
+	isBlockConfirmSkipped,
+	isDeleteConversationConfirmSkipped,
+	isLinkOpenConfirmSkipped,
+} from "../../utils/blockConfirm";
+
+const ALBUM_EXPIRATION_OPTIONS = ["INDEFINITE", "ONCE", "TEN_MINUTES", "ONE_HOUR", "ONE_DAY"] as const;
+const DOUBLE_TAP_TAP_TYPES = [0, 1, 2] as const;
+type DoubleTapTapType = (typeof DOUBLE_TAP_TAP_TYPES)[number];
+type DoubleTapChoice = "off" | "chat" | `tap-${DoubleTapTapType}`;
+
+// Wake Lock support varies by webview, not by platform: WebView2 (Windows)
+// and the Android/iOS system webviews support it, WebKitGTK (Linux desktop)
+// doesn't — so gate on the actual API instead of assuming desktop vs. mobile.
+// Desktop webcams have a single camera, so front/back only exists on phones.
+const isMobilePlatform = isAndroid() || isIos();
+
+const isKeepScreenOnSupported = typeof navigator !== "undefined" && "wakeLock" in navigator;
+
+export function BehaviorPage() {
+	const { t } = useTranslation();
+	const highlightId = useSettingsHighlight();
+	const isDesktop = useDesktopBreakpoint();
+	const isFreeTier = useIsFreeTier();
+	// The free-tier warning is about Grindr's limit and the Honduras bypass.
+	const showFreeTierWarning = isFreeTier;
+	const canSendExpiringAlbums = !isFreeTier;
+	const {
+		defaultExpiringPhotos,
+		defaultAlbumExpirationType,
+		openAlbumAsBottomSheet,
+		sortDrawerMediaByFrequency,
+		keepScreenOn,
+		autoFocusLocationSearch,
+		autoFocusRightNowText,
+		doubleTapTapType,
+		doubleTapAction,
+		chatRowSwipeActions,
+		enterToSend,
+		savedPhraseSendGesture,
+		swipeToReplyDirection,
+		startCallsWithCameraOn,
+		defaultCallCamera,
+		setPreferences,
+	} = usePreferences();
+	const doubleTapChoice: DoubleTapChoice =
+		doubleTapTapType === null ? "off" : doubleTapAction === "chat" ? "chat" : `tap-${doubleTapTapType as DoubleTapTapType}`;
+	const albumExpirationLabels: Record<(typeof ALBUM_EXPIRATION_OPTIONS)[number], string> = {
+		INDEFINITE: t("chat_drawer.expiry.unlimited", { defaultValue: "Unlimited" }),
+		ONCE: t("chat_drawer.expiry.once", { defaultValue: "Once" }),
+		TEN_MINUTES: t("chat_drawer.expiry.ten_minutes", { defaultValue: "10 minutes" }),
+		ONE_HOUR: t("chat_drawer.expiry.one_hour", { defaultValue: "1 hour" }),
+		ONE_DAY: t("chat_drawer.expiry.one_day", { defaultValue: "1 day" }),
+	};
+	const [confirmBeforeBlock, setConfirmBeforeBlock] = useState(() => !isBlockConfirmSkipped());
+	const [confirmBeforeDeleteConversation, setConfirmBeforeDeleteConversation] = useState(
+		() => !isDeleteConversationConfirmSkipped(),
+	);
+	const [confirmBeforeOpenLink, setConfirmBeforeOpenLink] = useState(() => !isLinkOpenConfirmSkipped());
+
+	return (
+		<section className="app-screen">
+			<PageHeader
+				backTo="/settings"
+				title={t("settings.behavior")}
+				subtitle={t("behavior.subtitle")}
+			/>
+
+			<div className="grid gap-6">
+				<div>
+					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("behavior.confirmations", { defaultValue: "Confirmations" })}</p>
+					<div className="native-group">
+						<ToggleRow
+							id="behavior-confirm-block"
+							highlighted={highlightId === "behavior-confirm-block"}
+							icon={<Ban className="h-5 w-5" />}
+							iconClass="bg-red-500/15 text-red-400"
+							label={t("customizability.confirm_before_block")}
+							description={t("customizability.confirm_before_block_desc")}
+							checked={confirmBeforeBlock}
+							onChange={(checked) => {
+								setConfirmBeforeBlock(checked);
+								window.localStorage.setItem(SKIP_BLOCK_CONFIRM_KEY, String(!checked));
+							}}
+						/>
+						<ToggleRow
+							id="behavior-confirm-delete-conversation"
+							highlighted={highlightId === "behavior-confirm-delete-conversation"}
+							icon={<Trash2Filled className="h-5 w-5" />}
+							iconClass="bg-red-500/15 text-red-400"
+							label={t("customizability.confirm_before_delete_conversation")}
+							description={t("customizability.confirm_before_delete_conversation_desc")}
+							checked={confirmBeforeDeleteConversation}
+							onChange={(checked) => {
+								setConfirmBeforeDeleteConversation(checked);
+								window.localStorage.setItem(SKIP_DELETE_CONVERSATION_CONFIRM_KEY, String(!checked));
+							}}
+						/>
+						<ToggleRow
+							id="behavior-confirm-open-link"
+							highlighted={highlightId === "behavior-confirm-open-link"}
+							icon={<ExternalLink className="h-5 w-5" />}
+							iconClass="bg-red-500/15 text-red-400"
+							label={t("customizability.confirm_before_open_link", { defaultValue: "Ask before opening links" })}
+							description={t("customizability.confirm_before_open_link_desc", {
+								defaultValue: "Show a confirmation before opening a link tapped inside a chat message.",
+							})}
+							checked={confirmBeforeOpenLink}
+							onChange={(checked) => {
+								setConfirmBeforeOpenLink(checked);
+								window.localStorage.setItem(SKIP_LINK_OPEN_CONFIRM_KEY, String(!checked));
+							}}
+						/>
+					</div>
+				</div>
+
+				<div>
+					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("behavior.chats")}</p>
+					<div className="native-group">
+						<ToggleRow
+							id="behavior-chat-row-swipe-actions"
+							highlighted={highlightId === "behavior-chat-row-swipe-actions"}
+							icon={<MoveHorizontal className="h-5 w-5" />}
+							iconClass="bg-sky-500/15 text-sky-400"
+							label={t("behavior.chat_row_swipe_actions")}
+							description={t("behavior.chat_row_swipe_actions_desc")}
+							checked={chatRowSwipeActions}
+							onChange={(checked) => void setPreferences({ chatRowSwipeActions: checked })}
+						/>
+						<ToggleRow
+							id="behavior-enter-to-send"
+							highlighted={highlightId === "behavior-enter-to-send"}
+							icon={<CornerDownLeft className="h-5 w-5" />}
+							iconClass="bg-sky-500/15 text-sky-400"
+							label={t("behavior.enter_to_send", { defaultValue: "Enter to Send" })}
+							description={t("behavior.enter_to_send_desc", {
+								defaultValue: "The Enter key sends the message instead of starting a new line. Shift+Enter always starts a new line.",
+							})}
+							checked={enterToSend}
+							onChange={(checked) => void setPreferences({ enterToSend: checked })}
+						/>
+						<SelectRow
+							id="behavior-saved-phrase-send-gesture"
+							highlighted={highlightId === "behavior-saved-phrase-send-gesture"}
+							icon={<MessageSquareQuoteFilled className="h-5 w-5" />}
+							iconClass="bg-sky-500/15 text-sky-400"
+							label={t("behavior.saved_phrase_send_gesture", { defaultValue: "Send Saved Phrases Instantly" })}
+							description={t("behavior.saved_phrase_send_gesture_desc", {
+								defaultValue: "Choose whether a tap or a long press on a saved phrase sends it right away. The other gesture puts it into the text field.",
+							})}
+							value={savedPhraseSendGesture}
+							onChange={(option) => void setPreferences({ savedPhraseSendGesture: option })}
+							options={[
+								{ value: "off", label: t("behavior.saved_phrase_send_off", { defaultValue: "Off" }) },
+								{ value: "tap", label: t("behavior.saved_phrase_send_tap", { defaultValue: "Tap" }) },
+								{ value: "longPress", label: t("behavior.saved_phrase_send_long_press", { defaultValue: "Long Press" }) },
+							]}
+						/>
+						{/* Swipe-to-reply is a touch gesture, so it only exists on mobile. */}
+						{!isDesktop && <SelectRow
+							id="behavior-swipe-to-reply-direction"
+							highlighted={highlightId === "behavior-swipe-to-reply-direction"}
+							icon={<Reply className="h-5 w-5" />}
+							iconClass="bg-sky-500/15 text-sky-400"
+							label={t("behavior.swipe_to_reply_direction", { defaultValue: "Swipe to Reply" })}
+							description={t("behavior.swipe_to_reply_direction_desc", {
+								defaultValue: "Choose which direction you swipe a message to reply to it.",
+							})}
+							value={swipeToReplyDirection}
+							onChange={(option) => void setPreferences({ swipeToReplyDirection: option })}
+							options={[
+								{ value: "right", icon: ArrowRight, iconClassName: "bg-sky-500/15 text-sky-400", label: t("behavior.swipe_to_reply_right", { defaultValue: "Right" }) },
+								{ value: "left", icon: ArrowLeft, iconClassName: "bg-sky-500/15 text-sky-400", label: t("behavior.swipe_to_reply_left", { defaultValue: "Left" }) },
+								{ value: "outward", icon: UnfoldHorizontal, iconClassName: "bg-sky-500/15 text-sky-400", label: t("behavior.swipe_to_reply_outward", { defaultValue: "Theirs Left, Mine Right" }) },
+								{ value: "inward", icon: FoldHorizontal, iconClassName: "bg-sky-500/15 text-sky-400", label: t("behavior.swipe_to_reply_inward", { defaultValue: "Mine Left, Theirs Right" }) },
+							]}
+						/>}
+					</div>
+				</div>
+
+				<div>
+					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("behavior.photos_albums", { defaultValue: "Photos & Albums" })}</p>
+					<div className="native-group">
+						<ToggleRow
+							id="behavior-default-expiring-photos"
+							highlighted={highlightId === "behavior-default-expiring-photos"}
+							icon={<TimerFilled className="h-5 w-5" />}
+							iconClass="bg-violet-500/15 text-violet-400"
+							label={t("behavior.default_expiring_photos")}
+							iconBadge={showFreeTierWarning ? (
+								<span className="flex h-4 w-4 items-center justify-center rounded-full bg-amber-500 text-[10px] font-extrabold leading-none text-black ring-2 ring-[var(--card-bg,var(--surface))]">
+									!
+								</span>
+							) : undefined}
+							description={showFreeTierWarning ? (
+								<>
+									{t("behavior.default_expiring_photos_desc")}
+									<span className="mt-1 block text-amber-500">{t("grindr:behavior.default_expiring_photos_free_warning")}</span>
+								</>
+							) : t("behavior.default_expiring_photos_desc")}
+							checked={defaultExpiringPhotos}
+							onChange={(checked) => void setPreferences({ defaultExpiringPhotos: checked })}
+						/>
+						{canSendExpiringAlbums && <SelectRow
+							id="behavior-default-album-expiration"
+							highlighted={highlightId === "behavior-default-album-expiration"}
+							icon={<ImagesFilled className="h-5 w-5" />}
+							iconClass="bg-violet-500/15 text-violet-400"
+							label={t("behavior.default_album_expiration")}
+							description={t("behavior.default_album_expiration_desc")}
+							value={defaultAlbumExpirationType}
+							onChange={(option) => void setPreferences({ defaultAlbumExpirationType: option })}
+							options={ALBUM_EXPIRATION_OPTIONS.map((option) => ({ value: option, label: albumExpirationLabels[option] }))}
+						/>}
+						<ToggleRow
+							id="behavior-open-album-as-bottom-sheet"
+							highlighted={highlightId === "behavior-open-album-as-bottom-sheet"}
+							icon={<LayoutGridFilled className="h-5 w-5" />}
+							iconClass="bg-violet-500/15 text-violet-400"
+							label={t("behavior.open_album_as_bottom_sheet")}
+							description={t("behavior.open_album_as_bottom_sheet_desc")}
+							checked={openAlbumAsBottomSheet}
+							onChange={(checked) => void setPreferences({ openAlbumAsBottomSheet: checked })}
+						/>
+						<ToggleRow
+							id="behavior-sort-drawer-media-by-frequency"
+							highlighted={highlightId === "behavior-sort-drawer-media-by-frequency"}
+							icon={<ArrowDownWideNarrow className="h-5 w-5" />}
+							iconClass="bg-violet-500/15 text-violet-400"
+							label={t("behavior.sort_drawer_media_by_frequency")}
+							description={t("behavior.sort_drawer_media_by_frequency_desc")}
+							checked={sortDrawerMediaByFrequency}
+							onChange={(checked) => void setPreferences({ sortDrawerMediaByFrequency: checked })}
+						/>
+					</div>
+				</div>
+
+				<div>
+					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("behavior.video_calls", { defaultValue: "Video Calls" })}</p>
+					<div className="native-group">
+						<ToggleRow
+							id="behavior-start-calls-with-camera-on"
+							highlighted={highlightId === "behavior-start-calls-with-camera-on"}
+							icon={<Video className="h-5 w-5" />}
+							iconClass="bg-emerald-500/15 text-emerald-400"
+							label={t("behavior.start_calls_with_camera_on", { defaultValue: "Start Calls with Camera On" })}
+							description={t("behavior.start_calls_with_camera_on_desc", {
+								defaultValue: "Your camera is turned on as soon as a video call connects. When off, calls start with your camera off and you turn it on yourself.",
+							})}
+							checked={startCallsWithCameraOn}
+							onChange={(checked) => void setPreferences({ startCallsWithCameraOn: checked })}
+						/>
+						{isMobilePlatform && <SelectRow
+							id="behavior-default-call-camera"
+							highlighted={highlightId === "behavior-default-call-camera"}
+							icon={<SwitchCamera className="h-5 w-5" />}
+							iconClass="bg-emerald-500/15 text-emerald-400"
+							label={t("behavior.default_call_camera", { defaultValue: "Default Camera" })}
+							description={t("behavior.default_call_camera_desc", {
+								defaultValue: "The camera a video call starts with. You can still switch during the call.",
+							})}
+							value={defaultCallCamera}
+							onChange={(option) => void setPreferences({ defaultCallCamera: option })}
+							options={[
+								{ value: "user", label: t("behavior.call_camera_front", { defaultValue: "Front" }) },
+								{ value: "environment", label: t("behavior.call_camera_back", { defaultValue: "Back" }) },
+							]}
+						/>}
+					</div>
+				</div>
+
+				<div>
+					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("behavior.browsing", { defaultValue: "Browsing" })}</p>
+					<div className="native-group">
+						<SelectRow
+							id="behavior-double-tap-tap-type"
+							highlighted={highlightId === "behavior-double-tap-tap-type"}
+							icon={<FlameFilled className="h-5 w-5" />}
+							iconClass="bg-orange-500/15 text-orange-400"
+							label={t("behavior.double_tap_action", { defaultValue: "Double Tap Action" })}
+							description={t("behavior.double_tap_action_desc", {
+								defaultValue: "Double tap a profile in the grid to send a tap or open the chat directly. Turn off to open profiles instantly on a single tap.",
+							})}
+							value={doubleTapChoice}
+							onChange={(choice) => {
+								if (choice === "off") void setPreferences({ doubleTapTapType: null });
+								// Off is stored as a null tap type, so keep a tap type around while chat is picked.
+								else if (choice === "chat") void setPreferences({ doubleTapTapType: doubleTapTapType ?? 1, doubleTapAction: "chat" });
+								else void setPreferences({ doubleTapTapType: Number(choice.slice("tap-".length)) as DoubleTapTapType, doubleTapAction: "tap" });
+							}}
+							options={[
+								{ value: "off", label: t("behavior.double_tap_off", { defaultValue: "Off" }) },
+								...DOUBLE_TAP_TAP_TYPES.map((tapType) => ({
+									value: `tap-${tapType}` as const,
+									label: `${getTapEmoji(tapType)} ${tapLabel(tapType, t)}`,
+								})),
+								{ value: "chat", label: `💬 ${t("behavior.double_tap_open_chat", { defaultValue: "Open Chat" })}` },
+							]}
+						/>
+						<ToggleRow
+							id="behavior-auto-focus-location-search"
+							highlighted={highlightId === "behavior-auto-focus-location-search"}
+							icon={<MapPinFilled className="h-5 w-5" />}
+							iconClass="bg-rose-500/15 text-rose-400"
+							label={t("behavior.auto_focus_location_search")}
+							description={t("behavior.auto_focus_location_search_desc")}
+							checked={autoFocusLocationSearch}
+							onChange={(checked) => void setPreferences({ autoFocusLocationSearch: checked })}
+						/>
+						<ToggleRow
+							id="behavior-auto-focus-right-now-text"
+							highlighted={highlightId === "behavior-auto-focus-right-now-text"}
+							icon={<RightNowIcon className="h-5 w-5" />}
+							iconClass="bg-[var(--right-now)]/15 text-[var(--right-now)]"
+							label={t("behavior.auto_focus_right_now_text", { defaultValue: "Auto-Focus Session Text" })}
+							description={t("behavior.auto_focus_right_now_text_desc", {
+								defaultValue: "Automatically focus the text field and open the keyboard when starting or editing a Right Now session.",
+							})}
+							checked={autoFocusRightNowText}
+							onChange={(checked) => void setPreferences({ autoFocusRightNowText: checked })}
+						/>
+					</div>
+				</div>
+
+				{isKeepScreenOnSupported && (
+					<div>
+						<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("behavior.display")}</p>
+						<div className="native-group">
+							<ToggleRow
+								id="behavior-keep-screen-on"
+								highlighted={highlightId === "behavior-keep-screen-on"}
+								icon={<SunFilled className="h-5 w-5" />}
+								iconClass="bg-amber-500/15 text-amber-400"
+								label={t("behavior.keep_screen_on")}
+								description={t("behavior.keep_screen_on_desc")}
+								checked={keepScreenOn}
+								onChange={(checked) => void setPreferences({ keepScreenOn: checked })}
+							/>
+						</div>
+					</div>
+				)}
+			</div>
+		</section>
+	);
+}

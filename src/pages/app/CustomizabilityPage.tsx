@@ -1,19 +1,18 @@
-import { useEffect, useMemo, useState } from "react";
-import { Monitor, Moon, Sun } from "lucide-react";
-import toast from "react-hot-toast";
+import { useDesktopBreakpoint } from "../../hooks/useDesktopBreakpoint";
+import { useMemo, useState } from "react";
+import { Columns2, Columns3, Columns4, History, LayoutGrid, List, PanelBottom, Type, Vibrate } from "lucide-react";
+import { ClockFilled, FlameFilled, ImagesFilled, MapPinOffFilled, MessageCircleFilled, LayoutGridFilled, MonitorFilled, MoonFilled, PaletteFilled, SparklesFilled, SunFilled } from "../../components/icons/FilledIcons";
 import { usePreferences, ACCENT_PRESETS, type ColorScheme } from "../../contexts/PreferencesContext";
-import { BackToSettings } from "../../components/BackToSettings";
-import {
-	readAnalyticsConsentChoice,
-	writeAnalyticsConsentChoice,
-	type AnalyticsConsentChoice,
-} from "../../utils/analyticsConsent";
+import { PageHeader } from "../../components/PageHeader";
+import { SchemePreview } from "../../components/SchemePreview";
+import { RightNowIcon } from "../../components/icons/RightNowIcon";
+import { HAPTICS_ENABLED_KEY, isHapticsEnabled } from "../../utils/haptics";
+import { NAV_FLOATING_KEY, NAV_SHOW_LABELS_KEY, NAV_STYLE_EVENT, readNavBarStyle, type NavBarStyle } from "../../components/NavBar";
+import { isAndroid, isIos } from "../../services/saveMedia";
+import { ToggleRow } from "../../components/ui/toggle-row";
+import { SelectRow } from "../../components/ui/select-row";
 import { useTranslation } from "react-i18next";
-import {
-	SUPPORTED_LOCALE_OPTIONS,
-	resolveSupportedLocale,
-} from "../../utils/locales";
-import { type UnitsPreset } from "../../utils/units";
+import { useSettingsHighlight } from "../../hooks/useSettingsHighlight";
 
 function normalizeHex(value: string): string {
 	const cleaned = value.trim().replace(/^#/, "");
@@ -56,71 +55,73 @@ function getContrastForHex(hexColor: string): "#1a1a1a" | "#ffffff" {
 	return contrastWithDark >= contrastWithLight ? "#1a1a1a" : "#ffffff";
 }
 
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+	return (
+		<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">
+			{children}
+		</p>
+	);
+}
+
 export function CustomizabilityPage() {
-	const { i18n, t } = useTranslation();
+	const { t } = useTranslation();
+	const highlightId = useSettingsHighlight();
+	const isDesktop = useDesktopBreakpoint();
 	const {
 		colorScheme,
+		amoledMode,
 		accentColor,
 		mobileGridColumns,
-		unitsPreset,
-		blurIncomingMedia,
+		mobileViewsGridColumns,
+		revealEffectEnabled,
+		revealEffectStrength,
+		showGridTapStatus,
+		showEstimatedDistance,
+		showOnlineTimeLeft,
+		showLastOnline,
+		splitDrawerCategories,
+		compactComposer,
 		setPreferences,
 	} = usePreferences();
-	const [customHex, setCustomHex] = useState(accentColor);
-	const [hexError, setHexError] = useState<string | null>(null);
-	const [analyticsConsent, setAnalyticsConsent] = useState<AnalyticsConsentChoice | null>(
-		() => readAnalyticsConsentChoice(),
-	);
+	const [showRightNow, setShowRightNow] = useState(() => window.localStorage.getItem("fg-show-right-now") !== "false");
+	const [isMobilePlatform] = useState(() => isAndroid() || isIos());
+	// 4 columns only leave room for usable tiles on tablets; the shorter screen
+	// edge keeps the check independent of orientation.
+	const [isTablet] = useState(() => Math.min(window.screen.width, window.screen.height) >= 600);
+	const [showNavLabels, setShowNavLabels] = useState(() => window.localStorage.getItem(NAV_SHOW_LABELS_KEY) === "true");
+	const [hapticsEnabled, setHapticsEnabled] = useState(isHapticsEnabled);
+	const [navBarStyle, setNavBarStyle] = useState<NavBarStyle>(readNavBarStyle);
+	const [showInterest, setShowInterest] = useState(() => window.localStorage.getItem("fg-show-interest") !== "false");
+	const [defaultInterestTab, setDefaultInterestTab] = useState(() => window.localStorage.getItem("fg-interest-default-tab") || "taps");
+	const [viewsLayout, setViewsLayout] = useState(() => window.localStorage.getItem("fg-interest-views-layout") === "list" ? "list" : "grid");
+	// AMOLED isn't a color scheme of its own: it's dark plus the pure-black
+	// flag, offered as a fourth option like in the onboarding.
 	const schemeOptions: {
+		key: string;
 		value: ColorScheme;
+		amoled: boolean;
 		label: string;
 		icon: React.ReactNode;
 	}[] = useMemo(
 		() => [
-			{
-				value: "system",
-				label: t("customizability.schemes.system"),
-				icon: <Monitor className="h-5 w-5" />,
-			},
-			{
-				value: "light",
-				label: t("customizability.schemes.light"),
-				icon: <Sun className="h-5 w-5" />,
-			},
-			{
-				value: "dark",
-				label: t("customizability.schemes.dark"),
-				icon: <Moon className="h-5 w-5" />,
-			},
+			{ key: "system", value: "system", amoled: false, label: t("customizability.schemes.system"), icon: <MonitorFilled className="h-5 w-5" /> },
+			{ key: "light", value: "light", amoled: false, label: t("customizability.schemes.light"), icon: <SunFilled className="h-5 w-5" /> },
+			{ key: "dark", value: "dark", amoled: false, label: t("customizability.schemes.dark"), icon: <MoonFilled className="h-5 w-5" /> },
+			{ key: "amoled", value: "dark", amoled: true, label: t("customizability.schemes.amoled", { defaultValue: "AMOLED" }), icon: <MoonFilled className="h-5 w-5" /> },
 		],
 		[t],
 	);
-	const selectedLocale = resolveSupportedLocale(i18n.language);
+	const isSchemeOptionActive = (option: { value: ColorScheme; amoled: boolean }) =>
+		colorScheme === option.value && (option.value !== "dark" || amoledMode === option.amoled);
+	const activeSchemeOption = schemeOptions.find(isSchemeOptionActive) ?? schemeOptions[0];
 
-	useEffect(() => {
-		setCustomHex(accentColor);
-	}, [accentColor]);
-
-	const handleSchemeChange = (scheme: ColorScheme) => {
-		void setPreferences({ colorScheme: scheme });
+	const handleSchemeChange = (scheme: ColorScheme, amoled: boolean) => {
+		void setPreferences({ colorScheme: scheme, amoledMode: amoled });
 	};
 
 	const handleAccentChange = (preset: (typeof ACCENT_PRESETS)[number]) => {
 		void setPreferences({ accentColor: preset.color, accentContrast: preset.contrast });
-	};
-
-	const handleApplyCustomHex = () => {
-		const normalized = normalizeHex(customHex);
-		if (!normalized) {
-			setHexError(t("customizability.hex_error"));
-			return;
-		}
-
-		setHexError(null);
-		void setPreferences({
-			accentColor: normalized,
-			accentContrast: getContrastForHex(normalized),
-		});
 	};
 
 	const handlePickColor = (value: string) => {
@@ -129,363 +130,428 @@ export function CustomizabilityPage() {
 			return;
 		}
 
-		setCustomHex(normalized);
-		setHexError(null);
 		void setPreferences({
 			accentColor: normalized,
 			accentContrast: getContrastForHex(normalized),
 		});
 	};
 
-	const handleLocaleChange = async (locale: string) => {
-		try {
-			const nextLocale = resolveSupportedLocale(locale);
-			await i18n.changeLanguage(nextLocale);
-			document.documentElement.lang = nextLocale;
-		} catch (error) {
-			const message =
-				error instanceof Error && error.message
-					? error.message
-					: "Failed to change language.";
-			toast.error(message);
-		}
-	};
-
-	const handleUnitsPresetChange = (preset: UnitsPreset) => {
-		void setPreferences({ unitsPreset: preset });
-	};
-
-	const handleBlurIncomingMediaToggle = () => {
-		void setPreferences({ blurIncomingMedia: !blurIncomingMedia });
-	};
-
 	return (
 		<section className="app-screen">
-			<header className="mb-6">
-				<BackToSettings />
-				<h1 className="app-title mb-2">{t("settings.customizability")}</h1>
-				<p className="app-subtitle">{t("customizability.subtitle")}</p>
-			</header>
+			<PageHeader
+				backTo="/settings"
+				title={t("settings.customizability")}
+				subtitle={t("customizability.subtitle")}
+			/>
 
 			<div className="grid gap-6">
-				<div className="surface-card p-4 sm:p-5">
-					<p className="mb-3 text-sm font-semibold uppercase tracking-widest text-[var(--text-muted)]">
-						{t("settings.language")}
-					</p>
-					<p className="mb-3 text-sm text-[var(--text-muted)]">
-						{t("settings.language_description")}
-					</p>
-					<select
-						value={selectedLocale}
-						onChange={(event) => void handleLocaleChange(event.target.value)}
-						className="h-10 w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 text-sm text-[var(--text)] outline-none transition focus:border-[var(--accent)]"
-					>
-						{SUPPORTED_LOCALE_OPTIONS.map((option) => (
-							<option key={option.value} value={option.value}>
-								{option.label}
-							</option>
-						))}
-					</select>
-				</div>
 
-				<div className="surface-card p-4 sm:p-5">
-					<p className="mb-3 text-sm font-semibold uppercase tracking-widest text-[var(--text-muted)]">
-						{t("customizability.units")}
-					</p>
-					<p className="mb-3 text-sm text-[var(--text-muted)]">
-						{t("customizability.units_description")}
-					</p>
-					<select
-						value={unitsPreset}
-						onChange={(event) => handleUnitsPresetChange(event.target.value as UnitsPreset)}
-						className="h-10 w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 text-sm text-[var(--text)] outline-none transition focus:border-[var(--accent)]"
-					>
-						<option value="world">{t("customizability.units_world")}</option>
-						<option value="uk">{t("customizability.units_uk")}</option>
-						<option value="american">{t("customizability.units_american")}</option>
-					</select>
-				</div>
-
-				<div className="surface-card p-4 sm:p-5">
-					<p className="mb-3 text-sm font-semibold uppercase tracking-widest text-[var(--text-muted)]">
-						{t("customizability.blur_incoming_media")}
-					</p>
-					<p className="mb-3 text-sm text-[var(--text-muted)]">
-						{t("customizability.blur_incoming_media_description")}
-					</p>
-					<button
-						type="button"
-						onClick={handleBlurIncomingMediaToggle}
-						className={`inline-flex h-10 items-center justify-center rounded-lg border px-4 text-sm font-semibold transition ${
-							blurIncomingMedia
-								? "border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-contrast)]"
-								: "border-[var(--border)] bg-[var(--surface-2)] text-[var(--text)]"
-						}`}
-					>
-						{blurIncomingMedia ? t("customizability.enabled") : t("customizability.disabled")}
-					</button>
-				</div>
-
-				{/* Analytics & FreeGrind Discovery */}
-				<div className="surface-card p-4 sm:p-5">
-					<p className="mb-2 text-sm font-semibold uppercase tracking-widest text-[var(--text-muted)]">
-						{t("customizability.analytics.title")}
-					</p>
-					<p className="text-sm text-[var(--text-muted)]">
-						{t("customizability.analytics.description")}
-					</p>
-					<p className="mt-2 text-xs text-[var(--text-muted)]">
-						{t("customizability.analytics.note")}
-					</p>
-					<div className="mt-4 flex flex-wrap gap-2">
-						<button
-							type="button"
-							onClick={() => {
-								writeAnalyticsConsentChoice("granted");
-								setAnalyticsConsent("granted");
-							}}
-							className="inline-flex h-10 items-center justify-center rounded-lg border px-4 text-sm font-semibold transition"
-							style={{
-								borderColor:
-									analyticsConsent === "granted" ? "var(--accent)" : "var(--border)",
-								background:
-									analyticsConsent === "granted"
-										? "color-mix(in srgb, var(--accent) 16%, var(--surface))"
-										: "var(--surface-2)",
-								color:
-									analyticsConsent === "granted"
-										? "var(--accent-readable)"
-										: "var(--text)",
-							}}
+				{/* COLORS */}
+				<div>
+					<SectionLabel>{t("customizability.colors", { defaultValue: "Colors" })}</SectionLabel>
+					{/* One group: color scheme and accent color, each a tile with a row
+					    header and its picker. */}
+					<div className="native-group">
+						<div
+							id="cust-color-scheme"
+							className={`px-4 pb-4 pt-3.5 ${highlightId === "cust-color-scheme" ? "animate-settings-highlight" : ""}`}
 						>
-							{t("customizability.analytics.allow")}
-						</button>
-						<button
-							type="button"
-							onClick={() => {
-								writeAnalyticsConsentChoice("denied");
-								setAnalyticsConsent("denied");
-							}}
-							className="inline-flex h-10 items-center justify-center rounded-lg border px-4 text-sm font-semibold transition"
-							style={{
-								borderColor:
-									analyticsConsent === "denied" ? "var(--accent)" : "var(--border)",
-								background:
-									analyticsConsent === "denied"
-										? "color-mix(in srgb, var(--accent) 16%, var(--surface))"
-										: "var(--surface-2)",
-								color:
-									analyticsConsent === "denied"
-										? "var(--accent-readable)"
-										: "var(--text)",
-							}}
-						>
-							{t("customizability.analytics.deny")}
-						</button>
-					</div>
-					<p className="mt-3 text-xs text-[var(--text-muted)]">
-						{t("customizability.analytics.current")}: {" "}
-						{analyticsConsent === null
-							? t("customizability.analytics.not_selected")
-							: analyticsConsent}
-					</p>
-				</div>
-
-				{/* Color Scheme */}
-				<div className="surface-card p-4 sm:p-5">
-					<p className="mb-3 text-sm font-semibold uppercase tracking-widest text-[var(--text-muted)]">
-						{t("customizability.color_scheme")}
-					</p>
-					<div className="grid grid-cols-3 gap-2">
-						{schemeOptions.map(({ value, label, icon }) => {
-							const isActive = colorScheme === value;
-							return (
-								<button
-									key={value}
-									type="button"
-									onClick={() => handleSchemeChange(value)}
-									className="flex flex-col items-center gap-2 rounded-xl border-2 p-4 transition-all"
-									style={{
-										borderColor: isActive ? "var(--accent)" : "var(--border)",
-										background: isActive
-											? "color-mix(in srgb, var(--accent) 12%, transparent)"
-											: "var(--surface-2)",
-										color: isActive
-											? "var(--accent-readable)"
-											: "var(--text-muted)",
-									}}
-								>
-									{icon}
-									<span className="text-xs font-medium">{label}</span>
-								</button>
-							);
-						})}
-					</div>
-				</div>
-
-				{/* Accent Color */}
-				<div className="surface-card p-4 sm:p-5">
-					<p className="mb-3 text-sm font-semibold uppercase tracking-widest text-[var(--text-muted)]">
-						{t("customizability.accent_color")}
-					</p>
-					<div className="flex flex-wrap gap-3">
-						{ACCENT_PRESETS.map((preset) => {
-							const isActive = accentColor === preset.color;
-							return (
-								<button
-									key={preset.color}
-									type="button"
-									onClick={() => handleAccentChange(preset)}
-									title={preset.name}
-									className="relative h-10 w-10 rounded-full transition-transform hover:scale-110"
-									style={{ background: preset.color }}
-								>
-									{isActive && (
-										<span
-											className="absolute inset-0 flex items-center justify-center rounded-full text-sm font-bold"
-											style={{ color: preset.contrast }}
+							<div className="flex items-center gap-3">
+								<div className="shrink-0 rounded-2xl bg-sky-500/15 p-2.5 text-sky-400">
+									{activeSchemeOption.icon}
+								</div>
+								<div className="min-w-0 flex-1">
+									<p className="text-sm font-semibold leading-snug">{t("customizability.color_scheme")}</p>
+									<p className="mt-0.5 truncate text-xs text-[var(--text-muted)]">
+										{activeSchemeOption.label}
+									</p>
+								</div>
+							</div>
+							{/* Fixed tile width from sm up, so the previews don't grow with the page. */}
+							<div className="mt-3.5 grid grid-cols-4 gap-2 sm:grid-cols-[repeat(4,8rem)]">
+								{schemeOptions.map((option) => {
+									const { key, value, amoled, label } = option;
+									const isActive = isSchemeOptionActive(option);
+									return (
+										<button
+											key={key}
+											// Settings search still jumps to AMOLED by its old anchor.
+											id={key === "amoled" ? "cust-amoled" : undefined}
+											type="button"
+											onClick={() => handleSchemeChange(value, amoled)}
+											aria-pressed={isActive}
+											className={`flex flex-col gap-2 rounded-2xl p-1.5 pb-2.5 transition-[transform,background-color] duration-150 active:scale-[0.98] ${isActive ? "accent-tint-15 ring-2 ring-inset ring-[var(--accent)]" : "bg-[var(--surface-2)] hover:accent-tint-10"} ${key === "amoled" && highlightId === "cust-amoled" ? "animate-settings-highlight" : ""}`}
 										>
-											✓
-										</span>
-									)}
-									<span
-										className="absolute -inset-0.5 rounded-full border-2"
-										style={{
-											borderColor: isActive ? preset.color : "transparent",
-											boxShadow: isActive
-												? `0 0 0 2px var(--surface), 0 0 0 4px ${preset.color}`
-												: "none",
-										}}
-									/>
-								</button>
-							);
-						})}
+											<SchemePreview scheme={value} amoled={amoled} />
+											<span className={`text-xs font-medium ${isActive ? "text-[var(--accent-readable)]" : "text-[var(--text)]"}`}>{label}</span>
+										</button>
+									);
+								})}
+							</div>
+						</div>
+						<div
+							id="cust-accent-color"
+							className={`px-4 pb-4 pt-3.5 ${highlightId === "cust-accent-color" ? "animate-settings-highlight" : ""}`}
+						>
+							<div className="flex items-center gap-3">
+								<div className="shrink-0 rounded-2xl accent-tint-15 p-2.5 text-[var(--accent)]">
+									<PaletteFilled className="h-5 w-5" />
+								</div>
+								<div className="min-w-0 flex-1">
+									<p className="text-sm font-semibold leading-snug">{t("customizability.accent_color")}</p>
+									<p className="mt-0.5 truncate text-xs text-[var(--text-muted)]">
+										{ACCENT_PRESETS.find((p) => p.color === accentColor)?.name ?? t("customizability.custom")}
+									</p>
+								</div>
+							</div>
+
+							{/* Compact chips: a color dot with its name, the active one tinted and
+							    ringed in the accent like the color scheme tiles above. */}
+							<div className="mt-3.5 flex flex-wrap gap-2">
+								{ACCENT_PRESETS.map((preset) => {
+									const isActive = accentColor === preset.color;
+									return (
+										<button
+											key={preset.color}
+											type="button"
+											onClick={() => handleAccentChange(preset)}
+											aria-pressed={isActive}
+											className={`flex items-center gap-2 rounded-xl py-1.5 ps-1.5 pe-3 transition-[transform,background-color] duration-150 active:scale-[0.97] ${isActive ? "accent-tint-15 ring-2 ring-inset ring-[var(--accent)]" : "bg-[var(--surface-2)] hover:accent-tint-10"}`}
+										>
+											<span className="h-6 w-6 shrink-0 rounded-lg" style={{ background: preset.color }} />
+											<span className={`text-xs font-medium ${isActive ? "text-[var(--accent-readable)]" : "text-[var(--text)]"}`}>{preset.name}</span>
+										</button>
+									);
+								})}
+
+								{/* Custom color: same chip, opens the native picker */}
+								{(() => {
+									const isCustom = !ACCENT_PRESETS.some((p) => p.color === accentColor);
+									return (
+										<label
+											htmlFor="accent-color-picker"
+											title={t("customizability.picker")}
+											className={`flex cursor-pointer items-center gap-2 rounded-xl py-1.5 ps-1.5 pe-3 transition-[transform,background-color] duration-150 active:scale-[0.97] ${isCustom ? "accent-tint-15 ring-2 ring-inset ring-[var(--accent)]" : "bg-[var(--surface-2)] hover:accent-tint-10"}`}
+										>
+											<input
+												id="accent-color-picker"
+												type="color"
+												value={normalizeHex(accentColor) || "#7c3aed"}
+												onChange={(event) => handlePickColor(event.target.value)}
+												className="sr-only"
+											/>
+											<span
+												className="h-6 w-6 shrink-0 rounded-lg"
+												style={{ background: isCustom ? accentColor : "conic-gradient(red, yellow, lime, cyan, blue, magenta, red)" }}
+											/>
+											<span className={`text-xs font-medium ${isCustom ? "text-[var(--accent-readable)]" : "text-[var(--text)]"}`}>{t("customizability.custom")}</span>
+										</label>
+									);
+								})()}
+							</div>
+						</div>
+
 					</div>
-					<p className="mt-3 text-xs text-[var(--text-muted)]">
-						{t("customizability.selected")}: {" "}
-						<span className="font-semibold" style={{ color: "var(--accent-readable)" }}>
-							{ACCENT_PRESETS.find((p) => p.color === accentColor)?.name ??
-								t("customizability.custom")}
-						</span>
-					</p>
-					<div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
-						<div className="inline-flex items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-2 py-1">
-							<label htmlFor="accent-color-picker" className="text-xs font-medium text-[var(--text-muted)]">
-								{t("customizability.picker")}
-							</label>
-							<input
-								id="accent-color-picker"
-								type="color"
-								value={normalizeHex(customHex) || "#ffcc01"}
-								onChange={(event) => handlePickColor(event.target.value)}
-								className="h-8 w-10 cursor-pointer rounded border border-[var(--border)] bg-transparent p-0"
+				</div>
+
+				{/* BROWSE PAGE (column count only affects the mobile app) */}
+				<div>
+					<SectionLabel>{t("customizability.grid_page")}</SectionLabel>
+					<div className="native-group">
+						{isMobilePlatform && (
+							<SelectRow
+								id="cust-browse-grid"
+								highlighted={highlightId === "cust-browse-grid"}
+								icon={<LayoutGridFilled className="h-5 w-5" />}
+								iconClass="bg-blue-500/15 text-blue-400"
+								label={t("customizability.grid_layout")}
+								description={t("customizability.browse_grid_mobile_desc")}
+								value={mobileGridColumns}
+								onChange={(cols) => void setPreferences({ mobileGridColumns: cols })}
+								options={[
+									{ value: "2", label: t("customizability.columns_2"), icon: Columns2 },
+									{ value: "3", label: t("customizability.columns_3"), icon: Columns3 },
+									...(isTablet || mobileGridColumns === "4"
+										? [{ value: "4" as const, label: t("customizability.columns_4"), icon: Columns4 }]
+										: []),
+								]}
+							/>
+						)}
+						<ToggleRow
+							id="cust-grid-tap-status"
+							highlighted={highlightId === "cust-grid-tap-status"}
+							icon={<FlameFilled className="h-5 w-5" />}
+							iconClass="bg-orange-500/15 text-orange-400"
+							label={t("customizability.show_grid_tap_status", { defaultValue: "Show Taps on the Grid" })}
+							description={t("customizability.show_grid_tap_status_desc", {
+								defaultValue: "Show a small flame on grid tiles of profiles you've tapped or who tapped you in the last 24 hours.",
+							})}
+							checked={showGridTapStatus}
+							onChange={(checked) => void setPreferences({ showGridTapStatus: checked })}
+						/>
+						<ToggleRow
+							id="cust-estimated-distance"
+							highlighted={highlightId === "cust-estimated-distance"}
+							icon={<MapPinOffFilled className="h-5 w-5" />}
+							iconClass="bg-emerald-500/15 text-emerald-400"
+							label={t("customizability.show_estimated_distance", { defaultValue: "Show Estimated Distance" })}
+							description={t("customizability.show_estimated_distance_desc", {
+								defaultValue: "Show the estimated distance on grid tiles of profiles that hide their distance. When off, only the icon is shown.",
+							})}
+							checked={showEstimatedDistance}
+							onChange={(checked) => void setPreferences({ showEstimatedDistance: checked })}
+						/>
+						<ToggleRow
+							id="cust-online-time-left"
+							highlighted={highlightId === "cust-online-time-left"}
+							icon={<ClockFilled className="h-5 w-5" />}
+							iconClass="bg-green-500/15 text-green-400"
+							label={t("customizability.show_online_time_left", { defaultValue: "Show Online Time Left" })}
+							description={t("customizability.show_online_time_left_desc", {
+								defaultValue: "Show how many minutes online profiles have left on profiles and in chats. When off, they just show as online.",
+							})}
+							checked={showOnlineTimeLeft}
+							onChange={(checked) => void setPreferences({ showOnlineTimeLeft: checked })}
+						/>
+						<ToggleRow
+							id="cust-last-online"
+							highlighted={highlightId === "cust-last-online"}
+							icon={<History className="h-5 w-5" strokeWidth={2.5} />}
+							iconClass="bg-slate-500/15 text-slate-400"
+							label={t("customizability.show_last_online", { defaultValue: "Show Last Online Time" })}
+							description={t("customizability.show_last_online_desc", {
+								defaultValue: "Show when offline profiles were last online on grid tiles. When off, only an empty gray circle is shown.",
+							})}
+							checked={showLastOnline}
+							onChange={(checked) => void setPreferences({ showLastOnline: checked })}
+						/>
+					</div>
+				</div>
+
+				{/* NAVIGATION */}
+				<div>
+					<SectionLabel>{t("customizability.navigation_bar")}</SectionLabel>
+					<div className="native-group">
+						{/* Bar style options only exist in the mobile app. */}
+						{isMobilePlatform && (
+							<>
+								<SelectRow
+									id="cust-nav-floating"
+									highlighted={highlightId === "cust-nav-floating"}
+									icon={<PanelBottom className="h-5 w-5" />}
+									iconClass="bg-sky-500/15 text-sky-400"
+									label={t("customizability.nav_style", { defaultValue: "Bar Style" })}
+									description={t("customizability.nav_style_desc", { defaultValue: "How the navigation bar is shown." })}
+									value={navBarStyle}
+									onChange={(val) => {
+										setNavBarStyle(val);
+										window.localStorage.setItem(NAV_FLOATING_KEY, val === "fade" ? "fade" : String(val === "floating"));
+										window.dispatchEvent(new Event(NAV_STYLE_EVENT));
+									}}
+									options={[
+										{
+											value: "solid",
+											label: t("customizability.nav_style_solid", { defaultValue: "Full Width" }),
+											description: t("customizability.nav_style_solid_desc", { defaultValue: "A solid bar across the full width of the screen." }),
+										},
+										{
+											value: "floating",
+											label: t("customizability.nav_style_floating", { defaultValue: "Floating" }),
+											description: t("customizability.nav_style_floating_desc", { defaultValue: "A floating card above the content." }),
+										},
+										{
+											value: "fade",
+											label: t("customizability.nav_style_fade", { defaultValue: "Floating, Transparent" }),
+											description: t("customizability.nav_style_fade_desc", { defaultValue: "Floating icons without a card, on a dark fade from the bottom edge." }),
+										},
+									]}
+								/>
+								<ToggleRow
+									id="cust-nav-show-labels"
+									highlighted={highlightId === "cust-nav-show-labels"}
+									icon={<Type className="h-5 w-5" />}
+									iconClass="bg-sky-500/15 text-sky-400"
+									label={t("customizability.nav_show_labels")}
+									description={t("customizability.nav_show_labels_desc")}
+									checked={showNavLabels}
+									onChange={(checked) => {
+										setShowNavLabels(checked);
+										window.localStorage.setItem(NAV_SHOW_LABELS_KEY, String(checked));
+										window.dispatchEvent(new Event(NAV_STYLE_EVENT));
+									}}
+								/>
+							</>
+						)}
+						<ToggleRow
+							id="cust-show-right-now"
+							highlighted={highlightId === "cust-show-right-now"}
+							icon={<RightNowIcon className="h-5 w-5" />}
+							iconClass="bg-[var(--right-now-soft)] text-[var(--right-now)]"
+							label={t("customizability.show_right_now")}
+							description={t("customizability.show_right_now_desc")}
+							checked={showRightNow}
+							onChange={(checked) => {
+								setShowRightNow(checked);
+								window.localStorage.setItem("fg-show-right-now", String(checked));
+								window.location.reload();
+							}}
+						/>
+						<ToggleRow
+							id="cust-show-interest"
+							highlighted={highlightId === "cust-show-interest"}
+							icon={<FlameFilled className="h-5 w-5" />}
+							iconClass="bg-yellow-500/15 text-yellow-400"
+							label={t("customizability.show_interest")}
+							description={t("customizability.show_interest_desc")}
+							checked={showInterest}
+							onChange={(checked) => {
+								setShowInterest(checked);
+								window.localStorage.setItem("fg-show-interest", String(checked));
+								window.location.reload();
+							}}
+						/>
+					</div>
+				</div>
+
+				{/* INTEREST PAGE */}
+				{showInterest && (
+					<div>
+						<SectionLabel>{t("customizability.interest_page")}</SectionLabel>
+						<div className="native-group">
+							<SelectRow
+								icon={<FlameFilled className="h-5 w-5 opacity-50" />}
+								iconClass="bg-yellow-500/10 text-yellow-400"
+								label={t("customizability.default_view")}
+								value={defaultInterestTab}
+								onChange={(val) => {
+									setDefaultInterestTab(val);
+									window.localStorage.setItem("fg-interest-default-tab", val);
+									window.localStorage.setItem("fg-interest-last-tab", val);
+								}}
+								options={[
+									{ value: "taps", label: t("customizability.interest_show_taps") },
+									{ value: "views", label: t("customizability.interest_show_views") },
+									{ value: "sent", label: t("customizability.interest_show_sent") },
+								]}
+							/>
+							{/* Mobile only: desktop always shows interest as tiles. */}
+							{!isDesktop && (
+							<SelectRow
+								id="cust-views-grid"
+								highlighted={highlightId === "cust-views-grid"}
+								icon={<LayoutGridFilled className="h-5 w-5" />}
+								iconClass="bg-blue-500/15 text-blue-400"
+								label={t("customizability.views_grid_layout")}
+								description={t("customizability.views_display_desc")}
+								// Mobile picks the column count right here; desktop's grid sizes itself.
+								value={viewsLayout === "list" ? "list" : isMobilePlatform ? mobileViewsGridColumns : "grid"}
+								onChange={(val) => {
+									const layout = val === "list" ? "list" : "grid";
+									setViewsLayout(layout);
+									window.localStorage.setItem("fg-interest-views-layout", layout);
+									if (val === "2" || val === "3" || val === "4") {
+										void setPreferences({ mobileViewsGridColumns: val });
+									}
+								}}
+								options={[
+									{ value: "list", label: t("customizability.views_display_list"), icon: List },
+									...(isMobilePlatform
+										? [
+											{ value: "2", label: t("customizability.columns_2"), icon: Columns2 },
+											{ value: "3", label: t("customizability.columns_3"), icon: Columns3 },
+											...(isTablet || mobileViewsGridColumns === "4"
+												? [{ value: "4", label: t("customizability.columns_4"), icon: Columns4 }]
+												: []),
+										]
+										: [{ value: "grid", label: t("customizability.views_display_grid"), icon: LayoutGrid }]),
+								]}
+							/>
+							)}
+						</div>
+					</div>
+				)}
+
+				{/* CHAT */}
+				<div>
+					<SectionLabel>{t("customizability.chat_section", { defaultValue: "Chat Page" })}</SectionLabel>
+					<div className="native-group">
+						<ToggleRow
+							id="cust-drawer-layout"
+							highlighted={highlightId === "cust-drawer-layout"}
+							icon={<ImagesFilled className="h-5 w-5" />}
+							iconClass="bg-violet-500/15 text-violet-400"
+							label={t("customizability.drawer_layout", { defaultValue: "Split Media Drawer into Categories" })}
+							description={t("customizability.drawer_layout_desc", {
+								defaultValue: "Show media, albums and collections in separate tabs instead of all on one page.",
+							})}
+							checked={splitDrawerCategories}
+							onChange={(checked) => void setPreferences({ splitDrawerCategories: checked })}
+						/>
+						<ToggleRow
+							id="cust-compact-composer"
+							highlighted={highlightId === "cust-compact-composer"}
+							icon={<MessageCircleFilled className="h-5 w-5" />}
+							iconClass="bg-sky-500/15 text-sky-400"
+							label={t("customizability.compact_composer", { defaultValue: "Compact Message Bar" })}
+							description={t("customizability.compact_composer_desc", {
+								defaultValue: "Put the media drawer button and a + menu with the other actions inside the message field instead of a row below it.",
+							})}
+							checked={compactComposer}
+							onChange={(checked) => void setPreferences({ compactComposer: checked })}
+						/>
+					</div>
+				</div>
+
+				{/* VISUAL EFFECTS */}
+				<div>
+					<SectionLabel>{t("customizability.visual_effects")}</SectionLabel>
+					<div className="native-group">
+						{/* Off and both strengths in one picker. */}
+						<SelectRow
+							id="cust-reveal-effect"
+							highlighted={highlightId === "cust-reveal-effect"}
+							icon={<SparklesFilled className="h-5 w-5" />}
+							iconClass="bg-violet-500/15 text-violet-400"
+							label={t("customizability.reveal_effect.title")}
+							description={t("customizability.reveal_effect.description")}
+							value={revealEffectEnabled ? revealEffectStrength : "off"}
+							onChange={(choice) =>
+								void setPreferences(
+									choice === "off"
+										? { revealEffectEnabled: false }
+										: { revealEffectEnabled: true, revealEffectStrength: choice },
+								)}
+							options={[
+								{ value: "off", label: t("customizability.reveal_effect.strengths.off", { defaultValue: "Off" }) },
+								{ value: "subtle", label: t("customizability.reveal_effect.strengths.subtle") },
+								{ value: "pronounced", label: t("customizability.reveal_effect.strengths.pronounced") },
+							]}
+						/>
+					</div>
+				</div>
+
+				{/* INTERACTION (mobile app only) */}
+				{isMobilePlatform && (
+					<div>
+						<SectionLabel>{t("customizability.interaction")}</SectionLabel>
+						<div className="native-group">
+							<ToggleRow
+								id="cust-haptics"
+								highlighted={highlightId === "cust-haptics"}
+								icon={<Vibrate className="h-5 w-5" />}
+								iconClass="bg-rose-500/15 text-rose-400"
+								label={t("customizability.haptic_feedback")}
+								description={t("customizability.haptic_feedback_desc")}
+								checked={hapticsEnabled}
+								onChange={(checked) => {
+									setHapticsEnabled(checked);
+									window.localStorage.setItem(HAPTICS_ENABLED_KEY, String(checked));
+								}}
 							/>
 						</div>
-						<input
-							type="text"
-							value={customHex}
-							onChange={(event) => {
-								setCustomHex(event.target.value);
-								if (hexError) {
-									setHexError(null);
-								}
-							}}
-							placeholder="#22c55e"
-							className="h-10 w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 text-sm text-[var(--text)] outline-none transition focus:border-[var(--accent)] sm:max-w-xs"
-						/>
-						<button
-							type="button"
-							onClick={handleApplyCustomHex}
-							className="inline-flex h-10 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-4 text-sm font-semibold text-[var(--text)] transition hover:border-[var(--accent)]"
-						>
-							{t("customizability.apply_hex")}
-						</button>
 					</div>
-					{hexError ? <p className="mt-2 text-xs text-red-400">{hexError}</p> : null}
-				</div>
+				)}
 
-				{/* Browse Grid (Mobile) */}
-				<div className="surface-card p-4 sm:p-5">
-					<p className="mb-3 text-sm font-semibold uppercase tracking-widest text-[var(--text-muted)]">
-						{t("customizability.browse_grid_mobile")}
-					</p>
-					<div className="grid grid-cols-2 gap-2">
-						<button
-							type="button"
-							onClick={() => void setPreferences({ mobileGridColumns: "2" })}
-							className="rounded-xl border-2 p-3 text-sm font-semibold transition-all"
-							style={{
-								borderColor:
-									mobileGridColumns === "2" ? "var(--accent)" : "var(--border)",
-								background:
-									mobileGridColumns === "2"
-										? "color-mix(in srgb, var(--accent) 12%, transparent)"
-										: "var(--surface-2)",
-								color:
-									mobileGridColumns === "2"
-										? "var(--accent-readable)"
-										: "var(--text-muted)",
-							}}
-						>
-							{t("customizability.columns_2")}
-						</button>
-						<button
-							type="button"
-							onClick={() => void setPreferences({ mobileGridColumns: "3" })}
-							className="rounded-xl border-2 p-3 text-sm font-semibold transition-all"
-							style={{
-								borderColor:
-									mobileGridColumns === "3" ? "var(--accent)" : "var(--border)",
-								background:
-									mobileGridColumns === "3"
-										? "color-mix(in srgb, var(--accent) 12%, transparent)"
-										: "var(--surface-2)",
-								color:
-									mobileGridColumns === "3"
-										? "var(--accent-readable)"
-										: "var(--text-muted)",
-							}}
-						>
-							{t("customizability.columns_3")}
-						</button>
-					</div>
-				</div>
-
-				{/* Preview */}
-				<div className="surface-card p-4 sm:p-5">
-					<p className="mb-3 text-sm font-semibold uppercase tracking-widest text-[var(--text-muted)]">
-						{t("customizability.preview")}
-					</p>
-					<div className="flex flex-wrap gap-2">
-						<span
-							className="inline-flex items-center rounded-full px-3 py-1 text-sm font-semibold"
-							style={{
-								background: "var(--accent)",
-								color: "var(--accent-contrast)",
-							}}
-						>
-							{t("customizability.preview_primary")}
-						</span>
-						<span
-							className="inline-flex items-center rounded-full border px-3 py-1 text-sm font-semibold"
-							style={{
-								borderColor: "var(--accent)",
-								color: "var(--accent-readable)",
-							}}
-						>
-							{t("customizability.preview_outlined")}
-						</span>
-						<span
-							className="inline-flex items-center rounded-full px-3 py-1 text-sm font-semibold"
-							style={{
-								background: "color-mix(in srgb, var(--accent) 15%, transparent)",
-								color: "var(--accent-readable)",
-							}}
-						>
-							{t("customizability.preview_subtle")}
-						</span>
-					</div>
-				</div>
 			</div>
 		</section>
 	);

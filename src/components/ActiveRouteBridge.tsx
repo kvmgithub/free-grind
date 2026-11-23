@@ -10,12 +10,19 @@
  */
 
 import { useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { useLocation } from "react-router-dom";
+import { appLog } from "../utils/logger";
+import {
+	syncNotificationSettingsToNative,
+	syncNotificationStringsToNative,
+} from "../utils/notificationSettings";
 
 declare global {
 	interface Window {
 		FreeGrindBridge?: {
 			setActiveRoute?: (route: string) => void;
+			postLocalNotification?: (payloadJson: string) => void;
 		};
 	}
 }
@@ -24,12 +31,29 @@ function pushRoute(route: string | null): void {
 	try {
 		window.FreeGrindBridge?.setActiveRoute?.(route ?? "");
 	} catch (error) {
-		console.warn("[ActiveRouteBridge] push failed", error);
+		appLog.warn("[ActiveRouteBridge] push failed", error);
 	}
 }
 
 export function ActiveRouteBridge() {
 	const location = useLocation();
+	const { i18n } = useTranslation();
+
+	useEffect(() => {
+		syncNotificationSettingsToNative();
+	}, []);
+
+	// Re-sync on language switch, and once a lazily loaded locale arrives.
+	useEffect(() => {
+		const sync = () => syncNotificationStringsToNative(i18n);
+		sync();
+		i18n.on("languageChanged", sync);
+		i18n.on("loaded", sync);
+		return () => {
+			i18n.off("languageChanged", sync);
+			i18n.off("loaded", sync);
+		};
+	}, [i18n]);
 
 	useEffect(() => {
 		const focused =

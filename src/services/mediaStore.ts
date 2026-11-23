@@ -1,0 +1,387 @@
+/**
+ * mediaStore.ts — eager fetch-and-store of chat media bytes into chatDb.
+ *
+ * Once a message's image/video/audio URL is resolved (even momentarily,
+ * since CloudFront signed URLs expire on a timer), the bytes are downloaded
+ * via @tauri-apps/plugin-http (bypasses webview CORS — same pattern already
+ * proven in saveMedia.ts against these exact CDN hosts) and stored as base64
+ * in chat.sqlite3, so the content survives URL expiry / view-once forever.
+ * The tap-to-reveal/blur UI is unaffected — only where the bytes come from
+ * changes.
+ */
+
+import { fetch } from "@tauri-apps/plugin-http";
+import * as chatDb from "./chatDb";
+import type { MediaKind } from "../types/chat-db";
+import { appLog } from "../utils/logger";
+import { limitChatDbBlobRead } from "../utils/chatDbBlobLimiter";
+import { createLimiter } from "../utils/concurrencyLimit";
+import { isChatArchiveEnabled } from "./chatArchiveMode";
+
+// Downloads run through plugin-http, outside the media proxy's own fetch
+// slots — capped so a few hundred uncached items (a big drawer) don't all go
+// out at once and starve everything else loading meanwhile.
+const limitMediaDownload = createLimiter(8);
+
+// De-dupe concurrent fetches for the same key (e.g. multiple hydration passes
+// racing for the same image).
+const inFlight = new Map<string, Promise<void>>();
+
+// Synchronous in-memory cache so render code (which can't await a DB read)
+// can prefer the locally-stored copy once it's available. Populated as
+// fetchAndStoreMedia resolves (whether by downloading or finding a DB hit).
+const memoryCache = new Map<string, string>();
+const cacheListeners = new Set<() => void>();
+
+let notifyScheduled = false;
+
+function setCachedMediaUri(mediaKey: string, uri: string): void {
+	memoryCache.set(mediaKey, uri);
+	// Coalesced: a burst of hits (a few hundred drawer items read back from
+	// chatDb) re-renders subscribers once per frame, not once per item.
+	if (notifyScheduled) {
+		return;
+	}
+	notifyScheduled = true;
+	setTimeout(() => {
+		notifyScheduled = false;
+		for (const listener of cacheListeners) {
+			listener();
+		}
+	}, 16);
+}
+
+/** Synchronous read of the in-memory media cache. */
+export function getCachedMediaUri(mediaKey: string | null | undefined): string | null {
+	if (!mediaKey) {
+		return null;
+	}
+	return memoryCache.get(mediaKey) ?? null;
+}
+
+/** Subscribe to in-memory cache updates; returns an unsubscribe function. */
+export function subscribeToMediaCache(listener: () => void): () => void {
+	cacheListeners.add(listener);
+	return () => {
+		cacheListeners.delete(listener);
+	};
+}
+
+function bytesToBase64(data: ArrayBuffer, mimeType: string): Promise<string> {
+	return new Promise((resolve, reject) => {
+		const blob = new Blob([data], { type: mimeType || "application/octet-stream" });
+		const reader = new FileReader();
+		reader.onload = () => {
+			const dataUrl = reader.result as string;
+			const commaIndex = dataUrl.indexOf(",");
+			resolve(commaIndex >= 0 ? dataUrl.slice(commaIndex + 1) : dataUrl);
+		};
+		reader.onerror = () => reject(reader.error ?? new Error("FileReader failed"));
+		reader.readAsDataURL(blob);
+	});
+}
+
+export function toDataUri(mimeType: string | null, base64: string): string {
+	return `data:${mimeType || "application/octet-stream"};base64,${base64}`;
+}
+
+/**
+ * Checks whether a CloudFront signed URL has expired by reading the
+ * `Expires` query parameter (Unix epoch seconds). No network request needed.
+ * Returns false if the URL cannot be parsed or has no Expires param.
+ */
+export function isSignedUrlExpired(url: string): boolean {
+	try {
+		const expires = new URL(url).searchParams.get("Expires");
+		if (!expires) return false;
+		return Date.now() > Number(expires) * 1000;
+	} catch {
+		return false;
+	}
+}
+
+export type FetchedMedia = {
+	base64: string;
+	mimeType: string | null;
+	sizeBytes: number;
+};
+
+/** Downloads `url` and base64-encodes it. Returns null on any failure (logs, never throws). */
+export async function fetchAndEncode(url: string): Promise<FetchedMedia | null> {
+	try {
+		const response = await fetch(url);
+		if (!response.ok) {
+			throw new Error(`Failed to download media (${response.status})`);
+		}
+		const arrayBuffer = await response.arrayBuffer();
+		const mimeType =
+			response.headers.get("content-type")?.split(";")[0]?.trim() || null;
+		const base64 = await bytesToBase64(arrayBuffer, mimeType || "application/octet-stream");
+		return { base64, mimeType, sizeBytes: arrayBuffer.byteLength };
+	} catch (error) {
+		appLog.warn(`[media-store] failed to fetch/encode ${url}`, error);
+		return null;
+	}
+}
+
+export type FetchAndStoreMediaParams = {
+	mediaKey: string;
+	kind: MediaKind;
+	url: string;
+	conversationId: string | null;
+	messageId: string | null;
+	viewOnce: boolean;
+};
+
+async function downloadAndStore(params: FetchAndStoreMediaParams): Promise<void> {
+	const { mediaKey, kind, url, conversationId, messageId, viewOnce } = params;
+	const fetched = await limitMediaDownload(() => fetchAndEncode(url));
+
+	if (!fetched) {
+		await chatDb
+			.upsertMediaFile({
+				mediaKey,
+				conversationId,
+				messageId,
+				kind,
+				mimeType: null,
+				dataBase64: "",
+				viewOnce,
+				sizeBytes: null,
+				fetchStatus: "failed",
+			})
+			.catch(() => {});
+		return;
+	}
+
+	await chatDb.upsertMediaFile({
+		mediaKey,
+		conversationId,
+		messageId,
+		kind,
+		mimeType: fetched.mimeType,
+		dataBase64: fetched.base64,
+		viewOnce,
+		sizeBytes: fetched.sizeBytes,
+		fetchStatus: "ok",
+	});
+	setCachedMediaUri(mediaKey, toDataUri(fetched.mimeType, fetched.base64));
+}
+
+/**
+ * Fetch and store media bytes for `mediaKey` if not already cached. Safe to
+ * call repeatedly/concurrently (fire-and-forget) — de-duped in-flight,
+ * skipped once already stored, retried on a previous failure. Never throws.
+ */
+export async function fetchAndStoreMedia(
+	params: FetchAndStoreMediaParams,
+): Promise<void> {
+	const { mediaKey, url } = params;
+	if (!mediaKey || !url) {
+		return;
+	}
+	// Without archive mode, view-limited media is only ever shown from the
+	// URL its view handed out, never kept.
+	if (params.viewOnce && !isChatArchiveEnabled()) {
+		return;
+	}
+
+	const existing = inFlight.get(mediaKey);
+	if (existing) {
+		return existing;
+	}
+
+	const run = (async () => {
+		try {
+			const cached = await limitChatDbBlobRead(() => chatDb.getMediaFile(mediaKey));
+			if (cached?.fetchStatus === "ok") {
+				setCachedMediaUri(mediaKey, toDataUri(cached.mimeType, cached.dataBase64));
+				// Self-heal: a reply-quote/reaction preview capture for this same
+				// content-hash mediaKey (see replyMediaStore.ts) may have left
+				// message_id null, or pointed at a message that's since been
+				// superseded — if this call carries a real messageId that
+				// doesn't match what's stored, re-associate now that we know
+				// which message this content actually belongs to. Cheap since
+				// the bytes are already cached — no refetch needed.
+				if (params.messageId != null && cached.messageId !== params.messageId) {
+					await chatDb
+						.upsertMediaFile({
+							mediaKey,
+							conversationId: params.conversationId,
+							messageId: params.messageId,
+							kind: cached.kind,
+							mimeType: cached.mimeType,
+							dataBase64: cached.dataBase64,
+							viewOnce: cached.viewOnce,
+							sizeBytes: cached.sizeBytes,
+							fetchStatus: cached.fetchStatus,
+						})
+						.catch(() => {});
+				}
+				return;
+			}
+			// Signed URLs that already expired are guaranteed to 403 — skip the
+			// network round-trip (and the log spam it'd produce) instead of
+			// re-hitting CloudFront every time this message is re-processed
+			// (poll, realtime merge, hydration pass) until a fresh URL arrives.
+			if (isSignedUrlExpired(url)) {
+				if (cached?.fetchStatus !== "failed") {
+					await chatDb
+						.upsertMediaFile({
+							mediaKey,
+							conversationId: params.conversationId,
+							messageId: params.messageId,
+							kind: params.kind,
+							mimeType: null,
+							dataBase64: "",
+							viewOnce: params.viewOnce,
+							sizeBytes: null,
+							fetchStatus: "failed",
+						})
+						.catch(() => {});
+				}
+				return;
+			}
+			await downloadAndStore(params);
+		} finally {
+			inFlight.delete(mediaKey);
+		}
+	})();
+
+	inFlight.set(mediaKey, run);
+	return run;
+}
+
+/**
+ * Reads already-stored media into the in-memory cache, for media with no URL
+ * to fall back on (e.g. restored drawer media waiting for upload). Never throws.
+ */
+export function hydrateStoredMedia(mediaKey: string): void {
+	if (memoryCache.has(mediaKey) || inFlight.has(mediaKey)) {
+		return;
+	}
+	const run = (async () => {
+		try {
+			const stored = await limitChatDbBlobRead(() => chatDb.getMediaFile(mediaKey));
+			if (stored?.fetchStatus === "ok") {
+				setCachedMediaUri(mediaKey, toDataUri(stored.mimeType, stored.dataBase64));
+			}
+		} catch (error) {
+			appLog.warn("[mediaStore] reading stored media failed", { mediaKey, error });
+		} finally {
+			inFlight.delete(mediaKey);
+		}
+	})();
+	inFlight.set(mediaKey, run);
+}
+
+/** True while fetchAndStoreMedia is still reading back or downloading `mediaKey`. */
+export function isMediaLookupPending(mediaKey: string): boolean {
+	return inFlight.has(mediaKey);
+}
+
+/**
+ * Returns a ready-to-use data: URI for previously-stored media, or null if
+ * not cached (yet, or the last fetch failed).
+ */
+export async function getLocalMediaUri(
+	mediaKey: string | null | undefined,
+): Promise<string | null> {
+	if (!mediaKey) {
+		return null;
+	}
+	const stored = await limitChatDbBlobRead(() => chatDb.getMediaFile(mediaKey));
+	if (!stored || stored.fetchStatus !== "ok") {
+		return null;
+	}
+	return toDataUri(stored.mimeType, stored.dataBase64);
+}
+
+/**
+ * The primary media_key (see chatUtils.ts's getMediaKeyForMessage) is
+ * derived from whatever the live message body currently offers — a hash,
+ * a URL, a mediaId. Once the server stops including that field (expired
+ * signed URL no longer refreshed, conversation archived, etc.) the same
+ * message can no longer reproduce that key, even though chatDb may still
+ * have the bytes filed under it. message_id is stable forever, so this is
+ * a parallel, URL-independent cache namespace keyed by it instead — used
+ * as a fallback wherever the primary lookup can't even be attempted.
+ */
+export function getMessageFallbackMediaKey(messageId: string): string {
+	return `msg:${messageId}`;
+}
+
+/**
+ * Cache key for a user's own drawer media (ChatDrawerPanel) — keyed by the
+ * server's numeric media id, which is stable for the item's lifetime (unlike
+ * its signed CDN url, which expires on a timer and gets re-issued on every
+ * fetch).
+ */
+/** Carries a cached copy over to a renamed media key (see chatDb.renameMediaFile). */
+export function moveCachedMediaUri(fromKey: string, toKey: string): void {
+	const uri = memoryCache.get(fromKey);
+	if (uri == null) return;
+	memoryCache.delete(fromKey);
+	setCachedMediaUri(toKey, uri);
+}
+
+export function getDrawerMediaKey(mediaId: number): string {
+	return `drawer:${mediaId}`;
+}
+
+/**
+ * Starts caching drawer items by their stable media id (read back from
+ * chatDb, or downloaded once), so tiles render from the local copy instead
+ * of fetching every item through the media proxy on each open.
+ */
+export function cacheDrawerMedia(items: readonly { id: number; url: string; contentType?: string | null }[]): void {
+	for (const item of items) {
+		void fetchAndStoreMedia({
+			mediaKey: getDrawerMediaKey(item.id),
+			kind: item.contentType?.startsWith("video/") ? "video" : "image",
+			url: item.url,
+			conversationId: null,
+			messageId: null,
+			viewOnce: false,
+		});
+	}
+}
+
+/**
+ * What a drawer tile shows: the local copy once read back, null while it's
+ * still being looked up (show a placeholder — falling back to the remote URL
+ * right away would send every item through the proxy at once), else the
+ * remote URL.
+ */
+export function getDrawerMediaSrc(item: { id: number; url: string }): string | null {
+	const key = getDrawerMediaKey(item.id);
+	return getCachedMediaUri(key) ?? (isMediaLookupPending(key) ? null : item.url);
+}
+
+/**
+ * Populates the in-memory cache (under the message-id fallback key) from
+ * whatever's already stored for this message, regardless of whether the
+ * live message currently carries a usable URL. Safe to call repeatedly.
+ */
+export async function hydrateMediaByMessageId(messageId: string): Promise<void> {
+	const key = getMessageFallbackMediaKey(messageId);
+	if (memoryCache.has(key) || inFlight.has(key)) {
+		return;
+	}
+
+	const run = (async () => {
+		try {
+			const stored = await limitChatDbBlobRead(() =>
+				chatDb.getMediaFileByMessageId(messageId),
+			);
+			if (stored?.fetchStatus === "ok") {
+				setCachedMediaUri(key, toDataUri(stored.mimeType, stored.dataBase64));
+			}
+		} finally {
+			inFlight.delete(key);
+		}
+	})();
+
+	inFlight.set(key, run);
+	return run;
+}

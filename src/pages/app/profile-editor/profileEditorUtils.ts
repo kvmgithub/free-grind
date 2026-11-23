@@ -1,6 +1,31 @@
 import z from "zod";
+import {
+	cmToInches,
+	gramsToKg,
+	gramsToPounds,
+	inchesToCm,
+	kgToGrams,
+	poundsToGrams,
+	type UnitsPreset,
+} from "../../../utils/units";
+import { calculateSquareCrop, validateMediaHash } from "../../../utils/media";
+
+function isImperialHeight(unitsPreset: UnitsPreset): boolean {
+	return unitsPreset === "uk" || unitsPreset === "american";
+}
 
 export const MAX_PROFILE_PHOTOS = 5;
+export const MAX_PROFILE_TAGS = 10;
+export const MAX_GENDERS = 3;
+export const MAX_TRAVEL_PLANS = 3;
+export const MAX_SPOTIFY_FAVORITES = 5;
+
+/** Media moderation review state, as returned per-item in a profile's `medias` array. */
+export const MEDIA_MODERATION_STATE = {
+	PENDING: 0,
+	APPROVED: 1,
+	REJECTED: 2,
+} as const;
 
 export const profileSchema = z.object({
 	profileId: z.string(),
@@ -8,6 +33,8 @@ export const profileSchema = z.object({
 	aboutMe: z.string().nullable().optional(),
 	age: z.number().nullable().optional(),
 	showAge: z.boolean().optional(),
+	showDistance: z.boolean().optional(),
+	approximateDistance: z.boolean().optional(),
 	height: z.number().nullable().optional(),
 	weight: z.number().nullable().optional(),
 	ethnicity: z.number().nullable().optional(),
@@ -16,6 +43,7 @@ export const profileSchema = z.object({
 	sexualPosition: z.number().nullable().optional(),
 	showTribes: z.boolean().optional(),
 	grindrTribes: z.array(z.number()).optional().default([]),
+	tribesImInto: z.array(z.number()).nullable().optional().default([]),
 	relationshipStatus: z.number().nullable().optional(),
 	lookingFor: z.array(z.number()).optional().default([]),
 	meetAt: z.array(z.number()).optional().default([]),
@@ -33,7 +61,13 @@ export const profileSchema = z.object({
 	isRoaming: z.boolean().optional(),
 	isTeleporting: z.boolean().optional(),
 	medias: z
-		.array(z.object({ mediaHash: z.string().optional() }))
+		.array(
+			z.object({
+				mediaHash: z.string().optional(),
+				state: z.number().nullable().optional(),
+				reason: z.string().nullable().optional(),
+			}),
+		)
 		.optional()
 		.default([]),
 	socialNetworks: z
@@ -55,6 +89,51 @@ export const profileResponseSchema = z.object({
 	profiles: z.array(profileSchema).length(1),
 });
 
+/**
+ * Picks the profile's primary photo hash the same way everywhere it's
+ * needed (grid header avatar, chat header avatar, account switcher) — prefer
+ * the first valid hash in `medias`, falling back to `profileImageMediaHash`
+ * only when `medias` isn't empty (it can lag behind `medias` and still point
+ * at a deleted photo once every photo has been removed).
+ */
+export function getProfilePhotoHash(
+	profile: Pick<z.infer<typeof profileSchema>, "medias" | "profileImageMediaHash"> | null | undefined,
+): string | null {
+	if (!profile) {
+		return null;
+	}
+
+	const medias = profile.medias ?? [];
+
+	const fromMedias = medias
+		.map((item) => item.mediaHash ?? "")
+		.find((hash) => validateMediaHash(hash));
+	if (fromMedias) {
+		return fromMedias;
+	}
+
+	if (
+		medias.length > 0 &&
+		profile.profileImageMediaHash &&
+		validateMediaHash(profile.profileImageMediaHash)
+	) {
+		return profile.profileImageMediaHash;
+	}
+
+	return null;
+}
+
+/**
+ * GET /v4/me/profile wraps the profile in a one-element `profiles` array;
+ * returns the bare profile object (also accepts an unwrapped one).
+ */
+export function unwrapOwnProfile(raw: unknown): Record<string, any> | null {
+	if (raw && typeof raw === "object" && Array.isArray((raw as { profiles?: unknown }).profiles)) {
+		return (raw as { profiles: Record<string, any>[] }).profiles[0] ?? null;
+	}
+	return (raw as Record<string, any> | null) ?? null;
+}
+
 export interface ProfileDraft {
 	displayName: string;
 	aboutMe: string;
@@ -69,6 +148,7 @@ export interface ProfileDraft {
 	sexualPosition: string;
 	showTribes: boolean;
 	grindrTribes: number[];
+	tribesImInto: number[];
 	relationshipStatus: string;
 	lookingFor: number[];
 	meetAt: number[];
@@ -98,6 +178,7 @@ export const emptyDraft: ProfileDraft = {
 	sexualPosition: "",
 	showTribes: false,
 	grindrTribes: [],
+	tribesImInto: [],
 	relationshipStatus: "",
 	lookingFor: [],
 	meetAt: [],
@@ -135,6 +216,30 @@ export function parseDateInput(value: string): number | null {
 	return Number.isFinite(parsed) ? parsed : null;
 }
 
+/** Formats a timestamp as "yyyy-mm" for an <input type="month"> — used where only the month/year matters (e.g. last tested date), not the exact day. */
+export function formatMonthInput(value: number | null | undefined): string {
+	if (!value) {
+		return "";
+	}
+
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) {
+		return "";
+	}
+
+	return date.toISOString().slice(0, 7);
+}
+
+/** Parses an <input type="month"> value ("yyyy-mm"), always resolving to the 1st of that month. */
+export function parseMonthInput(value: string): number | null {
+	if (!value.trim()) {
+		return null;
+	}
+
+	const parsed = Date.parse(`${value}-01T00:00:00.000Z`);
+	return Number.isFinite(parsed) ? parsed : null;
+}
+
 export function normalizeTagList(value: string): string[] {
 	return value
 		.split(",")
@@ -142,22 +247,42 @@ export function normalizeTagList(value: string): string[] {
 		.filter(Boolean);
 }
 
-export async function buildSquareThumbCoords(file: File): Promise<string> {
-	const bitmap = await createImageBitmap(file);
-	const side = Math.min(bitmap.width, bitmap.height);
-	const x1 = (bitmap.width - side) / 2;
-	const y1 = (bitmap.height - side) / 2;
-	const x2 = x1 + side;
-	const y2 = y1 + side;
+/** Adds/removes a tag key (case-insensitively) from the comma-separated draft field, for the tag picker dialog. */
+export function toggleProfileTagText(currentText: string, tag: string): string {
+	const list = normalizeTagList(currentText);
+	const exists = list.some((item) => item.toLowerCase() === tag.toLowerCase());
+	const next = exists
+		? list.filter((item) => item.toLowerCase() !== tag.toLowerCase())
+		: [...list, tag];
+	return next.join(", ");
+}
 
-	bitmap.close();
+export async function buildSquareThumbCoords(file: File): Promise<string> {
+	const { top, left, right, bottom } = await calculateSquareCrop(file);
 
 	// RectF query format is: y2,x1,x2,y1.
-	return `${y2},${x1},${x2},${y1}`;
+	// which corresponds to: bottom, left, right, top
+	return `${bottom},${left},${right},${top}`;
+}
+
+/** A crop as fractions (0–1) of the image's width/height. */
+export type FractionalCrop = { top: number; left: number; right: number; bottom: number };
+
+/**
+ * thumbCoords for a crop picked on the original photo, in pixels of `file` —
+ * the normalized upload, which is usually downscaled from what was shown.
+ */
+export async function buildThumbCoordsFromFraction(file: File, crop: FractionalCrop): Promise<string> {
+	const bitmap = await createImageBitmap(file);
+	const { width, height } = bitmap;
+	bitmap.close();
+	const px = (fraction: number, size: number) => Math.min(size, Math.max(0, Math.round(fraction * size)));
+	return `${px(crop.bottom, height)},${px(crop.left, width)},${px(crop.right, width)},${px(crop.top, height)}`;
 }
 
 export function profileToDraft(
 	profile: z.infer<typeof profileSchema> | null,
+	unitsPreset: UnitsPreset = "world",
 ): ProfileDraft {
 	if (!profile) {
 		return emptyDraft;
@@ -169,14 +294,23 @@ export function profileToDraft(
 		profileTagsText: (profile.profileTags ?? []).join(", "),
 		showAge: profile.showAge ?? true,
 		age: profile.age?.toString() ?? "",
-		height: profile.height?.toString() ?? "",
-		weight: profile.weight?.toString() ?? "",
+		// profile.height is returned by the GET endpoint in cm; the editor input
+		// is labeled (and saved) in cm, or total inches for uk/american presets.
+		height: profile.height != null
+			? String(Math.round(isImperialHeight(unitsPreset) ? cmToInches(profile.height) : profile.height))
+			: "",
+		// profile.weight is returned by the GET endpoint in grams; the editor
+		// input is labeled (and saved) in kg, or lb for the american units preset.
+		weight: profile.weight != null
+			? String(Math.round(unitsPreset === "american" ? gramsToPounds(profile.weight) : gramsToKg(profile.weight)))
+			: "",
 		ethnicity: profile.ethnicity?.toString() ?? "",
 		bodyType: profile.bodyType?.toString() ?? "",
 		showPosition: profile.showPosition ?? false,
 		sexualPosition: profile.sexualPosition?.toString() ?? "",
 		showTribes: profile.showTribes ?? false,
 		grindrTribes: profile.grindrTribes ?? [],
+		tribesImInto: profile.tribesImInto ?? [],
 		relationshipStatus: profile.relationshipStatus?.toString() ?? "",
 		lookingFor: profile.lookingFor ?? [],
 		meetAt: profile.meetAt ?? [],
@@ -184,7 +318,7 @@ export function profileToDraft(
 		genders: profile.genders ?? [],
 		pronouns: profile.pronouns ?? [],
 		hivStatus: profile.hivStatus?.toString() ?? "",
-		lastTestedDate: formatDateInput(profile.lastTestedDate),
+		lastTestedDate: formatMonthInput(profile.lastTestedDate),
 		sexualHealth: profile.sexualHealth ?? [],
 		vaccines: profile.vaccines ?? [],
 		instagram: profile.socialNetworks?.instagram?.userId ?? "",
@@ -200,6 +334,26 @@ export function parseNullableNumber(value: string): number | null {
 
 	const parsed = Number(value);
 	return Number.isFinite(parsed) ? parsed : null;
+}
+
+// The weight input is shown/typed in kg (or lb for the american units preset),
+// but the API reads and writes weight in grams.
+export function parseNullableWeightToGrams(value: string, unitsPreset: UnitsPreset): number | null {
+	const amount = parseNullableNumber(value);
+	if (amount == null) {
+		return null;
+	}
+	return Math.round(unitsPreset === "american" ? poundsToGrams(amount) : kgToGrams(amount));
+}
+
+// The height input is shown/typed in cm (or total inches for the uk/american
+// units presets), but the API reads and writes height in cm.
+export function parseNullableHeightToCm(value: string, unitsPreset: UnitsPreset): number | null {
+	const amount = parseNullableNumber(value);
+	if (amount == null) {
+		return null;
+	}
+	return Math.round(isImperialHeight(unitsPreset) ? inchesToCm(amount) : amount);
 }
 
 export function parseNullableInteger(value: string): number | null {

@@ -5,7 +5,8 @@ node_modules
 /.svelte-kit
 /package
 .env
-.env.*
+.env.prod
+.env.local
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
@@ -14,5 +15,22 @@ src-tauri/certs/*.jks
 secrets
 frontend.tar.gz
 frontend.tar.gz.sig
-src-tauri/gen/
-!src-tauri/gen/android/app/src/main/AndroidManifest.xml
+.ota-surge/
+src-tauri/gen/apple/
+src-tauri/gen/schemas/
+/.build
+
+# exe-manager build output and runtime data (manager.exe/child.exe + instance state)
+/windows-exe
+# Bun is the only package manager (pinned via "packageManager" in package.json);
+# bun.lock is the one lockfile. Keep other managers' lockfiles out.
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# Release builds (ci/build/run.sh)
+/out
+/.bun-cache
+
+# Former local checkout of the server (now its own repository); never track it here
+/server

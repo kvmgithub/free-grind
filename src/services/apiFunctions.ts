@@ -2,26 +2,42 @@ import { createChatService } from "./chatService";
 import type { RestFetcher } from "../types/chat-service";
 import {
 	ApiFunctionError,
-	submitIssueReport,
-	trackUpdateCheck,
-	registerPresence,
 } from "./apiHelpers";
 import { createAlbumMethods } from "./api/albumMethods";
 import { createProfileMethods } from "./api/profileMethods";
 import { createInterestMethods } from "./api/interestMethods";
-import { createAgeVerificationMethods } from "./api/ageVerificationMethods";
-import { createFeedMethods, type RightNowFeedItem } from "./api/feedMethods";
-import { createPresenceMethods } from "./api/presenceMethods";
+import { createFeedMethods } from "./api/feedMethods";
 import { createFavoritesMethods } from "./api/favoritesMethods";
+import { createPhrasesMethods } from "./api/phrasesMethods";
+import { createTagMethods } from "./api/tagMethods";
+import { createVideoCallMethods } from "./api/videoCallMethods";
+import { createLegalMethods } from "./api/legalMethods";
+import { createWarningsMethods } from "./api/warningsMethods";
+import { createExploreHeatmapMethods } from "./api/exploreHeatmapMethods";
+import { createSpotifyMethods } from "./api/spotifyMethods";
+import { createPushSettingsMethods } from "./api/pushSettingsMethods";
+import { createGroupMethods } from "./api/groupMethods";
+import { createReputationMethods } from "./api/reputationMethods";
+import { createCruisingMethods } from "./api/cruisingMethods";
+import { createOwnMapPositionMethods } from "./api/ownMapPositionMethods";
+import type { RightNowFeedItem, RightNowDiscreetFeedItem, RightNowFeedEntry, RightNowCreatePostRequest, RightNowCreatePostMedia, RightNowUpdatePostRequest } from "../types/right-now";
 
 export {
 	ApiFunctionError,
-	submitIssueReport,
-	trackUpdateCheck,
-	registerPresence,
 };
 
-export type { RightNowFeedItem };
+export type { RightNowFeedItem, RightNowDiscreetFeedItem, RightNowFeedEntry, RightNowCreatePostRequest, RightNowCreatePostMedia, RightNowUpdatePostRequest };
+export {
+	NoFreeRightNowPostsError,
+	RightNowDiscreetNotAllowedError,
+	RightNowDiscreetSetupError,
+	RightNowLimitError,
+	RightNowLocationMissingError,
+	RightNowPostAlreadyRunningError,
+	RightNowPostGoneError,
+	RightNowRequestAlreadySentError,
+	RightNowSessionEndedError,
+} from "./api/feedMethods";
 
 export function createApiFunctions(fetchRest: RestFetcher, t: (key: string) => string) {
 	const chatService = createChatService(fetchRest, t);
@@ -31,10 +47,20 @@ export function createApiFunctions(fetchRest: RestFetcher, t: (key: string) => s
 		...createInterestMethods(fetchRest, t),
 		...createAlbumMethods(fetchRest, t),
 		...createProfileMethods(fetchRest, t),
-		...createAgeVerificationMethods(fetchRest, t),
 		...createFeedMethods(fetchRest, t),
-		...createPresenceMethods(),
 		...createFavoritesMethods(fetchRest, t),
+		...createPhrasesMethods(fetchRest),
+		...createTagMethods(fetchRest, t),
+		...createVideoCallMethods(fetchRest, t),
+		...createLegalMethods(fetchRest, t),
+		...createWarningsMethods(fetchRest, t),
+		...createExploreHeatmapMethods(fetchRest, t),
+		...createSpotifyMethods(fetchRest, t),
+		...createPushSettingsMethods(fetchRest, t),
+		...createGroupMethods(fetchRest, t),
+		...createReputationMethods(fetchRest, t),
+		...createCruisingMethods(fetchRest, t),
+		...createOwnMapPositionMethods(fetchRest, t),
 
 		async request(
 			path: string,

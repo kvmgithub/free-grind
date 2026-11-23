@@ -1,43 +1,68 @@
+import { stagingRanges } from "../videoEdit";
+import { invoke } from "@tauri-apps/api/core";
+import { z } from "zod";
+
 import {
 	albumDetailSchema,
 	albumLimitsSchema,
+	albumPosterSchema,
+	albumSharesResponseSchema,
 	albumsResponseSchema,
+	profileAlbumShareStatusSchema,
 	sharedAlbumViewSchema,
 	sharedAlbumsResponseSchema,
 	type Album,
 	type AlbumDetail,
 	type AlbumLimits,
+	type AlbumPoster,
+	type ProfileAlbumShareStatus,
 	type SharedAlbumView,
 	type SharedAlbum,
 } from "../../types/albums";
 import type {
+	AddOwnAlbumContentByIdsInput,
+	CheckProfileAlbumShareInput,
 	CreateOwnAlbumInput,
 	DeleteOwnAlbumContentInput,
 	DeleteOwnAlbumInput,
+	GetAlbumContentProcessingInput,
+	GetAlbumPosterInput,
+	GetAlbumSharesInput,
 	GetSharedAlbumsForProfileInput,
 	OpenSharedAlbumInput,
 	OpenSharedAlbumResult,
+	RemoveAlbumShareInput,
+	RemoveAlbumShareResult,
 	ReorderOwnAlbumContentInput,
 	RenameOwnAlbumInput,
+	UnshareAlbumInput,
 	UploadOwnAlbumContentInput,
+	UploadOwnAlbumVideoInput,
 	GetSharedAlbumsInput,
 } from "../../types/api-functions";
 import type { RestFetcher } from "../../types/chat-service";
 import { ApiFunctionError, assertSuccess, parseJsonSafe } from "../apiHelpers";
+import { notifyOwnAlbumsChanged, rememberOwnAlbumDetail, rememberOwnAlbumList } from "../ownAlbumsChanged";
+import { MAX_CHAT_MEDIA_BYTES, uploadStagedVideo } from "../stagedVideoUpload";
+import { assertUploadFits, stagedEdit, uploadProgressReporter } from "../videoReencode";
+import { expiringAllowancePath, expiringAllowanceSchema, type ExpiringAllowance, type ExpiringMediaKind } from "../expiringAllowance";
 
-export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string) => string) {
+export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string, options?: { defaultValue?: string }) => string) {
 	return {
 		async getOwnAlbums(): Promise<Album[]> {
 			const response = await fetchRest("/v1/albums");
 			await assertSuccess(response, t("api.errors.load_albums"));
 			const parsed = albumsResponseSchema.parse(await parseJsonSafe(response));
+			rememberOwnAlbumList(parsed.albums);
 			return parsed.albums;
 		},
 
 		async getOwnAlbumDetails(albumId: string | number): Promise<AlbumDetail> {
 			const response = await fetchRest(`/v2/albums/${albumId}`);
 			await assertSuccess(response, t("api.errors.load_album_details"));
-			return albumDetailSchema.parse(await parseJsonSafe(response));
+			const detail = albumDetailSchema.parse(await parseJsonSafe(response));
+			rememberOwnAlbumDetail(albumId, detail);
+			return detail;
 		},
 
 		async getOwnAlbumStorage(): Promise<AlbumLimits> {
@@ -65,6 +90,7 @@ export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string) => s
 				throw new ApiFunctionError(t("api.errors.invalid_album_response"), response.status, payload);
 			}
 
+			notifyOwnAlbumsChanged();
 			return { albumId };
 		},
 
@@ -74,6 +100,7 @@ export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string) => s
 				body: { albumName: input.albumName },
 			});
 			await assertSuccess(response, t("api.errors.rename_album"));
+			notifyOwnAlbumsChanged();
 			return { ok: true };
 		},
 
@@ -82,13 +109,19 @@ export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string) => s
 				method: "DELETE",
 			});
 			await assertSuccess(response, t("api.errors.delete_album"));
+			notifyOwnAlbumsChanged();
 			return { ok: true };
 		},
 
 		async uploadOwnAlbumContent(
 			input: UploadOwnAlbumContentInput,
 		): Promise<{ contentId: number }> {
-			const response = await fetchRest(`/v1/albums/${input.albumId}/content`, {
+			const query = new URLSearchParams();
+			if (input.width != null) query.set("width", String(input.width));
+			if (input.height != null) query.set("height", String(input.height));
+			query.set("isFresh", String(input.isFresh));
+			const url = `/v1/albums/${input.albumId}/content?${query}`;
+			const response = await fetchRest(url, {
 				method: "POST",
 				rawBody: input.multipart.body,
 				contentType: input.multipart.contentType,
@@ -111,7 +144,50 @@ export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string) => s
 				);
 			}
 
+			notifyOwnAlbumsChanged();
 			return { contentId };
+		},
+
+		/**
+		 * Streams a video from disk into the album (see stagedVideoUpload), cut
+		 * and turned upright as `edit` says (see videoEdit); its width and
+		 * height come from the file itself, Rust-side.
+		 */
+		async uploadOwnAlbumVideo(input: UploadOwnAlbumVideoInput): Promise<{ contentId: number } | null> {
+			await assertUploadFits(
+				input.file,
+				input.edit,
+				Math.min(MAX_CHAT_MEDIA_BYTES, input.maxBodySize ?? MAX_CHAT_MEDIA_BYTES),
+				t("chat.attachments.too_large"),
+			);
+			const report = uploadProgressReporter(input.edit, input.onProgress);
+			const payload = await uploadStagedVideo(
+				input.file,
+				async (stagedId) =>
+					invoke("upload_staged_album_video", {
+						stagedId,
+						albumId: Number(input.albumId),
+						isFresh: input.isFresh,
+						maxBodySize: input.maxBodySize ?? null,
+						edit: await stagedEdit(stagedId, input.file, input.edit, {
+							onLandscapeKept: input.onLandscapeKept,
+							notSendableMessage: t("chat.errors.video_not_sendable"),
+							onConverting: (fraction) => report("converting", fraction),
+						}),
+						onProgress: report.channel(),
+					}),
+				t("api.errors.upload_content"),
+				t,
+				(fraction) => report("preparing", fraction),
+				await stagingRanges(input.file, input.edit),
+			);
+			if (payload === null) return null;
+			const parsed = z.object({ contentId: z.coerce.number().int() }).safeParse(payload);
+			if (!parsed.success) {
+				throw new ApiFunctionError(t("api.errors.invalid_upload_response"), 0, payload);
+			}
+			notifyOwnAlbumsChanged();
+			return { contentId: parsed.data.contentId };
 		},
 
 		async reorderOwnAlbumContent(
@@ -125,6 +201,27 @@ export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string) => s
 				},
 			);
 			await assertSuccess(response, t("api.errors.reorder_content"));
+			notifyOwnAlbumsChanged();
+			return { ok: true };
+		},
+
+		async addOwnAlbumContentByIds(
+			input: AddOwnAlbumContentByIdsInput,
+		): Promise<{ ok: true }> {
+			const response = await fetchRest(
+				`/v1/albums/${input.albumId}/content/chat/list-by-id?isFresh=${input.isFresh}`,
+				{
+					method: "POST",
+					body: { ids: input.ids },
+				},
+			);
+			await assertSuccess(
+				response,
+				t("api.errors.add_album_content_by_ids", {
+					defaultValue: "Failed to add media to album.",
+				}),
+			);
+			notifyOwnAlbumsChanged();
 			return { ok: true };
 		},
 
@@ -138,7 +235,16 @@ export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string) => s
 				},
 			);
 			await assertSuccess(response, t("api.errors.delete_content"));
+			notifyOwnAlbumsChanged();
 			return { ok: true };
+		},
+
+		async getAlbumPoster(input: GetAlbumPosterInput): Promise<AlbumPoster> {
+			const response = await fetchRest(
+				`/v1/albums/${input.albumId}/content/${input.contentId}/poster`,
+			);
+			await assertSuccess(response, t("api.errors.load_album_poster", { defaultValue: "Failed to load album poster." }));
+			return albumPosterSchema.parse(await parseJsonSafe(response));
 		},
 
 		async getSharedAlbums(
@@ -160,10 +266,24 @@ export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string) => s
 				return [];
 			}
 			await assertSuccess(response, t("api.errors.load_shared_albums_profile"));
-			const payload = sharedAlbumsResponseSchema.parse(
-				await parseJsonSafe(response),
-			);
+			const payload = sharedAlbumsResponseSchema.parse(await parseJsonSafe(response));
 			return payload.albums;
+		},
+
+		async checkProfileAlbumShare(
+			input: CheckProfileAlbumShareInput,
+		): Promise<ProfileAlbumShareStatus> {
+			const response = await fetchRest("/v2/albums/shares", {
+				method: "POST",
+				body: { profileId: String(input.profileId) },
+			});
+			await assertSuccess(
+				response,
+				t("api.errors.check_profile_album_share", {
+					defaultValue: "Failed to check album status.",
+				}),
+			);
+			return profileAlbumShareStatusSchema.parse(await parseJsonSafe(response));
 		},
 
 		async openSharedAlbum(
@@ -177,6 +297,66 @@ export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string) => s
 				await assertSuccess(response, t("api.errors.open_shared_album"));
 			}
 			return { status: response.status };
+		},
+
+		// Records one view of a shared album's item (archive mode off, see
+		// useAlbumContentViewCounter). Best effort: the response carries nothing
+		// the viewer needs, so failures are only logged by the caller.
+		async viewAlbumContent(albumId: number, contentId: number): Promise<void> {
+			const response = await fetchRest(`/v1/albums/${albumId}/view/content/${contentId}`, {
+				method: "POST",
+			});
+			await assertSuccess(response, t("api.errors.open_shared_album"));
+		},
+
+		// Recipient-initiated removal of *our own* share of someone else's
+		// album — used by the "delete" action on the shared-albums page.
+		// 403 is tolerated the same way openSharedAlbum does: it's the observed
+		// response for a share that's already gone, not a real failure, and the
+		// caller cleans up the local cache regardless of which status comes back.
+		async removeAlbumShare(input: RemoveAlbumShareInput): Promise<RemoveAlbumShareResult> {
+			const response = await fetchRest(`/v1/albums/${input.albumId}/shares/remove`, {
+				method: "PUT",
+			});
+			if (
+				response.status !== 403 &&
+				(response.status < 200 || response.status >= 300)
+			) {
+				await assertSuccess(response, t("api.errors.remove_album_share"));
+			}
+			return { status: response.status };
+		},
+
+		async getAlbumShares(input: GetAlbumSharesInput): Promise<number[]> {
+			const response = await fetchRest(`/v1/albums/${input.albumId}/shares`);
+			await assertSuccess(response, t("api.errors.load_album_shares"));
+			const payload = albumSharesResponseSchema.parse(await parseJsonSafe(response));
+			return payload.profileIds;
+		},
+
+		async unshareAlbum(input: UnshareAlbumInput): Promise<{ ok: true }> {
+			const response = await fetchRest(`/v1/albums/${input.albumId}/unshares`, {
+				method: "PUT",
+				body: { profiles: input.profiles },
+			});
+			await assertSuccess(response, t("api.errors.unshare_album"));
+			return { ok: true };
+		},
+
+		/** GET /v4/{pics,videos,albums}/expiring/status, see expiringAllowance. */
+		async getExpiringAllowance(kind: ExpiringMediaKind): Promise<ExpiringAllowance> {
+			const response = await fetchRest(expiringAllowancePath(kind));
+			await assertSuccess(response, t("api.errors.load_expiring_allowance", { defaultValue: "Couldn't load the expiring media allowance" }));
+			return expiringAllowanceSchema.parse(await parseJsonSafe(response));
+		},
+
+		async getAlbumContentProcessing(input: GetAlbumContentProcessingInput): Promise<boolean> {
+			const response = await fetchRest(`/v1/albums/${input.albumId}/content/${input.contentId}/processing`);
+			await assertSuccess(response, t("api.errors.load_album_processing"));
+			const payload = await parseJsonSafe(response);
+			return typeof payload === "object" && payload !== null && "processing" in payload
+				? Boolean((payload as { processing: unknown }).processing)
+				: false;
 		},
 	};
 }

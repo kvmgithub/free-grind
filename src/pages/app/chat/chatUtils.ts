@@ -1,14 +1,18 @@
 import i18n from "../../../i18n";
-import { useEffect, useState } from "react";
 import type { ConversationEntry, InboxFilters, Message } from "../../../types/messages";
-import type { UiMessage } from "../../../types/chat-page";
+import type { InboxVisibilityFilter, UiMessage } from "../../../types/chat-page";
+import type { MediaKind } from "../../../types/chat-db";
 import {
-	getProfileImageUrl,
 	getThumbImageUrl,
 	validateMediaHash,
 } from "../../../utils/media";
-import blankProfileImage from "../../../images/blank-profile.png";
-import { appLog } from "../../../utils/logger";
+import { formatRelativeTime } from "../../../utils/relativeTime";
+import { hourCycleOptions } from "../../../utils/timeFormat";
+import { ONLINE_ENDING_SOON_MINUTES } from "../gridpage/utils";
+import { sanitizeUploadFile } from "../../../services/uploadSanitize";
+import { isFeatureOn } from "../../../services/assignmentsStore";
+import { type ChatSendTarget, groupIdOfConversation, isGroupConversationId } from "../../../utils/groupChat";
+import { getGroupEventLabel } from "./groups/groupLabels";
 
 export type ChatFiltersDraft = {
 	unreadOnly: boolean;
@@ -18,6 +22,29 @@ export type ChatFiltersDraft = {
 	onlineNowOnly: boolean;
 	distanceMeters: string;
 	positions: number[];
+	// Not part of InboxFilters (they never touch the server request) — these
+	// three ride along in the same draft/apply/clear cycle purely so the
+	// filter overlay can offer one unified "apply"/"clear all" experience.
+	pinnedFilter: InboxVisibilityFilter;
+	archivedFilter: InboxVisibilityFilter;
+	hiddenFilter: InboxVisibilityFilter;
+	// Also local-only — there's no server concept of "last message isn't ours
+	// and we haven't replied yet", so this is re-checked against each cached
+	// conversation's preview.senderId, same as pinned/archived/hidden.
+	needsReplyOnly: boolean;
+};
+
+export type ChatFiltersVisibilityState = {
+	pinnedFilter: InboxVisibilityFilter;
+	archivedFilter: InboxVisibilityFilter;
+	hiddenFilter: InboxVisibilityFilter;
+};
+
+export const defaultChatFiltersVisibilityState: ChatFiltersVisibilityState = {
+	pinnedFilter: "all",
+	archivedFilter: "all",
+	// Hidden chats default to actually being hidden — that's the point of the feature.
+	hiddenFilter: "hide",
 };
 
 export type TranslateFn = (key: string, options?: Record<string, unknown>) => string;
@@ -26,7 +53,33 @@ export function isNumberArray(value: unknown): value is number[] {
 	return Array.isArray(value) && value.every((item) => typeof item === "number");
 }
 
-export function buildChatFiltersDraft(filters: InboxFilters): ChatFiltersDraft {
+// How long a drawer item counts as "new" for sorting purposes. Within this
+// window it's kept above everything else regardless of send count — otherwise
+// a just-added photo (sendCount 0) would sit below every item ever sent even
+// once, however long ago. After the window it falls back to pure frequency.
+const NEW_DRAWER_MEDIA_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** Sorts drawer media most-used first, but keeps recently added items pinned
+ * above the frequency-ranked ones for a grace period so they're actually
+ * visible right after being added instead of buried under old, low-use media. */
+export function sortDrawerMediaByUsage<T extends { sendCount: number; createdTs: number }>(
+	items: T[],
+	now = Date.now(),
+): T[] {
+	return [...items].sort((a, b) => {
+		const aIsNew = now - a.createdTs < NEW_DRAWER_MEDIA_WINDOW_MS;
+		const bIsNew = now - b.createdTs < NEW_DRAWER_MEDIA_WINDOW_MS;
+		if (aIsNew !== bIsNew) return aIsNew ? -1 : 1;
+		if (aIsNew) return b.createdTs - a.createdTs;
+		return b.sendCount - a.sendCount || b.createdTs - a.createdTs;
+	});
+}
+
+export function buildChatFiltersDraft(
+	filters: InboxFilters,
+	visibility: ChatFiltersVisibilityState = defaultChatFiltersVisibilityState,
+	needsReplyOnly = false,
+): ChatFiltersDraft {
 	return {
 		unreadOnly: filters.unreadOnly === true,
 		chemistryOnly: filters.chemistryOnly === true,
@@ -38,6 +91,32 @@ export function buildChatFiltersDraft(filters: InboxFilters): ChatFiltersDraft {
 				? String(filters.distanceMeters)
 				: "",
 		positions: filters.positions ?? [],
+		pinnedFilter: visibility.pinnedFilter,
+		archivedFilter: visibility.archivedFilter,
+		hiddenFilter: visibility.hiddenFilter,
+		needsReplyOnly,
+	};
+}
+
+export function draftToFilters(draft: ChatFiltersDraft): InboxFilters {
+	const distanceMeters =
+		typeof draft.distanceMeters === "string" && draft.distanceMeters.trim() !== ""
+			? Number(draft.distanceMeters)
+			: undefined;
+	return {
+		unreadOnly: draft.unreadOnly || undefined,
+		chemistryOnly: draft.chemistryOnly || undefined,
+		favoritesOnly: draft.favoritesOnly || undefined,
+		rightNowOnly: draft.rightNowOnly || undefined,
+		onlineNowOnly: draft.onlineNowOnly || undefined,
+		positions:
+			isNumberArray(draft.positions) && draft.positions.length > 0
+				? draft.positions
+				: undefined,
+		distanceMeters:
+			typeof distanceMeters === "number" && Number.isFinite(distanceMeters)
+				? distanceMeters
+				: undefined,
 	};
 }
 
@@ -74,27 +153,38 @@ export function parseChatFiltersFromLocationState(state: unknown): InboxFilters 
 	};
 }
 
+/** Normalizes the photo/video first (metadata stripped, see uploadSanitize). */
 export async function buildBinaryUpload(file: File): Promise<{
 	body: Uint8Array;
 	contentType: string;
 }> {
-	const fileBytes = new Uint8Array(await file.arrayBuffer());
+	const sanitized = await sanitizeUploadFile(file);
 	return {
-		body: fileBytes,
-		contentType: file.type || "application/octet-stream",
+		body: new Uint8Array(await sanitized.arrayBuffer()),
+		contentType: sanitized.type,
 	};
 }
 
-const relativeTimeFormatterCache = new Map<string, Intl.RelativeTimeFormat>();
-const dateTimeFormatterCache = new Map<string, Intl.DateTimeFormat>();
-
-function getRelativeTimeFormatter(lng: string, options: Intl.RelativeTimeFormatOptions) {
-	const key = `${lng}-${JSON.stringify(options)}`;
-	if (!relativeTimeFormatterCache.has(key)) {
-		relativeTimeFormatterCache.set(key, new Intl.RelativeTimeFormat(lng, options));
-	}
-	return relativeTimeFormatterCache.get(key)!;
+/**
+ * Milliseconds, as the upload `length` expects, or null when the webview
+ * can't read the duration. Streamed uploads read the length from the file
+ * itself and use this only when the file has none (src-tauri/src/upload/video.rs).
+ */
+export function getVideoDurationMs(file: File): Promise<number | null> {
+	return new Promise<number | null>((resolve) => {
+		const vid = document.createElement("video");
+		vid.preload = "metadata";
+		vid.onloadedmetadata = () => {
+			const { duration } = vid;
+			resolve(Number.isFinite(duration) && duration > 0 ? Math.round(duration * 1000) : null);
+			URL.revokeObjectURL(vid.src);
+		};
+		vid.onerror = () => { resolve(null); URL.revokeObjectURL(vid.src); };
+		vid.src = URL.createObjectURL(file);
+	});
 }
+
+const dateTimeFormatterCache = new Map<string, Intl.DateTimeFormat>();
 
 function getDateTimeFormatter(lng: string, options: Intl.DateTimeFormatOptions) {
 	const key = `${lng}-${JSON.stringify(options)}`;
@@ -106,36 +196,8 @@ function getDateTimeFormatter(lng: string, options: Intl.DateTimeFormatOptions) 
 
 export function formatConversationTime(
 	timestamp: number | null | undefined,
-	locale?: string,
 ): string {
-	if (!timestamp) {
-		return "";
-	}
-
-	const lang = locale || i18n.language;
-	const inboxRelativeTime = getRelativeTimeFormatter(lang, {
-		numeric: "auto",
-	});
-
-	const now = Date.now();
-	const diffMs = timestamp - now;
-	const minuteMs = 60 * 1000;
-	const hourMs = 60 * minuteMs;
-	const dayMs = 24 * hourMs;
-
-	if (Math.abs(diffMs) < hourMs) {
-		return inboxRelativeTime.format(Math.round(diffMs / minuteMs), "minute");
-	}
-
-	if (Math.abs(diffMs) < dayMs) {
-		return inboxRelativeTime.format(Math.round(diffMs / hourMs), "hour");
-	}
-
-	if (Math.abs(diffMs) < dayMs * 7) {
-		return inboxRelativeTime.format(Math.round(diffMs / dayMs), "day");
-	}
-
-	return new Date(timestamp).toLocaleDateString();
+	return formatRelativeTime(timestamp);
 }
 
 export function formatMessageTime(
@@ -158,7 +220,80 @@ export function formatMessageTime(
 	return new Date(timestamp).toLocaleTimeString([], {
 		hour: "2-digit",
 		minute: "2-digit",
+		...hourCycleOptions(),
 	});
+}
+
+export function formatFullDateTime(timestamp: number): string {
+	return new Date(timestamp).toLocaleString([], {
+		dateStyle: "medium",
+		timeStyle: "short",
+		...hourCycleOptions(),
+	});
+}
+
+/** Relative time for the "taken on Grindr" badge: now, x mins ago, 1 hour
+ * ago, x hours ago, x days ago, last week, then month and year (August 2026). */
+export function formatTakenOnGrindrTime(
+	timestamp: number,
+	now: number,
+	t: TranslateFn,
+): string {
+	const diffMs = Math.max(0, now - timestamp);
+	const minuteMs = 60 * 1000;
+	const hourMs = 60 * minuteMs;
+	const dayMs = 24 * hourMs;
+
+	if (diffMs < minuteMs) {
+		return t("chat.time.now");
+	}
+	if (diffMs < hourMs) {
+		const mins = Math.floor(diffMs / minuteMs);
+		return mins === 1 ? t("chat.time.one_min_ago") : t("chat.time.mins_ago", { count: mins });
+	}
+	if (diffMs < dayMs) {
+		const hours = Math.floor(diffMs / hourMs);
+		return hours === 1
+			? t("chat.time.one_hour_ago", { defaultValue: "1 hour ago" })
+			: t("chat.time.hours_ago_long", { count: hours, defaultValue: "{{count}} hours ago" });
+	}
+	if (diffMs < 7 * dayMs) {
+		const days = Math.floor(diffMs / dayMs);
+		return days === 1
+			? t("chat.time.one_day_ago", { defaultValue: "1 day ago" })
+			: t("chat.time.days_ago", { count: days, defaultValue: "{{count}} days ago" });
+	}
+	if (diffMs < 14 * dayMs) {
+		return t("chat.time.last_week");
+	}
+
+	const formatter = getDateTimeFormatter(i18n.language, {
+		month: "long",
+		year: "numeric",
+	});
+	return formatter.format(new Date(timestamp));
+}
+
+/** Same steps as formatTakenOnGrindrTime, as a sentence: "Taken just now",
+ * "Taken 2 hours ago", "Taken last week", "Taken in August 2026". */
+export function formatTakenOnGrindrSentence(
+	timestamp: number,
+	now: number,
+	t: TranslateFn,
+): string {
+	const diffMs = Math.max(0, now - timestamp);
+	const dayMs = 24 * 60 * 60 * 1000;
+	if (diffMs < 60 * 1000) {
+		return t("chat.time.taken_now", { defaultValue: "Taken just now" });
+	}
+	const time = formatTakenOnGrindrTime(timestamp, now, t);
+	if (diffMs < 7 * dayMs) {
+		return t("chat.time.taken_ago", { time, defaultValue: "Taken {{time}}" });
+	}
+	if (diffMs < 14 * dayMs) {
+		return t("chat.time.taken_last_week", { defaultValue: "Taken last week" });
+	}
+	return t("chat.time.taken_in", { time, defaultValue: "Taken in {{time}}" });
 }
 
 export function formatDateTime24(timestamp: number): string {
@@ -217,20 +352,81 @@ export function formatDateHeader(
 	return formatter.format(msgDate);
 }
 
-export function getPreviewText(conversation: ConversationEntry, t: TranslateFn): string {
+/**
+ * Whether a conversation is awaiting our reply: the last message is from the
+ * other participant and we haven't sent anything since. Distinct from
+ * unreadCount, which only tracks whether we've seen the message, not whether
+ * we've answered it.
+ */
+export function conversationNeedsReply(
+	conversation: ConversationEntry,
+	userId: number | null,
+): boolean {
+	const senderId = conversation.data.preview?.senderId;
+	return senderId != null && userId != null && Number(senderId) !== Number(userId);
+}
+
+/**
+ * Inbox preview line. Pass `userId` so a last message from the other person
+ * reads the same as its notification ("Sent you a picture", via
+ * getIncomingMessageLabel); our own last message keeps the neutral wording,
+ * since "Sent you…" would be wrong there.
+ */
+export function getPreviewText(conversation: ConversationEntry, t: TranslateFn, userId?: number | null): string {
+	const text = getPreviewTextBase(conversation, t, userId);
+	const preview = conversation.data.preview;
+	// Groups: "<sender>: <preview>" for other members' messages.
+	if (!preview || !isGroupConversation(conversation) || preview.type === "GroupEvent" || conversation.data.group?.invited) return text;
+	if (preview.senderId == null || userId == null || Number(preview.senderId) === Number(userId)) return text;
+	const sender = conversation.data.participants.find((p) => p.profileId === Number(preview.senderId));
+	const name = sender?.displayName?.trim();
+	return name ? `${name}: ${text}` : text;
+}
+
+function getPreviewTextBase(conversation: ConversationEntry, t: TranslateFn, userId?: number | null): string {
 	const preview = conversation.data.preview;
 	if (!preview) {
 		return t("chat.no_messages_yet");
 	}
+	// Local line written when we left or were removed (the chat is archived then).
+	if (preview.type === "SystemGroupLeft") return t("group_chat.system_left", { defaultValue: "You left the group" });
+	if (preview.type === "SystemGroupRemoved") return t("group_chat.system_removed", { defaultValue: "You're no longer in this group" });
+	// Group membership line: the same text as in the chat ("You joined", "Alex left", …).
+	// Checked before `text`: older local previews stored a generic label there.
+	if (preview.type === "GroupEvent") {
+		if (!preview.groupEvent) return t("group_chat.preview.event", { defaultValue: "Group updated" });
+		const names = new Map(conversation.data.participants.map((p) => [p.profileId, p.displayName?.trim() || null]));
+		const nameOf = (id: number | null | undefined) =>
+			id == null
+				? t("common.unknown_display_name")
+				: userId != null && Number(id) === Number(userId)
+					? t("group_chat.you", { defaultValue: "You" })
+					: names.get(Number(id)) || t("group_chat.former_member", { defaultValue: "Someone" });
+		return getGroupEventLabel({ body: preview.groupEvent, senderId: Number(preview.senderId ?? 0) }, t, nameOf);
+	}
 
 	if (preview.text?.trim()) {
 		return preview.text;
+	}
+	if (preview.type === "GroupEvent") {
+		return t("group_chat.preview.event", { defaultValue: "Group updated" });
+	}
+
+	const isIncoming =
+		preview.senderId != null && userId != null && Number(preview.senderId) !== Number(userId);
+	if (isIncoming) {
+		const label = getIncomingMessageLabel(preview.type, t);
+		if (label) return label;
 	}
 
 	switch (preview.type) {
 		case "Image":
 		case "ExpiringImage":
 			return t("chat.preview.sent_image");
+		case "Giphy":
+			return t("chat.preview.sent_gif");
+		case "Gaymoji":
+			return t("chat.preview.sent_gaymoji");
 		case "Album":
 		case "ExpiringAlbum":
 		case "ExpiringAlbumV2":
@@ -240,15 +436,29 @@ export function getPreviewText(conversation: ConversationEntry, t: TranslateFn):
 		case "AlbumContentReaction":
 			return t("chat.preview.reacted_album_content");
 		case "Video":
+		case "PrivateVideo":
+		case "NonExpiringVideo":
 			return t("chat.preview.sent_video");
 		case "Location":
 			return t("chat.preview.sent_location");
+		case "ProfileLink":
+			return t("chat.preview.shared_profile");
+		case "ProfileLinkRequest":
+			return t("profile_network.chat.preview_request");
+		case "ProfileLinkEvent":
+			return t("profile_network.chat.preview_accepted");
+		case "RightNowRequest":
+		case "RightNowRequestIncoming":
+			return t("chat.preview.right_now_request", { defaultValue: "Right Now request" });
+		case "VideoCall":
+			return t("chat.preview.video_call");
 		default:
 			return t("chat.preview.sent_message");
 	}
 }
 
 export function getMessagePreviewLabel(message: Message, t: TranslateFn): string {
+	if (message.type === "GroupEvent") return t("group_chat.preview.event", { defaultValue: "Group updated" });
 	if (
 		typeof (message.body as Record<string, unknown> | null)?.text === "string"
 	) {
@@ -259,6 +469,10 @@ export function getMessagePreviewLabel(message: Message, t: TranslateFn): string
 		case "Image":
 		case "ExpiringImage":
 			return t("chat.preview.sent_image");
+		case "Giphy":
+			return t("chat.preview.sent_gif");
+		case "Gaymoji":
+			return t("chat.preview.sent_gaymoji");
 		case "Album":
 		case "ExpiringAlbum":
 		case "ExpiringAlbumV2":
@@ -268,12 +482,240 @@ export function getMessagePreviewLabel(message: Message, t: TranslateFn): string
 		case "AlbumContentReaction":
 			return t("chat.preview.reacted_album_content");
 		case "Video":
+		case "PrivateVideo":
+		case "NonExpiringVideo":
 			return t("chat.preview.sent_video");
 		case "Location":
 			return t("chat.preview.sent_location");
+		case "ProfileLink":
+			return t("chat.preview.shared_profile");
+		case "ProfileLinkRequest":
+			return t("profile_network.chat.preview_request");
+		case "ProfileLinkEvent":
+			return t("profile_network.chat.preview_accepted");
+		case "RightNowRequest":
+		case "RightNowRequestIncoming":
+			return t("chat.preview.right_now_request", { defaultValue: "Right Now request" });
+		case "VideoCall":
+			return getVideoCallStatusLabel(message, t);
 		default:
 			return t("chat.preview.sent_message");
 	}
+}
+
+// Media types' notification wording (the 26.21 app's push texts, shared with
+// the native FCM pipeline via push_notifications.*).
+const NOTIFICATION_BODY_KEYS: Record<string, string> = {
+	Image: "push_notifications.chat_image_notification_body",
+	ExpiringImage: "push_notifications.chat_expiring_image_notification_body",
+	Giphy: "push_notifications.chat_gif_notification_body",
+	Gaymoji: "push_notifications.chat_gaymoji_notification_body",
+	Location: "push_notifications.chat_location_notification_body",
+	Audio: "push_notifications.chat_audio_notification_body",
+	Video: "push_notifications.chat_video_notification_body",
+	PrivateVideo: "push_notifications.chat_video_notification_body",
+	NonExpiringVideo: "push_notifications.chat_video_notification_body",
+	Album: "push_notifications.chat_album_notification_body",
+	ExpiringAlbum: "push_notifications.chat_album_notification_body",
+	ExpiringAlbumV2: "push_notifications.chat_album_notification_body",
+	AlbumContentReaction: "push_notifications.chat_album_content_reaction_notification_body",
+	// Not a 26.21 push text: our server's own key for shared profiles (see profileShare).
+	ProfileLink: "push_notifications.chat_profile_link_notification_body",
+	// Ours (flag profile-reputation): link requests and their confirmation.
+	ProfileLinkRequest: "push_notifications.chat_profile_link_request_notification_body",
+	ProfileLinkEvent: "push_notifications.chat_profile_link_accepted_notification_body",
+};
+
+// Types that keep their own label even when incoming: the native push has
+// no wording for them, and its generic "Sent you a message" would hide what
+// actually happened.
+const INCOMING_OWN_LABEL_TYPES = new Set(["VideoCall", "RightNowRequest", "RightNowRequestIncoming"]);
+
+/**
+ * Wording for a text-less message *from the other person*, matching what the
+ * native Android notification shows for it (NotificationStrings /
+ * FreeGrindFirebaseMessagingService): the media text, or "Sent you a
+ * message" for anything without one. Null for types that keep their regular
+ * preview label (INCOMING_OWN_LABEL_TYPES). Shared by the in-app banner and
+ * the inbox preview so all three read the same.
+ */
+export function getIncomingMessageLabel(type: string | null | undefined, t: TranslateFn): string | null {
+	const key = type ? NOTIFICATION_BODY_KEYS[type] : undefined;
+	if (key) return t(key);
+	if (type && INCOMING_OWN_LABEL_TYPES.has(type)) return null;
+	return t("push_notifications.generic_message");
+}
+
+export function getNotificationBodyLabel(message: Message, t: TranslateFn): string {
+	const text = (message.body as Record<string, unknown> | null)?.text;
+	if (typeof text === "string" && text.trim()) return text;
+	return getIncomingMessageLabel(message.type, t) ?? getMessagePreviewLabel(message, t);
+}
+
+// Normalizes the various casings/spellings seen in real traffic for
+// VideoCallMessageBody.result (e.g. "Busy" vs "BUSY", "No_Answer" vs
+// "UNANSWERED") into one of a fixed set of outcome keys under
+// chat.video_call_status.*.
+const VIDEO_CALL_RESULT_KEYS: Record<string, string> = {
+	SUCCESSFUL: "successful",
+	BUSY: "busy",
+	CANCELLED: "cancelled",
+	DECLINED: "declined",
+	MISSED: "missed",
+	AB_UNSUPPORTED: "unsupported",
+	NO_ANSWER: "no_answer",
+	UNANSWERED: "no_answer",
+	LITE_UNSUPPORT: "unsupported",
+};
+
+export function formatCallDuration(totalSeconds: number): string {
+	const clamped = Number.isFinite(totalSeconds) && totalSeconds > 0 ? totalSeconds : 0;
+	const m = Math.floor(clamped / 60);
+	const s = Math.floor(clamped % 60);
+	return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+// Body shape per VideoCallMessageBody (WIP, status-only): { result, videoCallDuration }.
+export function getVideoCallStatusLabel(message: Message, t: TranslateFn): string {
+	const body = message.body as Record<string, unknown> | null;
+	const rawResult = typeof body?.result === "string" ? body.result : "";
+	const duration = typeof body?.videoCallDuration === "number" ? body.videoCallDuration : 0;
+	const normalized = rawResult.toUpperCase().replace(/[^A-Z]/g, "_");
+	const outcome = VIDEO_CALL_RESULT_KEYS[normalized] ?? (duration > 0 ? "successful" : "generic");
+	const label = t(`chat.video_call_status.${outcome}`);
+	return outcome === "successful" && duration > 0 ? `${label} · ${formatCallDuration(duration)}` : label;
+}
+
+// Types getPreviewText/getMessagePreviewLabel can render a specific label
+// for. Anything else with no text falls through to the generic "Sent a
+// message" — which we'd rather replace with the real last message when we
+// have local history for it.
+const SELF_EXPLANATORY_PREVIEW_TYPES = new Set([
+	"Image",
+	"ExpiringImage",
+	"Giphy",
+	"Gaymoji",
+	"Album",
+	"ExpiringAlbum",
+	"ExpiringAlbumV2",
+	"Audio",
+	"AlbumContentReaction",
+	"Video",
+	"PrivateVideo",
+	"NonExpiringVideo",
+	"Location",
+	"ProfileLink",
+	"ProfileLinkRequest",
+	"ProfileLinkEvent",
+	"RightNowRequestIncoming",
+	// Local group lines ("You left the group"): described by type alone.
+	"SystemGroupLeft",
+	"SystemGroupRemoved",
+]);
+
+/**
+ * Whether a conversation's preview is worth showing as-is, or should be
+ * replaced with one derived from local history instead — covers both a
+ * missing preview (e.g. last message was unsent server-side) and a present
+ * but textless, unrecognized-type preview that would otherwise render as a
+ * generic "Sent a message".
+ */
+export function isPreviewUnhelpful(
+	preview: ConversationEntry["data"]["preview"],
+): boolean {
+	if (!preview) {
+		return true;
+	}
+	if (preview.text?.trim()) {
+		return false;
+	}
+	return !preview.type || !SELF_EXPLANATORY_PREVIEW_TYPES.has(preview.type);
+}
+
+/**
+ * Builds an inbox-preview object from an actual message, for when the live
+ * API's own preview is unusable (e.g. null — seen when the last message was
+ * unsent server-side, even though earlier history exists). Used as a local
+ * fallback so the inbox row shows the last real message instead of "no
+ * messages yet" on a conversation that clearly has history.
+ */
+/**
+ * The `text` to store on a locally built inbox preview: only the message's own
+ * text (or a label that depends on the message body, like a call's outcome).
+ * Media types stay null so getPreviewText derives their label from the type,
+ * the same way it does for the server's preview — storing our generic "Sent an
+ * image" here would override the incoming wording ("Sent you an expiring
+ * image") once the chat loads.
+ */
+export function getStoredPreviewText(message: Message, t: TranslateFn): string | null {
+	if (message.type === "GroupEvent") return null;
+	const text = (message.body as Record<string, unknown> | null)?.text;
+	if (typeof text === "string") return text;
+	if (message.type === "VideoCall") return getVideoCallStatusLabel(message, t);
+	return null;
+}
+
+export function buildPreviewFromMessage(
+	message: Message,
+	t: TranslateFn,
+): NonNullable<ConversationEntry["data"]["preview"]> {
+	return {
+		conversationId: { value: message.conversationId },
+		messageId: message.messageId,
+		senderId: message.senderId,
+		type: message.type,
+		chat1Type: message.chat1Type ?? "text",
+		// GroupEvent: no text; the inbox describes it from groupEvent (getPreviewText).
+		text: getStoredPreviewText(message, t),
+		albumId: null,
+		imageHash: null,
+		...(message.type === "GroupEvent" ? { groupEvent: (message.body ?? null) as Record<string, unknown> | null } : {}),
+	};
+}
+
+/**
+ * Newest message (input sorted oldest-first) usable as a fallback inbox
+ * preview. A body-less message still counts when its type alone says what it
+ * was — viewed/expired photos and videos lose their body, and a conversation
+ * made up only of those would otherwise find nothing and fall back to "no
+ * messages yet". Unsent body-less messages are skipped.
+ */
+export function findPreviewFallbackMessage<T extends Message>(messages: readonly T[]): T | null {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (message.body && typeof message.body === "object") {
+			return message;
+		}
+		if (!message.unsent && message.type && SELF_EXPLANATORY_PREVIEW_TYPES.has(message.type)) {
+			return message;
+		}
+	}
+	return null;
+}
+
+export type ProfileLinkInfo = {
+	profileId: number;
+	/** The profile photo when it was shared; null without one. */
+	imageHash: string | null;
+	name: string | null;
+	/** Upstream's own ProfileLink messages may carry a text; ours don't. */
+	text: string | null;
+};
+
+/**
+ * A ProfileLink message's shared profile (ProfileLinkBody: profileId,
+ * imageHash, firstName, text, …), or null for any other message — or one
+ * whose body is gone (unsent) or has no usable profile id.
+ */
+export function getProfileLink(message: { type?: string; body?: unknown } | null | undefined): ProfileLinkInfo | null {
+	if (message?.type !== "ProfileLink" || !message.body || typeof message.body !== "object") return null;
+	const body = message.body as Record<string, unknown>;
+	const profileId = Number(body.profileId);
+	if (!Number.isSafeInteger(profileId) || profileId <= 0) return null;
+	const imageHash = typeof body.imageHash === "string" && validateMediaHash(body.imageHash) ? body.imageHash : null;
+	const name = typeof body.firstName === "string" && body.firstName.trim() ? body.firstName.trim() : null;
+	const text = typeof body.text === "string" && body.text.trim() ? body.text.trim() : null;
+	return { profileId, imageHash, name, text };
 }
 
 export function getMessageText(message: UiMessage, t: TranslateFn): string {
@@ -284,7 +726,7 @@ export function getMessageText(message: UiMessage, t: TranslateFn): string {
 		if (message.type === "Image" || message.type === "ExpiringImage") {
 			return t("chat.thread.image_placeholder");
 		}
-		if (message.type === "Video") {
+		if (message.type === "Video" || message.type === "PrivateVideo" || message.type === "NonExpiringVideo") {
 			return t("chat.thread.video_placeholder");
 		}
 		if (message.type === "Audio") {
@@ -297,6 +739,10 @@ export function getMessageText(message: UiMessage, t: TranslateFn): string {
 	}
 
 	const body = message.body as Record<string, unknown>;
+	if (message.type === "ProfileLink") {
+		const text = typeof body.text === "string" ? body.text.trim() : "";
+		return text || t("chat.preview.shared_profile");
+	}
 	if (typeof body.text === "string" && body.text.trim().length > 0) {
 		return body.text;
 	}
@@ -313,7 +759,15 @@ export function getMessageText(message: UiMessage, t: TranslateFn): string {
 		return t("chat.thread.shared_image");
 	}
 
-	if (message.type === "Video") {
+	if (message.type === "Giphy") {
+		return t("chat.thread.shared_gif");
+	}
+
+	if (message.type === "Gaymoji") {
+		return "";
+	}
+
+	if (message.type === "Video" || message.type === "PrivateVideo" || message.type === "NonExpiringVideo") {
 		return t("chat.thread.shared_video");
 	}
 
@@ -329,7 +783,70 @@ export function getMessageText(message: UiMessage, t: TranslateFn): string {
 		return t("chat.preview.reacted_album_content");
 	}
 
+	if (message.type === "ProfilePhotoReply") {
+		const body = message.body as Record<string, unknown> | null | undefined;
+		const replyContent = body?.photoContentReply;
+		if (typeof replyContent === "string" && replyContent.trim().length > 0) {
+			return replyContent.trim();
+		}
+		return t("chat.preview.replied_profile_photo");
+	}
+
+	if (message.type === "AlbumContentReply") {
+		const body = message.body as Record<string, unknown> | null | undefined;
+		const replyText = body?.albumContentReply;
+		if (typeof replyText === "string" && replyText.trim().length > 0) {
+			return replyText.trim();
+		}
+		return t("chat.preview.reacted_album_content");
+	}
+
 	return `[${message.type}]`;
+}
+
+/** The quoted text from a message's reply preview, if it has one. */
+export function getReplyPreviewText(message: UiMessage): string | null {
+	const replyPreview = message.replyPreview as { text?: unknown } | null | undefined;
+	return typeof replyPreview?.text === "string" && replyPreview.text.trim().length > 0
+		? replyPreview.text.trim()
+		: null;
+}
+
+/** Strips the "> quoted\n" prefix that gets embedded in body.text on send. */
+export function stripReplyQuotePrefix(text: string, replyText: string | null): string {
+	if (!replyText) {
+		return text;
+	}
+	const quotedPrefix = `> ${replyText}\n`;
+	if (text.startsWith(quotedPrefix)) {
+		return text.slice(quotedPrefix.length);
+	}
+	if (text.startsWith("> ")) {
+		return text.replace(/^>.*\n?/, "").trim();
+	}
+	return text;
+}
+
+/**
+ * The user-written text of a message as shown in its bubble, or null when it
+ * has none (media-only, unsent, system messages, …) — i.e. exactly the
+ * text auto-translate should translate. Never a localized placeholder.
+ */
+export function getTranslatableMessageText(message: UiMessage): string | null {
+	if (!message.body || typeof message.body !== "object") {
+		return null;
+	}
+	const body = message.body as Record<string, unknown>;
+	const rawText =
+		typeof body.text === "string" && body.text.trim().length > 0
+			? body.text
+			: message.type === "ProfilePhotoReply" && typeof body.photoContentReply === "string"
+				? body.photoContentReply.trim()
+				: message.type === "AlbumContentReply" && typeof body.albumContentReply === "string"
+					? body.albumContentReply.trim()
+					: "";
+	const text = stripReplyQuotePrefix(rawText, getReplyPreviewText(message)).trim();
+	return text.length > 0 ? text : null;
 }
 
 export function getMessageImageUrl(message: UiMessage): string | null {
@@ -337,6 +854,7 @@ export function getMessageImageUrl(message: UiMessage): string | null {
 	const isImageMessage =
 		message.type === "Image" ||
 		message.type === "ExpiringImage" ||
+		message.type === "Giphy" ||
 		imageType === "image" ||
 		imageType === "expiring_image";
 
@@ -388,7 +906,8 @@ export function getMessageImageUrl(message: UiMessage): string | null {
 	};
 
 	const normalizeUrlCandidate = (candidate: string): string | null => {
-		if (candidate.startsWith("http://") || candidate.startsWith("https://")) {
+		// blob: is an optimistic upload bubble's local preview (see sendMediaAttachment).
+		if (candidate.startsWith("http://") || candidate.startsWith("https://") || candidate.startsWith("blob:")) {
 			return candidate;
 		}
 
@@ -425,7 +944,7 @@ export function getMessageImageUrl(message: UiMessage): string | null {
 		if (typeof candidate === "string" && candidate.length > 0) {
 			const normalized = normalizeUrlCandidate(candidate);
 			if (normalized) {
-				appLog.debug("Found image URL candidate:", { candidate, normalized });
+				// appLog.debug("Found image URL candidate:", { candidate, normalized });
 				return normalized;
 			}
 		}
@@ -571,7 +1090,7 @@ export function getMessageAudioUrl(message: UiMessage): string | null {
 
 export function getMessageVideoUrl(message: UiMessage): string | null {
 	const mediaType = message.chat1Type?.toLowerCase();
-	const isVideoMessage = message.type === "Video" || mediaType === "video";
+	const isVideoMessage = message.type === "Video" || message.type === "PrivateVideo" || message.type === "NonExpiringVideo" || mediaType === "video" ||mediaType === "privatevideo" || mediaType === "nonexpiringvideo";
 	if (!isVideoMessage) {
 		return null;
 	}
@@ -581,22 +1100,364 @@ export function getMessageVideoUrl(message: UiMessage): string | null {
 	}
 
 	const body = message.body as Record<string, unknown>;
+	const videoRecord =
+		typeof body.video === "object" && body.video
+			? (body.video as Record<string, unknown>)
+			: null;
+
+	const normalizeUrl = (candidate: string): string | null => {
+		// blob: is an optimistic upload bubble's local preview (see sendMediaAttachment).
+		if (candidate.startsWith("http://") || candidate.startsWith("https://") || candidate.startsWith("blob:")) {
+			return candidate;
+		}
+		if (candidate.startsWith("/")) {
+			return `https://cdns.grindr.com${candidate}`;
+		}
+		if (candidate.startsWith("d2wxe7lth7kp8g.cloudfront.net/")) {
+			return `https://${candidate}`;
+		}
+		return null;
+	};
+
 	const candidates: unknown[] = [
 		body.videoUrl,
 		body.url,
 		body.mediaUrl,
 		body.signedUrl,
-		(body.video as Record<string, unknown> | null)?.url,
+		body.cdnUrl,
+		videoRecord?.url,
+		videoRecord?.videoUrl,
+		videoRecord?.mediaUrl,
+		videoRecord?.signedUrl,
+		videoRecord?.cdnUrl,
 	];
 
 	for (const candidate of candidates) {
 		if (typeof candidate === "string" && candidate.length > 0) {
-			appLog.debug("Found video URL candidate:", { candidate });
-			return candidate;
+			const normalized = normalizeUrl(candidate);
+			if (normalized) {
+				// appLog.debug("Found video URL candidate:", { candidate, normalized });
+				return normalized;
+			}
 		}
 	}
 
 	return null;
+}
+
+function getMessageImageHash(message: UiMessage): string | null {
+	if (!message.body || typeof message.body !== "object") {
+		return null;
+	}
+	const body = message.body as Record<string, unknown>;
+	const candidates: unknown[] = [
+		body.imageHash,
+		body.mediaHash,
+		body.hash,
+		body.fileCacheKey,
+	];
+	for (const candidate of candidates) {
+		if (typeof candidate !== "string") {
+			continue;
+		}
+		const trimmed = candidate.trim();
+		if (
+			trimmed &&
+			(validateMediaHash(trimmed) || /^[a-z0-9_-]{16,}$/i.test(trimmed))
+		) {
+			return trimmed;
+		}
+	}
+	return null;
+}
+
+/**
+ * Stable, resend-invariant key for caching a message's media bytes in
+ * chatDb's media_files table. Images prefer a content hash (survives
+ * resend/re-fetch since the signed URL's query string changes every time);
+ * video/audio have no hash field so they fall back to mediaId or the
+ * messageId itself.
+ */
+export function getMediaKeyForMessage(
+	message: UiMessage,
+	kind: "image" | "video" | "audio",
+): string {
+	if (kind === "image") {
+		const hash = getMessageImageHash(message);
+		if (hash) {
+			return `image:${hash}`;
+		}
+		const url = getMessageImageUrl(message);
+		const urlHash = url ? extractImageHashFromSignedUrl(url) : null;
+		if (urlHash) {
+			return `image:${urlHash}`;
+		}
+		const mediaId = getMessageMediaId(message);
+		if (mediaId != null) {
+			return `image:media:${mediaId}`;
+		}
+		return `image:msg:${message.messageId}`;
+	}
+
+	if (kind === "video") {
+		const mediaId = getMessageMediaId(message);
+		if (mediaId != null) {
+			return `video:media:${mediaId}`;
+		}
+		return `video:msg:${message.messageId}`;
+	}
+
+	return `audio:msg:${message.messageId}`;
+}
+
+export type MediaCaptureTarget = {
+	mediaKey: string;
+	kind: MediaKind;
+	url: string;
+	viewOnce: boolean;
+};
+
+/** "Unlimited" videos aren't sent as NonExpiringVideo but as a regular
+ * Video, the same as "repeat" (2 views), with this many views. Counts from
+ * here up read as unlimited. */
+export const MAX_VIDEO_VIEWS = 999_999;
+
+/** Views a video message is sent with, for the expiry picker's maxViews
+ * (1 = once, 2 = repeat, anything above = unlimited, capped). */
+export function videoMessageViews(maxViews: number): number {
+	return Math.min(maxViews, MAX_VIDEO_VIEWS);
+}
+
+/** Feature flag (only set by our own server): "unlimited" videos go out as
+ * NonExpiringVideo, without any view count, instead of a MAX_VIDEO_VIEWS Video. */
+export const NON_EXPIRING_VIDEOS_FLAG = "chat-non-expiring-videos";
+
+const UNLIMITED_VIDEO_VIEWS = 2147483647;
+
+/** Message type and view fields of a video sent with the expiry picker's
+ * maxViews: unlimited is a NonExpiringVideo where the flag is on, otherwise
+ * (and for any view limit) a regular Video (see videoMessageViews). */
+export function videoMessageSend(maxViews: number): {
+	type: "Video" | "NonExpiringVideo";
+	body: { maxViews: number; viewsRemaining: number };
+} {
+	if (maxViews >= MAX_VIDEO_VIEWS && isFeatureOn(NON_EXPIRING_VIDEOS_FLAG)) {
+		return { type: "NonExpiringVideo", body: { maxViews: UNLIMITED_VIDEO_VIEWS, viewsRemaining: UNLIMITED_VIDEO_VIEWS } };
+	}
+	const views = videoMessageViews(maxViews);
+	return { type: "Video", body: { maxViews: views, viewsRemaining: views } };
+}
+
+// The pickers use 2147483647 for "unlimited" (videos are sent with
+// MAX_VIDEO_VIEWS instead, see videoMessageViews). Anything below
+// MAX_VIDEO_VIEWS — 1 ("view once"), 2 ("view twice"), or any other finite
+// count — is a limited view, not just exactly 1.
+
+function isViewLimitedMessage(message: UiMessage): boolean {
+	const body = message.body as Record<string, unknown> | null | undefined;
+	const maxViews = typeof body?.maxViews === "number" ? body.maxViews : null;
+	const viewsRemaining =
+		typeof body?.viewsRemaining === "number" ? body.viewsRemaining : null;
+	const candidate = maxViews ?? viewsRemaining;
+
+	if (candidate != null) {
+		return candidate > 0 && candidate < MAX_VIDEO_VIEWS;
+	}
+
+	// No explicit view-limit field on the body — fall back to the type string.
+	return message.type === "ExpiringImage" || message.type === "PrivateVideo";
+}
+
+/**
+ * Whether this photo/video can only be opened a limited number of times —
+ * also once those views are used up (isViewLimitedMessage reads 0 views left
+ * as "not limited", which is fine for capture but not for gating access).
+ */
+export function isViewLimitedMedia(message: Message | UiMessage): boolean {
+	const chat1Type = (message as UiMessage).chat1Type?.toLowerCase();
+	if (message.type === "ExpiringImage" || message.type === "PrivateVideo") return true;
+	if (chat1Type === "expiring_image" || chat1Type === "expiring_video" || chat1Type === "private_video") return true;
+	const isVideo = message.type === "Video" || chat1Type === "video";
+	if (!isVideo) return false;
+	const body = message.body as Record<string, unknown> | null | undefined;
+	if (typeof body?.maxViews === "number") return body.maxViews < MAX_VIDEO_VIEWS;
+	return typeof body?.viewsRemaining === "number" && body.viewsRemaining < MAX_VIDEO_VIEWS;
+}
+
+/**
+ * A view-once album share the recipient already opened: its viewing window
+ * (viewableUntil) only starts then. The server keeps the share until that
+ * window ends; without archive mode it counts as expired for both sides
+ * right away. A new share of the album starts over (no viewableUntil).
+ */
+export function isOnceAlbumShareOpened(message: Message | UiMessage): boolean {
+	if (message.type !== "Album" && message.type !== "ExpiringAlbum" && message.type !== "ExpiringAlbumV2") return false;
+	const body = message.body as Record<string, unknown> | null | undefined;
+	const expirationType = body?.expirationType;
+	return (expirationType === "ONCE" || expirationType === 1) && Number(body?.viewableUntil || 0) > 0;
+}
+
+/** Marker on a display copy whose view-limited media must be opened through the server. */
+export const VIEW_LIMITED_LOCK_FLAG = "_viewLimitedLocked";
+
+export function isViewLimitedLocked(message: Message | UiMessage): boolean {
+	const body = message.body as Record<string, unknown> | null | undefined;
+	return body?.[VIEW_LIMITED_LOCK_FLAG] === true;
+}
+
+/**
+ * Views left on a view-limited photo/video as the server last reported it,
+ * or null when unknown. An expiring photo with duration -1 is used up.
+ */
+export function getViewsRemaining(message: Message | UiMessage): number | null {
+	const body = message.body as Record<string, unknown> | null | undefined;
+	if (!body) return null;
+	if (typeof body.viewsRemaining === "number") return Math.max(0, body.viewsRemaining);
+	// A single-view photo already looked at, or one the server had no URL for anymore.
+	if (message.type === "ExpiringImage" && (body.duration === -1 || body.viewed === true)) return 0;
+	if (body._imageExpired === true || body._videoExpired === true) return 0;
+	return null;
+}
+
+/**
+ * How a message shows with archive mode off: unsent messages lose whatever
+ * content was kept locally, and received view-limited photos/videos lose
+ * every URL (only the counters stay) so the bubble can't show a stored or
+ * restored copy — opening one goes through the server and uses a view.
+ * Returns the message itself when nothing changes.
+ */
+export function toNonArchiveDisplayMessage<T extends Message | UiMessage>(message: T, userId: number | null): T {
+	if (message.unsent) {
+		if (message.body == null && !(message as UiMessage).localHistory) return message;
+		return { ...message, body: null, localHistory: false } as T;
+	}
+	const mine = userId != null && Number(message.senderId) === Number(userId);
+	if (mine || !isViewLimitedMedia(message)) return message;
+	const body = message.body as Record<string, unknown> | null | undefined;
+	const counters: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(body ?? {})) {
+		// Numbers and flags only: every URL field (and anything a URL could be
+		// dug out of) is a string or a nested object.
+		if (typeof value === "number" || typeof value === "boolean") counters[key] = value;
+	}
+	counters[VIEW_LIMITED_LOCK_FLAG] = true;
+	// Shown by the locked tile itself (as used up), not the expired bubbles.
+	if (counters._imageExpired === true || counters._videoExpired === true) {
+		delete counters._imageExpired;
+		delete counters._videoExpired;
+		if (typeof counters.viewsRemaining !== "number") counters.viewsRemaining = 0;
+	}
+	return { ...message, body: counters } as T;
+}
+
+/**
+ * Whatever this message's media is (if any) and however its URL was
+ * resolved, this is what should be eagerly captured into chatDb's
+ * media_files table. Giphy is intentionally excluded — it's third-party,
+ * non-expiring CDN content, not Grindr media subject to URL expiry.
+ */
+export function getMediaCaptureTarget(message: UiMessage): MediaCaptureTarget | null {
+	// Optimistic bubbles point at a local blob: preview, nothing to capture yet.
+	if (message.type === "Giphy" || isLocalClientMessageId(message.messageId)) {
+		return null;
+	}
+
+	const imageUrl = getMessageImageUrl(message);
+	if (imageUrl) {
+		return {
+			mediaKey: getMediaKeyForMessage(message, "image"),
+			kind: "image",
+			url: imageUrl,
+			viewOnce: isViewLimitedMessage(message) || isViewLimitedMedia(message),
+		};
+	}
+
+	const videoUrl = getMessageVideoUrl(message);
+	if (videoUrl) {
+		return {
+			mediaKey: getMediaKeyForMessage(message, "video"),
+			kind: "video",
+			url: videoUrl,
+			viewOnce: isViewLimitedMessage(message) || isViewLimitedMedia(message),
+		};
+	}
+
+	const audioUrl = getMessageAudioUrl(message);
+	if (audioUrl) {
+		return {
+			mediaKey: getMediaKeyForMessage(message, "audio"),
+			kind: "audio",
+			url: audioUrl,
+			viewOnce: false,
+		};
+	}
+
+	return null;
+}
+
+export type ReplyImageHashTarget = { mediaKey: string; url: string };
+
+/**
+ * Stable cache key + fetch URL for a reply-quote thumbnail (or a
+ * ProfilePhotoReply's own photo), when identified by a content hash. Uses
+ * the exact same `image:<hash>` key scheme as getMediaKeyForMessage("image")
+ * so it transparently shares mediaStore's cache with the original message,
+ * if that was ever captured too. Returns null for any message that isn't
+ * actually a reply-to-picture or ProfilePhotoReply — a plain Image message's
+ * own hash is already covered by getMediaCaptureTarget.
+ */
+export function getReplyImageHashTarget(message: UiMessage): ReplyImageHashTarget | null {
+	const preview = message.replyPreview as Record<string, unknown> | null | undefined;
+	const previewHash = typeof preview?.imageHash === "string" ? preview.imageHash : null;
+
+	let hash: string | null = null;
+	if (previewHash && validateMediaHash(previewHash)) {
+		hash = previewHash;
+	} else if (message.type === "ProfilePhotoReply") {
+		const body = message.body as Record<string, unknown> | null | undefined;
+		const bodyHash = typeof body?.imageHash === "string" ? body.imageHash : null;
+		if (bodyHash && validateMediaHash(bodyHash)) {
+			hash = bodyHash;
+		}
+	}
+
+	if (!hash) {
+		return null;
+	}
+	return { mediaKey: `image:${hash}`, url: getThumbImageUrl(hash, "320x320") };
+}
+
+export type AlbumContentReplyTarget = {
+	albumId: number;
+	contentId: number;
+	contentType: string | null;
+	previewUrl: string | null;
+};
+
+/**
+ * Extracts the specific album content item an AlbumContentReply/Reaction
+ * message references, plus its live (but expiring) previewUrl — used to
+ * durably capture that one item's thumbnail into album_media (see
+ * albumStore.ts's captureAlbumContentThumbFromMessage), independent of
+ * whether the album's full share was ever captured in this thread.
+ */
+export function getAlbumContentReplyTarget(message: UiMessage): AlbumContentReplyTarget | null {
+	if (message.type !== "AlbumContentReply" && message.type !== "AlbumContentReaction") {
+		return null;
+	}
+	const body = message.body as Record<string, unknown> | null | undefined;
+	const albumId = typeof body?.albumId === "number" ? body.albumId : Number(body?.albumId);
+	const contentId =
+		typeof body?.albumContentId === "number" ? body.albumContentId : Number(body?.albumContentId);
+	if (!Number.isFinite(albumId) || !Number.isFinite(contentId)) {
+		return null;
+	}
+	return {
+		albumId,
+		contentId,
+		contentType: typeof body?.contentType === "string" ? body.contentType : null,
+		previewUrl: typeof body?.previewUrl === "string" ? body.previewUrl : null,
+	};
 }
 
 export function getMessageLocation(
@@ -623,12 +1484,12 @@ export function getMessageLocation(
 	return null;
 }
 
-export function getParticipantAvatarUrl(hash: string | null | undefined): string {
+export function getParticipantAvatarUrl(hash: string | null | undefined): string | null {
 	if (!hash || !validateMediaHash(hash)) {
-		return blankProfileImage;
+		return null;
 	}
 
-	return getProfileImageUrl(hash);
+	return getThumbImageUrl(hash, "320x320");
 }
 
 export function isLocalClientMessageId(messageId: string): boolean {
@@ -666,10 +1527,36 @@ export function getMessageAlbumCoverUrl(message: UiMessage): string | null {
 	return null;
 }
 
+export function isGroupConversation(conversation: ConversationEntry | null | undefined): boolean {
+	return isGroupConversationId(conversation?.data.conversationId);
+}
+
+/**
+ * Where a thread's messages go: the group, or the other participant (a
+ * profile without a conversation yet falls back to `fallbackProfileId`).
+ */
+export function getSendTarget(
+	conversation: ConversationEntry | null | undefined,
+	userId: number | null,
+	fallbackProfileId: number | string | null | undefined,
+): ChatSendTarget | null {
+	const groupId = groupIdOfConversation(conversation?.data.conversationId);
+	if (groupId != null) return { type: "Group", targetId: groupId };
+	const profileId = conversation ? getOtherParticipant(conversation, userId)?.profileId : fallbackProfileId;
+	const n = profileId == null ? NaN : Number(profileId);
+	return Number.isFinite(n) && n > 0 ? { type: "Direct", targetId: n } : null;
+}
+
+/**
+ * The other side of a direct conversation. Null for group conversations: they
+ * have no single other profile, so 1:1 actions (profile, block, call, unread
+ * per profile) skip them.
+ */
 export function getOtherParticipant(
 	conversation: ConversationEntry,
 	userId: number | null,
 ) {
+	if (isGroupConversation(conversation)) return null;
 	return (
 		conversation.data.participants.find(
 			(participant) => participant.profileId !== userId,
@@ -684,11 +1571,16 @@ export function getParticipantOnlineMeta(
 	onlineUntil: number | null | undefined,
 	nowTimestamp: number,
 	t: TranslateFn,
-): { isOnline: boolean; label: string } {
+	/** Appearance "show online time left": false labels online profiles as plain "Online". */
+	showTimeLeft = true,
+): { isOnline: boolean; isEndingSoon?: boolean; label: string } {
+	// lastOnline/onlineUntil of 0 is the server's "unknown/hidden" sentinel,
+	// not a real epoch timestamp — treat it the same as null/undefined,
+	// otherwise it renders as tens of thousands of days ago.
 	const hasLastOnline =
-		typeof lastOnline === "number" && Number.isFinite(lastOnline);
+		typeof lastOnline === "number" && Number.isFinite(lastOnline) && lastOnline > 0;
 	const hasOnlineUntil =
-		typeof onlineUntil === "number" && Number.isFinite(onlineUntil);
+		typeof onlineUntil === "number" && Number.isFinite(onlineUntil) && onlineUntil > 0;
 	const minuteMs = 60 * 1000;
 	const hourMs = 60 * minuteMs;
 	const dayMs = 24 * hourMs;
@@ -704,7 +1596,10 @@ export function getParticipantOnlineMeta(
 		);
 		return {
 			isOnline: true,
-			label: t("browse_page.status_online_left", { count: minsLeft }),
+			isEndingSoon: minsLeft <= ONLINE_ENDING_SOON_MINUTES,
+			label: showTimeLeft
+				? t("browse_page.status_online_left", { count: minsLeft })
+				: t("browse_page.status_online"),
 		};
 	}
 
@@ -736,20 +1631,13 @@ export function getParticipantOnlineMeta(
 	};
 }
 
-export function useDesktopBreakpoint() {
-	const [isDesktop, setIsDesktop] = useState(() =>
-		typeof window !== "undefined"
-			? window.matchMedia("(min-width: 1024px)").matches
-			: false,
-	);
+export { useDesktopBreakpoint } from "../../../hooks/useDesktopBreakpoint";
 
-	useEffect(() => {
-		const query = window.matchMedia("(min-width: 1024px)");
-		const update = () => setIsDesktop(query.matches);
-		update();
-		query.addEventListener("change", update);
-		return () => query.removeEventListener("change", update);
-	}, []);
-
-	return isDesktop;
+export function getGaymojiUrl(message: UiMessage): string | null {
+	if (message.type !== "Gaymoji") return null;
+	const body = message.body as Record<string, unknown> | null | undefined;
+	const imageHash = typeof body?.imageHash === "string" ? body.imageHash : null;
+	if (!imageHash) return null;
+	const path = imageHash.startsWith("/") ? imageHash : `/${imageHash}`;
+	return `https://cdns.grindr.com/grindr/chat${path}`;
 }

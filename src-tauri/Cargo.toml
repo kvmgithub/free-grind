@@ -1,6 +1,6 @@
 [package]
 name = "free-grind"
-version = "0.5.1"
+version = "1.0.1"
 description = "Free Grind is a Grindr Client"
 authors = ["Jay Brammeld <jay@imaoreo.dev>"]
 edition = "2021"
@@ -14,11 +14,29 @@ edition = "2021"
 name = "open_grind_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[dev-dependencies]
+# Media proxy tests: tauri's mock runtime and paused tokio time.
+tauri = { version = "2", features = ["test"] }
+tokio = { version = "1", features = ["test-util", "rt-multi-thread"] }
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# Compiles the Linux video extension (webkit-extension/fgmedia.c).
+cc = "1"
+# Reads the app manifest (manifest/app.json).
+serde_json = "1"
+
+[features]
+# This feature is used for production builds to enable custom protocol support (tauri://).
+# It's automatically enabled by the Tauri CLI during "tauri build".
+custom-protocol = ["tauri/custom-protocol"]
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# custom-protocol is removed from here and moved to [features].
+# In the previous definition, it was active even in dev mode, which caused
+# the app to load cached or embedded assets instead of connecting to the
+# dev server, preventing hot-reloading and updates on mobile/emulators.
+tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -33,30 +51,59 @@ rmp-serde = "1.3.1"
 serde_bytes = "0.11"
 tauri-plugin-geolocation = "2"
 tauri-plugin-os = "2"
-tauri-plugin-notification = "2"
-futures-util = "0.3"
-http = "1"
-reqwest_cookie_store = "0.8"
-url = "2"
+tauri-plugin-notification = { path = "notification-patched" }
+tauri-plugin-http = "2"
 tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+wreq = { version = "0.15", features = ["gzip", "json"] }
+# Vendored 0.35.0 plus account creation and SMS verification, the banned
+# profile's id in BanInfo and a settable API language (L-Locale) until they
+# land upstream (grindr-patched/account-creation-and-sms-verification.patch,
+# ban-profile-id.patch, api-locale.patch).
+grindr = { path = "grindr-patched" }
 tauri-plugin-hotswap = { path = "hotswap-patched" }
-rustls = { version = "0.23", features = ["ring"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+base64 = "0.22"
+# Account-transfer QR code (api/auth.rs), rendered as SVG for the frontend.
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+# Upload normalization (media/photo): decode, orient, downscale, sRGB, re-encode
+# as metadata-free JPEG — same pipeline as open-grind.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff"] }
+moxcms = "0.8"
 
-# Platform-specific TLS: native-tls on Windows, rustls on others
+# Platform-specific dependencies
 [target.'cfg(target_os = "windows")'.dependencies]
-reqwest = { version = "0.12", features = ["json", "native-tls-alpn", "cookies"], default-features = false }
 windows-native-keyring-store = "0.5.1"
-# Use rustls for WebSocket on Windows to avoid SChannel JA3 fingerprint detection by Cloudflare
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+# Same webview2-com/windows versions wry (our Tauri version's webview backend) already
+# pulls in, so the ICoreWebView2 types in lib.rs line up with what's actually loaded.
+webview2-com = "0.39"
+windows = { version = "0.62", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Threading", "Win32_Storage_EnhancedStorage", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem"] }
+# App disguise (src/app_disguise.rs): toast identity, uninstall entry.
+windows-registry = "0.6"
 
-[target.'cfg(not(target_os = "windows"))'.dependencies]
-reqwest = { version = "0.12", features = ["json", "rustls-tls-webpki-roots", "cookies"], default-features = false }
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+# Scans account-transfer QR codes; desktop pastes the code as text instead.
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+tauri-plugin-barcode-scanner = "2"
+
+# The media proxy (src/media) hands video bodies to the WebView as they
+# arrive through wry's ResponseStream, which only the patched wry has.
+[target.'cfg(any(target_os = "android", target_vendor = "apple"))'.dependencies]
+wry = { version = "0.57", default-features = false }
+
+# "Save to…" for backup exports on desktop and iOS; Android uses android-fs.
+# iOS relies on how 2.7's saveFileDialog works - see exportBackup in
+# src/services/backupRestore.ts before bumping.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+tauri-plugin-dialog = "~2.7"
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-native-keyring-store = "0.5.0"
+tauri-plugin-android-fs = { version = "=28.2.2", features = ["legacy_storage_permission"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
+tauri-plugin-ios-photos = "0.3"
+tauri-plugin-ios-keyboard-fix = { path = "ios-keyboard-fix" }
+tauri-plugin-ios-app-disguise = { path = "ios-app-disguise" }
 apple-native-keyring-store = { version = "0.2.3", features = ["protected"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -64,3 +111,28 @@ apple-native-keyring-store = { version = "0.2.3", features = ["protected", "keyc
 
 [target.'cfg(target_os = "linux")'.dependencies]
 linux-keyutils-keyring-store = "0.2.1"
+# v2_28: user messages, which the media proxy's video extension talks over.
+webkit2gtk = { version = "2", features = ["v2_28"] }
+
+# boring-sys2 builds BoringSSL from source via CMake. In a dev (debug) profile,
+# OPT_LEVEL=0 makes the `cmake` crate pick CMAKE_BUILD_TYPE=Debug, which on MSVC
+# defaults to the /MDd debug CRT (needs __imp__CrtDbgReport). Rust always links
+# against the release CRT (msvcrt, not msvcrtd), so the two mismatch and the
+# linker fails with LNK2019 on __imp__CrtDbgReport. Bumping the opt-level here
+# makes cmake-rs pick RelWithDebInfo instead, which uses the matching /MD CRT.
+[profile.dev.package.boring-sys2]
+opt-level = 1
+
+# Symbol tables were a third of the Android library (14 of 44 MB) and ship in
+# every APK and desktop bundle; nothing symbolicates release crashes from them.
+[profile.release]
+strip = true
+
+# wry 0.57.0 plus response streams for the media proxy: a custom-protocol
+# handler can name a registered ResponseStream in `x-wry-stream`, and the
+# Android/Apple WebView reads the body from it as it arrives instead of
+# getting it fully buffered (wry-patched/response-streams.patch). Ported from
+# open-grind's patches/wry@0.55.1.patch; keep it at the wry version
+# tauri-runtime-wry resolves, or the patch is silently unused.
+[patch.crates-io]
+wry = { path = "wry-patched" }

@@ -2,28 +2,43 @@ import type {
 	Album,
 	AlbumDetail,
 	AlbumLimits,
+	AlbumPoster,
+	ProfileAlbumShareStatus,
 	SharedAlbum,
 	SharedAlbumView,
 } from "./albums";
-import type { InterestTapsResponse, InterestViewsResponse } from "./interest";
+import type { InterestSentTapsResponse, InterestTapsResponse, InterestViewsResponse } from "./interest";
 import type { MultipartUpload } from "./chat-service";
+import type { VideoEdit } from "../services/videoEdit";
+import type { UploadProgress } from "../services/stagedVideoUpload";
+import type {
+	RightNowCreatePostRequest,
+	RightNowCreatePostResponse,
+} from "./right-now";
 
 export type ApiFunctionName =
 	| "getOwnAlbums"
 	| "getOwnAlbumDetails"
 	| "getOwnAlbumStorage"
+	| "getAlbumPoster"
+	| "unblockAllProfiles"
 	| "createOwnAlbum"
 	| "renameOwnAlbum"
 	| "deleteOwnAlbum"
 	| "uploadOwnAlbumContent"
+	| "uploadOwnAlbumVideo"
 	| "reorderOwnAlbumContent"
 	| "deleteOwnAlbumContent"
 	| "getSharedAlbums"
 	| "getSharedAlbumsForProfile"
+	| "checkProfileAlbumShare"
 	| "openSharedAlbum"
+	| "removeAlbumShare"
 	| "getViews"
 	| "getTaps"
-	| "tap";
+	| "getSentTaps"
+	| "tap"
+	| "createRightNowPost";
 
 export interface CreateOwnAlbumInput {
 	albumName: string;
@@ -41,6 +56,26 @@ export interface DeleteOwnAlbumInput {
 export interface UploadOwnAlbumContentInput {
 	albumId: string;
 	multipart: MultipartUpload;
+	width?: number;
+	height?: number;
+	/** Whether the people the album is shared with hear about the upload. */
+	isFresh: boolean;
+}
+
+/**
+ * `maxBodySize`: the album plan's `maxContentSize`, when known. `edit` and
+ * `onLandscapeKept` as for chat videos (see UploadChatVideoParams).
+ */
+export interface UploadOwnAlbumVideoInput {
+	albumId: string;
+	file: File;
+	/** As for UploadOwnAlbumContentInput. */
+	isFresh: boolean;
+	maxBodySize?: number;
+	edit?: VideoEdit | null;
+	onLandscapeKept?: () => void;
+	/** Where the upload is, as for a chat video (see uploadProgressReporter). */
+	onProgress?: (progress: UploadProgress) => void;
 }
 
 export interface ReorderOwnAlbumContentInput {
@@ -48,12 +83,28 @@ export interface ReorderOwnAlbumContentInput {
 	contentIds: number[];
 }
 
+export interface AddOwnAlbumContentByIdsInput {
+	albumId: string;
+	ids: number[];
+	/** As for UploadOwnAlbumContentInput. */
+	isFresh: boolean;
+}
+
 export interface DeleteOwnAlbumContentInput {
 	albumId: string;
 	contentId: string;
 }
 
+export interface GetAlbumPosterInput {
+	albumId: string;
+	contentId: string;
+}
+
 export interface GetSharedAlbumsForProfileInput {
+	profileId: number;
+}
+
+export interface CheckProfileAlbumShareInput {
 	profileId: number;
 }
 
@@ -69,26 +120,47 @@ export interface OpenSharedAlbumResult {
 	status: number;
 }
 
+// Recipient-initiated: removes *our own* share of someone else's album (the
+// "delete" action on the shared-albums page). Distinct from unshareAlbum,
+// which is owner-initiated (stop sharing *my* album with specific people).
+export interface RemoveAlbumShareInput {
+	albumId: number;
+}
+
+export interface RemoveAlbumShareResult {
+	status: number;
+}
+
 export interface TapResult {
 	isMutual: boolean;
 }
+
+export type CreateRightNowPostInput = RightNowCreatePostRequest;
 
 export interface ApiFunctionResultMap {
 	getOwnAlbums: Album[];
 	getOwnAlbumDetails: AlbumDetail;
 	getOwnAlbumStorage: AlbumLimits;
+	getAlbumPoster: AlbumPoster;
+	unblockAllProfiles: ApiFunctionVoidResult;
 	createOwnAlbum: { albumId: number };
 	renameOwnAlbum: ApiFunctionVoidResult;
 	deleteOwnAlbum: ApiFunctionVoidResult;
 	uploadOwnAlbumContent: { contentId: number };
+	/** null when this binary can't stream uploads (see stagedVideoUpload). */
+	uploadOwnAlbumVideo: { contentId: number } | null;
 	reorderOwnAlbumContent: ApiFunctionVoidResult;
 	deleteOwnAlbumContent: ApiFunctionVoidResult;
 	getSharedAlbums: SharedAlbumView;
 	getSharedAlbumsForProfile: SharedAlbum[];
+	checkProfileAlbumShare: ProfileAlbumShareStatus;
 	openSharedAlbum: OpenSharedAlbumResult;
+	removeAlbumShare: RemoveAlbumShareResult;
 	getViews: InterestViewsResponse;
 	getTaps: InterestTapsResponse;
+	getSentTaps: InterestSentTapsResponse;
 	tap: TapResult;
+	createRightNowPost: RightNowCreatePostResponse;
 }
 
 export type ApiFunctionResult<T extends ApiFunctionName> = ApiFunctionResultMap[T];
@@ -102,6 +174,21 @@ export interface ApiFunctionDefinition {
 export interface ManagedGender {
 	genderId: number;
 	gender: string;
+	/** Groups genders into tiers (1 = common, 2/3 = broader/regional identities) — used to show a curated default set inline with a "more" expander rather than every option at once. */
+	displayGroup: number;
+	sortFilter: number | null;
+}
+
+/** The subset of GET /v3/me/prefs/settings the app uses. */
+export interface MySettings {
+	/** Opt-in to explicit images in Right Now. */
+	viewRightNowNsfw: boolean;
+	/** Whether the profile appears on the map. */
+	showOnMap: boolean;
+	/** How far (meters) the map position is offset from the real one; null = server default. */
+	mapLocationFuzzRadius: number | null;
+	/** Server-side incognito: shown as offline everywhere. Paid upstream, per role on Free Grind. */
+	incognito: boolean;
 }
 
 export interface ManagedPronoun {
@@ -109,10 +196,23 @@ export interface ManagedPronoun {
 	pronoun: string;
 }
 
+export interface ManagedTag {
+	tagId: number;
+	text: string;
+	key: string;
+}
+
+export interface ManagedTagCategory {
+	text: string;
+	possessiveText: string | null;
+	tags: ManagedTag[];
+}
+
 export interface ProfileImageUploadResult {
 	hash?: string;
 	mediaHash?: string;
-	imageSizes?: Array<{ mediaHash?: string }>;
+	/** `state`: moderation state; null upstream until reviewed, "1" (approved) on a self-hosted server. */
+	imageSizes?: Array<{ mediaHash?: string; state?: string | number | null }>;
 }
 
 export interface GetSharedAlbumsInput {
@@ -120,4 +220,18 @@ export interface GetSharedAlbumsInput {
     isOnline?: boolean;
     onlyVideo?: boolean;
     blur?: boolean;
+}
+
+export interface GetAlbumSharesInput {
+    albumId: string;
+}
+
+export interface UnshareAlbumInput {
+    albumId: string;
+    profiles: Array<{ profileId: number; shareId: number }>;
+}
+
+export interface GetAlbumContentProcessingInput {
+    albumId: string;
+    contentId: string;
 }

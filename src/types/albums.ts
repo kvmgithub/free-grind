@@ -27,7 +27,17 @@ export const albumsResponseSchema = z.object({
 
 export const albumLimitsSchema = z.object({
 	subscriptionType: z.string().optional(),
-	maxAlbums: z.number().int().positive().optional(),
+	maxAlbums: z.number().int().optional(),
+	maxContentItemsPerAlbum: z.number().int().optional(),
+	maxShares: z.number().int().optional(),
+	maxViewableAlbums: z.number().int().optional(),
+	maxViewableVideos: z.number().int().optional(),
+	maxContentSize: z.number().optional(),
+	maxContentSizeHumanReadable: z.string().optional(),
+	maxVideoLength: z.number().optional(),
+	minVideoLength: z.number().optional(),
+	maxShareableAlbums: z.number().int().optional(),
+	maxVideosPerAlbum: z.number().int().optional(),
 });
 
 export const albumMediaSchema = z.object({
@@ -38,6 +48,12 @@ export const albumMediaSchema = z.object({
 	coverUrl: z.string().nullable().optional(),
 	processing: z.boolean().optional(),
 	remainingViews: z.coerce.number().int().optional(),
+	statusId: z.number().int().nullable().optional(),
+	rejectionId: z.number().int().nullable().optional(),
+});
+
+export const albumSharesResponseSchema = z.object({
+	profileIds: z.array(z.number().int()).optional().default([]),
 });
 
 export const albumDetailSchema = z.object({
@@ -45,6 +61,13 @@ export const albumDetailSchema = z.object({
 	albumName: z.string().nullable().optional(),
 	content: z.array(albumMediaSchema).optional().default([]),
 });
+
+export const albumPosterSchema = z.object({
+	posterUrl: z.string().nullable().optional(),
+	blurredPosterUrl: z.string().nullable().optional(),
+});
+
+export type AlbumPoster = z.infer<typeof albumPosterSchema>;
 
 export const sharedAlbumPreviewContentSchema = z.object({
 	thumbUrl: z.string().nullable().optional(),
@@ -55,6 +78,7 @@ export const sharedAlbumPreviewContentSchema = z.object({
 export const sharedAlbumSchema = z.object({
 	albumId: z.coerce.number().int(),
 	albumName: z.string().nullable().optional(),
+	name: z.string().nullable().optional(),
 	content: sharedAlbumPreviewContentSchema.nullable().optional(),
 	contentCount: z
 		.object({
@@ -69,65 +93,90 @@ export const sharedAlbumsResponseSchema = z.object({
 	albums: z.array(sharedAlbumSchema).optional().default([]),
 });
 
-export const sharedAlbumViewSchema = z.object({
-  profileFeeds: z
-    .array(
-      z.object({
-        profileId: z.number(),
-        seen: z.boolean(),
-        paywallStatus: z.string(),
-        profile: z.object({
-          profileId: z.number(),
-          name: z.string().nullable(),
-          profileUrl: z.string().url().nullable(),
-          onlineUntil: z.number().nullable(),
-          distanceKm: z.number().nullable(),
-        }),
-        content: z.object({
-          contentId: z.number(),
-          contentType: z.string(),
-          coverUrl: z.string().url(),
-        }),
-      })
-    )
-    .optional()
-    .default([]),
+const sharedAlbumFeedProfileSchema = z.object({
+  profileId: z.number(),
+  name: z.string().nullable(),
+  profileUrl: z.string().url().nullable(),
+  onlineUntil: z.number().nullable(),
+  distanceKm: z.number().nullable(),
+});
 
-  sharedAlbums: z
-    .array(
-      z.object({
-        albumId: z.number(),
-        albumNumber: z.number(),
-        albumVersion: z.number(),
-        albumViewable: z.boolean(),
-        imageCount: z.coerce.number().int().default(0),
-        videoCount: z.coerce.number().int().default(0),
-        ownerProfileId: z.number(),
-        hasUnseenContent: z.boolean(),
-        name: z.string().nullable(),
-        expiresAt: z.number().nullable(),
-        totalAlbumsShared: z.number().optional(),
-        profile: z.object({
-          profileId: z.number(),
-          name: z.string().nullable(),
-          profileUrl: z.string().url().nullable(),
-          onlineUntil: z.number().nullable(),
-          distanceKm: z.number().nullable(),
-        }),
-        coverContent: z.object({
-          id: z.number(),
-          contentType: z.string(),
-          location: z.string().url(),
-          status: z.string(),
-        }),
-      })
-    )
+const profileFeedItemSchema = z.object({
+  profileId: z.number(),
+  seen: z.boolean(),
+  paywallStatus: z.string(),
+  profile: sharedAlbumFeedProfileSchema,
+  content: z.object({
+    contentId: z.number(),
+    contentType: z.string(),
+    // Nullable, not just optional — a cover still processing (or with a
+    // rejected/removed image) legitimately has no url yet, and the UI
+    // already falls back to a placeholder icon when this is falsy.
+    coverUrl: z.string().url().nullable(),
+  }),
+});
+
+const sharedAlbumFeedItemSchema = z.object({
+  albumId: z.number(),
+  albumNumber: z.number(),
+  albumVersion: z.number(),
+  albumViewable: z.boolean(),
+  imageCount: z.coerce.number().int().default(0),
+  videoCount: z.coerce.number().int().default(0),
+  ownerProfileId: z.number(),
+  hasUnseenContent: z.boolean(),
+  name: z.string().nullable(),
+  expiresAt: z.number().nullable(),
+  totalAlbumsShared: z.number().optional(),
+  profile: sharedAlbumFeedProfileSchema,
+  coverContent: z.object({
+    id: z.number(),
+    contentType: z.string(),
+    location: z.string().url().nullable(),
+    status: z.string(),
+  }),
+});
+
+/**
+ * Validates each feed entry individually and drops only the ones that fail,
+ * instead of the array-level z.array(schema) behavior of throwing (and so
+ * losing every entry in the response) the moment a single one doesn't match
+ * — the pressie-albums feed has been observed to include entries the rest of
+ * this schema doesn't expect (e.g. a still-processing cover), and previously
+ * any single one of those silently took the whole feed down with it.
+ */
+function lenientArray<T>(itemSchema: z.ZodType<T>, label: string) {
+  return z
+    .array(z.unknown())
     .optional()
-    .default([]),
+    .default([])
+    .transform((raw) =>
+      raw.flatMap((entry) => {
+        const result = itemSchema.safeParse(entry);
+        if (!result.success) {
+          console.warn(`[albums] dropped malformed ${label} feed entry`, result.error.issues, entry);
+          return [];
+        }
+        return [result.data];
+      }),
+    );
+}
+
+export const sharedAlbumViewSchema = z.object({
+  profileFeeds: lenientArray(profileFeedItemSchema, "profileFeeds"),
+  sharedAlbums: lenientArray(sharedAlbumFeedItemSchema, "sharedAlbums"),
   experimentStatus: z.number().optional(),
   nonEmptyPersonalAlbumCount: z.number().optional(),
   emptyAlbumId: z.number().nullable().optional(),
 });
+
+export const profileAlbumShareStatusSchema = z.object({
+	profileId: z.coerce.number().int(),
+	hasAlbum: z.boolean(),
+	hasSharedWithMe: z.boolean(),
+});
+
+export type ProfileAlbumShareStatus = z.infer<typeof profileAlbumShareStatusSchema>;
 
 export type Album = z.infer<typeof albumSchema>;
 export type AlbumsResponse = z.infer<typeof albumsResponseSchema>;
@@ -138,3 +187,4 @@ export type SharedAlbum = z.infer<typeof sharedAlbumSchema>;
 export type SharedAlbumsResponse = z.infer<typeof sharedAlbumsResponseSchema>;
 export type AlbumExpirationType = z.infer<typeof albumExpirationTypeSchema>;
 export type SharedAlbumView = z.infer<typeof sharedAlbumViewSchema>;
+export type AlbumSharesResponse = z.infer<typeof albumSharesResponseSchema>;

@@ -1,151 +1,136 @@
-import { ArrowLeft } from "lucide-react";
+import { Star } from "lucide-react";
+import { CruisingLayerToggle } from "./gridpage/cruising/CruisingLayerToggle";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useLocation, useNavigate } from "react-router-dom";
 import { RangeSlider } from "../../components/ui/range-slider";
-import { cn } from "../../utils/cn";
-import {
-	loadRightNowFiltersDraft,
-	type RightNowFiltersDraft,
-} from "./rightnow-filters-storage";
-import { getSexualPositionFilterOptions } from "./profile-option-builders";
+import { EditQuickFiltersButton } from "../../components/quick-filters/EditQuickFiltersButton";
+import { BottomSheet, SheetClose, SheetCloseButton, SHEET_FOOTER_CLASS, sheetButtonClass } from "../../components/ui/bottom-sheet";
+import { SheetChip, SheetSection } from "../../components/ui/sheet-section";
+import { useDesktopBreakpoint } from "../../hooks/useDesktopBreakpoint";
+import { HomeFilled } from "../../components/icons/FilledIcons";
+import type { RightNowFiltersDraft } from "./rightnow/rightnow-filters-storage";
+import { getSexualPositionFilterOptions, SEXUAL_POSITION_ICONS } from "./profile-option-builders";
 
-function parseState(state: unknown): {
-	draft: RightNowFiltersDraft;
-	returnTo: string;
-} {
-	const persisted = loadRightNowFiltersDraft();
-
-	if (typeof state !== "object" || state === null) {
-		return {
-			draft: {
-				ageMin: persisted.ageMin,
-				ageMax: persisted.ageMax,
-				positionFilter: persisted.positionFilter,
-			},
-			returnTo: "/right-now",
-		};
-	}
-
-	const safe = state as {
-		rightNowFiltersDraft?: Partial<RightNowFiltersDraft>;
-		returnTo?: string;
-	};
-	const draft = safe.rightNowFiltersDraft ?? {};
-	const ageMin =
-		typeof draft.ageMin === "number" && Number.isFinite(draft.ageMin)
-			? Math.max(18, Math.min(102, draft.ageMin))
-			: persisted.ageMin;
-	const ageMaxRaw =
-		typeof draft.ageMax === "number" && Number.isFinite(draft.ageMax)
-			? Math.max(18, Math.min(102, draft.ageMax))
-			: persisted.ageMax;
-
-	return {
-		draft: {
-			ageMin,
-			ageMax: Math.max(ageMin, ageMaxRaw),
-			positionFilter:
-				typeof draft.positionFilter === "string"
-					? draft.positionFilter
-					: persisted.positionFilter,
-		},
-		returnTo: typeof safe.returnTo === "string" ? safe.returnTo : "/right-now",
-	};
+interface RightNowFiltersPageProps {
+	onClose: () => void;
+	onApply: (draft: RightNowFiltersDraft) => void;
+	initialDraft: RightNowFiltersDraft;
 }
 
-export function RightNowFiltersPage() {
+/** Right Now feed filters — same bottom sheet layout as the grid/inbox filters, in Right Now purple. */
+export function RightNowFiltersPage({ onClose, onApply, initialDraft }: RightNowFiltersPageProps) {
 	const { t } = useTranslation();
-	const navigate = useNavigate();
-	const location = useLocation();
-	const initialState = useMemo(() => parseState(location.state), [location.state]);
+	const isDesktop = useDesktopBreakpoint();
 
-	const [ageMin, setAgeMin] = useState(initialState.draft.ageMin);
-	const [ageMax, setAgeMax] = useState(initialState.draft.ageMax);
-	const [positionFilter, setPositionFilter] = useState(initialState.draft.positionFilter);
+	const [ageMin, setAgeMin] = useState(initialDraft.ageMin);
+	const [ageMax, setAgeMax] = useState(initialDraft.ageMax);
+	const [positionFilter, setPositionFilter] = useState(initialDraft.positionFilter);
+	const [hostingOnly, setHostingOnly] = useState(initialDraft.hostingOnly);
+	const [favoritesOnly, setFavoritesOnly] = useState(initialDraft.favoritesOnly);
 
 	const positionFilterOptions = useMemo(
 		() => getSexualPositionFilterOptions(t, t("right_now.any_position")),
 		[t],
 	);
 
-	const applyAndReturn = () => {
-		navigate(initialState.returnTo, {
-			state: {
-				rightNowFiltersDraft: {
-					ageMin,
-					ageMax,
-					positionFilter,
-				},
-			},
-		});
-	};
-
 	return (
-		<section className="app-screen">
-			<div className="mx-auto w-full max-w-4xl">
-				<header className="mb-4 flex items-center justify-between gap-3">
-					<div className="inline-flex items-center gap-2">
-						<button
-							type="button"
-							onClick={() => navigate(-1)}
-							className="rounded-full border border-[var(--border)] bg-[var(--surface-2)] p-2 text-[var(--text-muted)] transition hover:border-[var(--accent)] hover:text-[var(--text)]"
-							aria-label={t("right_now_filters.back_aria")}
-						>
-							<ArrowLeft className="h-4 w-4" />
-						</button>
-						<div>
-							<h1 className="app-title">{t("right_now_filters.title")}</h1>
-							<p className="app-subtitle">{t("right_now_filters.subtitle")}</p>
-						</div>
-					</div>
-					<button
-						type="button"
-						onClick={applyAndReturn}
-						className="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-semibold text-[var(--accent-contrast)] transition hover:brightness-110"
-					>
-						{t("right_now_filters.apply")}
-					</button>
-				</header>
-
-				<div className="surface-card space-y-5 p-4 sm:p-5">
-					<div>
-						<p className="text-xs font-semibold uppercase tracking-wide text-[var(--text-muted)]">
-							{t("right_now_filters.position")}
-						</p>
-						<div className="mt-2 flex flex-wrap gap-2">
-							{positionFilterOptions.map((option) => (
-								<button
-									key={option.value || "any"}
-									type="button"
-									onClick={() => setPositionFilter(option.value)}
-									className={cn(
-										"rounded-full border px-3 py-1 font-medium transition",
-										option.value === positionFilter
-											? "border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-contrast)]"
-											: "border-[var(--border)] bg-[var(--surface)] text-[var(--text-muted)] hover:border-[var(--accent)] hover:text-[var(--text)]",
-									)}
-								>
-									{option.label}
-								</button>
-							))}
-						</div>
-					</div>
-
-					<RangeSlider
-						label={t("right_now_filters.age_range")}
-						min={18}
-						max={102}
-						step={1}
-						minDefault={ageMin}
-						maxDefault={ageMax}
-						onChange={(min, max) => {
-							setAgeMin(min);
-							setAgeMax(max);
-						}}
-					/>
+		<BottomSheet
+			onClose={onClose}
+			isDesktop={isDesktop}
+			bg="bg-[color-mix(in_srgb,var(--surface)_92%,black_8%)]"
+			panelClassName="max-h-[92dvh] px-4"
+		>
+			<div className="mb-3 flex items-center justify-between gap-3">
+				<h3 className="text-sm font-semibold text-[var(--text)]">{t("right_now.filters")}</h3>
+				<div className="flex shrink-0 items-center gap-2">
+					<EditQuickFiltersButton scope="rightNow" accentColor="var(--right-now)" accentContrast="#ffffff" />
+					<SheetCloseButton />
 				</div>
 			</div>
-		</section>
+
+			<div className="-mx-4 min-h-0 flex-1 overflow-y-auto px-4" data-lenis-prevent>
+				<div className="space-y-5 pb-2">
+					<CruisingLayerToggle accentColor="var(--right-now)" />
+					<SheetSection title={t("browse_filters.quick_filters")}>
+						<div className="flex flex-wrap gap-2">
+							<SheetChip active={hostingOnly} onClick={() => setHostingOnly((v) => !v)} accentColor="var(--right-now)">
+								<span className="inline-flex items-center gap-1.5">
+									<HomeFilled className="h-3.5 w-3.5" />
+									{t("right_now.hosting")}
+								</span>
+							</SheetChip>
+							<SheetChip active={favoritesOnly} onClick={() => setFavoritesOnly((v) => !v)} accentColor="var(--right-now)">
+								<span className="inline-flex items-center gap-1.5">
+									<Star className="h-3.5 w-3.5 fill-current" />
+									{t("browse_filters.options.favorites")}
+								</span>
+							</SheetChip>
+						</div>
+					</SheetSection>
+
+					<SheetSection title={t("right_now_filters.position")}>
+						<div className="flex flex-wrap gap-2">
+							{positionFilterOptions.map((option) => {
+								const Icon = option.value ? SEXUAL_POSITION_ICONS[Number(option.value)] : undefined;
+								return (
+									<SheetChip
+										key={option.value || "any"}
+										active={option.value === positionFilter}
+										onClick={() => setPositionFilter(option.value)}
+										accentColor="var(--right-now)"
+									>
+										{Icon ? (
+											<span className="inline-flex items-center gap-1.5">
+												<Icon className="h-3.5 w-3.5 shrink-0" />
+												{option.label}
+											</span>
+										) : option.label}
+									</SheetChip>
+								);
+							})}
+						</div>
+					</SheetSection>
+
+					<SheetSection
+						title={t("right_now_filters.age_range")}
+						value={`${ageMin}-${ageMax}${ageMax >= 99 ? "+" : ""}`}
+					>
+						<div className="px-1">
+							<RangeSlider
+								label={t("right_now_filters.age_range")}
+								min={18}
+								max={99}
+								step={1}
+								minDefault={ageMin}
+								maxDefault={ageMax}
+								activeColor="var(--right-now)"
+								hideHeader
+								onChange={(min, max) => {
+									setAgeMin(min);
+									setAgeMax(max);
+								}}
+							/>
+						</div>
+					</SheetSection>
+				</div>
+			</div>
+
+			{/* SheetClose closes animated and pops the sheet's history entry. */}
+			<div className={SHEET_FOOTER_CLASS}>
+				<SheetClose
+					onClick={() => onApply({ ageMin: 18, ageMax: 99, positionFilter: "", hostingOnly: false, favoritesOnly: false })}
+					className={sheetButtonClass("secondary")}
+				>
+					{t("browse_filters.clear_all")}
+				</SheetClose>
+				<SheetClose
+					onClick={() => onApply({ ageMin, ageMax, positionFilter, hostingOnly, favoritesOnly })}
+					style={{ backgroundColor: "var(--right-now)", color: "white" }}
+					className={sheetButtonClass()}
+				>
+					{t("right_now_filters.apply")}
+				</SheetClose>
+			</div>
+		</BottomSheet>
 	);
 }

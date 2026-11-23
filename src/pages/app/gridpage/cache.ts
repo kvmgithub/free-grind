@@ -1,21 +1,19 @@
 import type {
 	BrowseCard,
-	ManagedOption,
 	ProfileDetail,
 } from "../GridPage.types";
 import type { CacheEntry } from "../../../types/grid-cache";
+import { extractMediaHashFromUrl } from "../../../utils/media";
+import { onBrowseCards } from "../../../grindr-workarounds";
 
 const PROFILE_CACHE_TTL_MS = 5 * 60 * 1000;
 const BROWSE_CACHE_TTL_MS = 5 * 60 * 1000;
-const PUBLIC_OPTIONS_CACHE_TTL_MS = 30 * 60 * 1000;
 
 const profileCache = new Map<string, CacheEntry<ProfileDetail>>();
 const browseCache = new Map<
 	string,
-	CacheEntry<{ cards: BrowseCard[]; nextPage: number | null }>
+	CacheEntry<{ cards: BrowseCard[]; nextPage: string | null }>
 >();
-let genderOptionsCache: CacheEntry<ManagedOption[]> | null = null;
-let pronounOptionsCache: CacheEntry<ManagedOption[]> | null = null;
 
 function getFromCache<T>(
 	cache: Map<string, CacheEntry<T>>,
@@ -61,54 +59,97 @@ export function setCachedProfileDetail(
 
 export function getCachedBrowseCards(
 	cacheKey: string,
-): { cards: BrowseCard[]; nextPage: number | null } | null {
+): { cards: BrowseCard[]; nextPage: string | null } | null {
 	return getFromCache(browseCache, cacheKey);
 }
 
 export function setCachedBrowseCards(
 	cacheKey: string,
 	cards: BrowseCard[],
-	nextPage: number | null,
+	nextPage: string | null,
 ) {
 	setInCache(browseCache, cacheKey, { cards, nextPage }, BROWSE_CACHE_TTL_MS);
+	onBrowseCards(cards);
 }
 
-export function getCachedGenderOptions(): ManagedOption[] | null {
-	if (!genderOptionsCache) {
-		return null;
+/**
+ * Indexes every browse card currently held across all cache entries by its image
+ * media hash (extracted from primaryImageUrl), regardless of per-key TTL — this is
+ * used as an identity lookup, not a data-freshness read. Lets other features (e.g.
+ * Interest Views) recognize a profile they've only seen in the grid so far.
+ */
+export function getAllCachedBrowseCardsByImageHash(): Map<string, BrowseCard> {
+	const map = new Map<string, BrowseCard>();
+	for (const entry of browseCache.values()) {
+		for (const card of entry.value.cards) {
+			if (!card.primaryImageUrl) continue;
+			const hash = extractMediaHashFromUrl(card.primaryImageUrl);
+			if (hash && !map.has(hash)) {
+				map.set(hash, card);
+			}
+		}
 	}
-
-	if (genderOptionsCache.expiresAt <= Date.now()) {
-		genderOptionsCache = null;
-		return null;
-	}
-
-	return genderOptionsCache.value;
+	return map;
 }
 
-export function setCachedGenderOptions(options: ManagedOption[]) {
-	genderOptionsCache = {
-		value: options,
-		expiresAt: Date.now() + PUBLIC_OPTIONS_CACHE_TTL_MS,
-	};
+/**
+ * Same as getAllCachedBrowseCardsByImageHash but keyed by profileId — used to
+ * enrich lists that only carry a profile ID (e.g. sent taps) with a
+ * display name/photo already seen in the browse grid.
+ */
+export function getAllCachedBrowseCardsById(): Map<string, BrowseCard> {
+	const map = new Map<string, BrowseCard>();
+	for (const entry of browseCache.values()) {
+		for (const card of entry.value.cards) {
+			if (!map.has(card.profileId)) {
+				map.set(card.profileId, card);
+			}
+		}
+	}
+	return map;
 }
 
-export function getCachedPronounOptions(): ManagedOption[] | null {
-	if (!pronounOptionsCache) {
-		return null;
+/**
+ * Drops cached favorites-filter pages. Favorites (and their notes) change
+ * outside the grid's own request, so a cached favorites page would otherwise
+ * keep showing the old set for the cache lifetime.
+ */
+export function invalidateFavoritesBrowseCache(): void {
+	for (const key of browseCache.keys()) {
+		if (key.includes('"favorites":true')) browseCache.delete(key);
 	}
-
-	if (pronounOptionsCache.expiresAt <= Date.now()) {
-		pronounOptionsCache = null;
-		return null;
-	}
-
-	return pronounOptionsCache.value;
 }
 
-export function setCachedPronounOptions(options: ManagedOption[]) {
-	pronounOptionsCache = {
-		value: options,
-		expiresAt: Date.now() + PUBLIC_OPTIONS_CACHE_TTL_MS,
-	};
+export function removeProfileFromBrowseCache(profileId: string) {
+	for (const [cacheKey, entry] of browseCache) {
+		browseCache.set(cacheKey, {
+			...entry,
+			value: {
+				...entry.value,
+				cards: entry.value.cards.filter((card) => card.profileId !== profileId),
+			},
+		});
+	}
+}
+
+/**
+ * Resets every module-level cache here — call on logout/account switch.
+ * Without this, a second account would briefly see the previous account's
+ * profile cache and browse cards, since neither is keyed or cleared by
+ * account. Genders/pronouns/blocked-list/own-profile fields are now React
+ * Query caches instead (see hooks/queries/useProfileQueries.ts) — those are
+ * cleared via queryClient on logout, not here.
+ */
+export function clearAllCaches(): void {
+	profileCache.clear();
+	browseCache.clear();
+	// Saved grid scroll offsets (see GridPage/BrowseGrid) aren't keyed by
+	// account either — the next account should start at the top.
+	try {
+		for (const key of Object.keys(sessionStorage)) {
+			if (key.startsWith("grid-scroll-")) sessionStorage.removeItem(key);
+		}
+	} catch {
+		// sessionStorage unavailable — nothing to clear.
+	}
 }

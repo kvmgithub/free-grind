@@ -1,0 +1,309 @@
+import { Download, Loader2, Zap } from "lucide-react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
+import {
+	dismissPendingHotswapUpdate,
+	getActiveHotswapVersion,
+	getHotswapProgress,
+	getPendingHotswapUpdate,
+	installHotswapUpdate,
+	isHotswapAutoUpdateEnabled,
+	setHotswapAutoUpdateEnabled,
+	subscribeHotswapAutoUpdate,
+	subscribeHotswapProgress,
+	subscribePendingHotswapUpdate,
+	type HotswapProgress,
+	type PendingHotswapUpdate,
+} from "../services/hotswap";
+import { appLog } from "../utils/logger";
+import { FullscreenPrompt, fullscreenPrimaryButtonClass, fullscreenSecondaryButtonClass } from "./FullscreenPrompt";
+import { ToggleRow } from "./ui/toggle-row";
+import { VersionCompare, VersionCompareLink, type VersionCompareSide } from "./ui/version-compare";
+import { buildDate, formatBuildTime, releaseOf } from "../utils/otaVersion";
+import { formatRelativeTime } from "../utils/relativeTime";
+import { OTA_SIGNING_URL, compareUrl as repoCompareUrl } from "../config/links-config";
+import { VersionChangesLink } from "./VersionChangesSheet";
+
+/** CI publishes bundles with notes like "Automated OTA upload for <sha> on <channel>". */
+function noteCommit(notes: string | null): string | null {
+	return notes?.match(/\b[0-9a-f]{40}\b/)?.[0] ?? null;
+}
+
+
+/** How much newer the new build is, in its largest whole unit ("3 days newer"). */
+function newerBy(t: TFunction, newer: Date, older: Date): string | null {
+	const minutes = Math.floor((newer.getTime() - older.getTime()) / 60_000);
+	if (minutes < 1) return null;
+	const hours = Math.floor(minutes / 60);
+	const days = Math.floor(hours / 24);
+	if (days > 0) return t("ota_prompt.newer_days", { defaultValue: "{{count}} days newer", count: days });
+	if (hours > 0) return t("ota_prompt.newer_hours", { defaultValue: "{{count}} hours newer", count: hours });
+	return t("ota_prompt.newer_minutes", { defaultValue: "{{count}} minutes newer", count: minutes });
+}
+
+/**
+ * One side of the installed → new comparison. OTA bundles usually keep the
+ * release version and only differ in build time, so the version is only shown
+ * when it actually changes.
+ */
+function bundleSide(
+	t: TFunction,
+	lang: string,
+	label: string,
+	version: string | null,
+	showVersion: boolean,
+	/** Installed version, for the "… newer" hint on the new build. */
+	comparedTo?: string | null,
+	/** Full commit sha of the build; shown short as the title so the time isn't repeated. */
+	commit?: string | null,
+): VersionCompareSide {
+	const release = showVersion ? releaseOf(version) : null;
+	const builtAt = buildDate(version);
+	const olderBuild = buildDate(comparedTo ?? null);
+	const newer = builtAt && olderBuild ? newerBy(t, builtAt, olderBuild) : null;
+	const shortCommit = commit && /^[0-9a-f]{7,40}$/i.test(commit) ? commit.slice(0, 7) : null;
+
+	return {
+		label,
+		title: shortCommit ? (
+			<span className="font-mono">{shortCommit}</span>
+		) : builtAt ? (
+			formatBuildTime(builtAt, lang)
+		) : (
+			t("ota_prompt.built_in", { defaultValue: "Included with the app" })
+		),
+		detail:
+			release || builtAt ? (
+				<>
+					{release ? t("ota_prompt.version", { defaultValue: "Version {{version}}", version: release }) : null}
+					{release && builtAt ? " · " : null}
+					{builtAt ? formatRelativeTime(builtAt.getTime()) : null}
+					{newer && <span className="font-medium text-[var(--accent)]"> · {newer}</span>}
+				</>
+			) : undefined,
+	};
+}
+
+export function OtaUpdatePromptView({
+	update,
+	onLater,
+}: {
+	update: PendingHotswapUpdate;
+	onLater: () => void;
+}) {
+	const { t, i18n } = useTranslation();
+	const realProgress = useSyncExternalStore(subscribeHotswapProgress, getHotswapProgress);
+	const [previewProgress, setPreviewProgress] = useState<HotswapProgress>({ phase: "idle" });
+	const progress = update.preview ? previewProgress : realProgress;
+	// undefined while loading, null for the embedded frontend.
+	const [installedVersion, setInstalledVersion] = useState<string | null | undefined>(undefined);
+	const [failed, setFailed] = useState(false);
+	// Same setting as "Install Automatically" in Settings; the preview only toggles locally.
+	const storedAutoUpdate = useSyncExternalStore(subscribeHotswapAutoUpdate, isHotswapAutoUpdateEnabled);
+	const [previewAutoUpdate, setPreviewAutoUpdate] = useState(storedAutoUpdate);
+	const autoUpdate = update.preview ? previewAutoUpdate : storedAutoUpdate;
+	const setAutoUpdate = update.preview ? setPreviewAutoUpdate : setHotswapAutoUpdateEnabled;
+	const isBusy = progress.phase === "downloading" || progress.phase === "installing" || progress.phase === "done";
+
+	useEffect(() => {
+		let cancelled = false;
+		void getActiveHotswapVersion().then((v) => {
+			if (!cancelled) setInstalledVersion(v);
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, []);
+	const versionChanged = installedVersion !== undefined && releaseOf(installedVersion) !== releaseOf(update.version);
+
+	// Preview: fake ~2.5 MB download, then close instead of reloading.
+	useEffect(() => {
+		if (!update.preview || previewProgress.phase === "idle") return;
+		const timer = window.setTimeout(() => {
+			if (previewProgress.phase === "downloading") {
+				const total = 2_500_000;
+				const downloaded = Math.min(total, previewProgress.downloaded + 125_000);
+				setPreviewProgress(downloaded < total ? { phase: "downloading", downloaded, total } : { phase: "installing" });
+			} else if (previewProgress.phase === "installing") {
+				setPreviewProgress({ phase: "done" });
+			} else if (previewProgress.phase === "done") {
+				onLater();
+			}
+		}, previewProgress.phase === "downloading" ? 120 : 900);
+		return () => window.clearTimeout(timer);
+	}, [update.preview, previewProgress, onLater]);
+
+	const start = () => {
+		setFailed(false);
+		if (update.preview) {
+			setPreviewProgress({ phase: "downloading", downloaded: 0, total: 2_500_000 });
+			return;
+		}
+		installHotswapUpdate()
+			.then(() => window.location.reload())
+			.catch((error) => {
+				appLog.error("[hotswap] Confirmed update failed:", error);
+				setFailed(true);
+			});
+	};
+
+	// Ref guard: StrictMode runs mount effects twice.
+	const autoStarted = useRef(false);
+	useEffect(() => {
+		if (!update.autoStart || autoStarted.current) return;
+		autoStarted.current = true;
+		start();
+	});
+
+	const percent =
+		progress.phase === "downloading" && progress.total
+			? Math.min(100, Math.round((progress.downloaded / progress.total) * 100))
+			: progress.phase === "installing" || progress.phase === "done"
+				? 100
+				// Nothing received yet: an empty bar, not the indeterminate one —
+				// otherwise it starts at a third and grows from there once the
+				// first event brings the total.
+				: progress.phase === "downloading" && progress.downloaded === 0
+					? 0
+					: null;
+
+	// Started from Settings: only the download progress is shown — the
+	// installing/done phases aren't reliable, so the bar just stays full until
+	// the reload. The auto-install toggle is left out (it's already on); the
+	// buttons stay in the layout but invisible, so the bar sits exactly where
+	// it does on the regular screen, and come back if the download fails.
+	const progressOnly = update.autoStart === true;
+	const hideButtons = progressOnly && !failed;
+	// The running frontend is the installed build, so its commit is the diff base.
+	const newCommit = update.commit ?? noteCommit(update.notes);
+	const compareUrl = repoCompareUrl(import.meta.env.VITE_COMMIT_HASH, newCommit);
+
+	return (
+		<FullscreenPrompt
+			icon={Download}
+			title={t("ota_prompt.title", { defaultValue: "Update Available" })}
+			description={t("ota_prompt.description", {
+				defaultValue: "A new version of the app interface is ready to download. It only takes a moment and the app reloads afterwards.",
+			})}
+			footer={
+				<>
+					{isBusy && (
+						<div className="mb-1 flex flex-col gap-1.5">
+							<div className="h-2 w-full overflow-hidden rounded-full ink-tint-10">
+								<div
+									className={`h-full rounded-full bg-[var(--accent)] transition-[width] duration-200 ${percent === null ? "w-1/3 animate-pulse" : ""}`}
+									style={percent === null ? undefined : { width: `${percent}%` }}
+								/>
+							</div>
+							<p className="text-center text-xs text-[var(--text-muted)]">
+								{progress.phase === "downloading" || progressOnly
+									? percent === null
+										? t("update_prompt.downloading", { defaultValue: "Downloading…" })
+										: t("update_prompt.downloading_percent", { defaultValue: "Downloading… {{percent}}%", percent })
+									: progress.phase === "installing"
+										? t("update_prompt.installing", { defaultValue: "Installing…" })
+										: t("settings.ota_progress_done", { defaultValue: "Update installed. Reloading…" })}
+							</p>
+						</div>
+					)}
+					{failed && (
+						<p className="mb-1 text-center text-xs leading-relaxed text-red-400">
+							{t("ota_prompt.failed", { defaultValue: "The update couldn't be downloaded. Check your connection and try again." })}
+						</p>
+					)}
+					<button
+						type="button"
+						disabled={isBusy}
+						onClick={start}
+						aria-hidden={hideButtons || undefined}
+						tabIndex={hideButtons ? -1 : undefined}
+						className={`${fullscreenPrimaryButtonClass} ${hideButtons ? "invisible" : ""}`}
+					>
+						{isBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+						{progress.phase === "downloading"
+							? t("update_prompt.downloading", { defaultValue: "Downloading…" })
+							: progress.phase === "installing" || progress.phase === "done"
+								? t("update_prompt.installing", { defaultValue: "Installing…" })
+								: failed
+									? t("update_prompt.try_again", { defaultValue: "Try again" })
+									: <>{t("ota_prompt.update_now", { defaultValue: "Update now" })}<Download className="h-4 w-4" /></>}
+					</button>
+					<button
+						type="button"
+						onClick={onLater}
+						disabled={isBusy}
+						aria-hidden={hideButtons || undefined}
+						tabIndex={hideButtons ? -1 : undefined}
+						className={`${fullscreenSecondaryButtonClass} ${hideButtons ? "invisible" : ""}`}
+					>
+						{t("ota_prompt.later", { defaultValue: "Later" })}
+					</button>
+				</>
+			}
+		>
+			<div className={"native-group text-start"}>
+				<VersionCompare
+					from={
+						installedVersion === undefined
+							? undefined
+							: bundleSide(
+									t,
+									i18n.language,
+									t("ota_prompt.installed", { defaultValue: "Installed build" }),
+									installedVersion,
+									versionChanged,
+									undefined,
+									import.meta.env.VITE_COMMIT_HASH,
+								)
+					}
+					to={bundleSide(
+						t,
+						i18n.language,
+						t("ota_prompt.new", { defaultValue: "New build" }),
+						update.version,
+						versionChanged,
+						installedVersion,
+						newCommit,
+					)}
+				/>
+				{!progressOnly && <ToggleRow
+					checked={autoUpdate}
+					onChange={setAutoUpdate}
+					icon={<Zap className="h-5 w-5" />}
+					iconClass="ink-tint-8 text-[var(--accent)]"
+					label={t("ota_prompt.auto_title", { defaultValue: "Install automatically" })}
+					description={t("ota_prompt.auto_desc", { defaultValue: "Install future frontend updates without asking." })}
+				/>}
+			</div>
+			{compareUrl ? (
+				<VersionChangesLink from={import.meta.env.VITE_COMMIT_HASH} to={newCommit} />
+			) : (
+				<VersionCompareLink url={OTA_SIGNING_URL} label={t("onboarding.updates_more", { defaultValue: "More about that" })} />
+			)}
+		</FullscreenPrompt>
+	);
+}
+
+/**
+ * Shows the OTA update prompt as soon as the startup check finds a frontend
+ * update and automatic updates are off — before the onboarding, the version
+ * announcement and the routed app. The content behind stays mounted (just
+ * hidden), so an onboarding in progress keeps its step when the check only
+ * finishes mid-way. OutdatedVersionGate sits inside: the OTA bundle may
+ * already bring the frontend up to the latest release.
+ */
+export function OtaUpdateGate({ children }: { children: ReactNode }) {
+	const update = useSyncExternalStore(subscribePendingHotswapUpdate, getPendingHotswapUpdate);
+
+	return (
+		<>
+			{update && (
+				<div className="app-shell">
+					<OtaUpdatePromptView update={update} onLater={dismissPendingHotswapUpdate} />
+				</div>
+			)}
+			<div style={{ display: update ? "none" : "contents" }}>{children}</div>
+		</>
+	);
+}

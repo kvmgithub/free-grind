@@ -1,0 +1,85 @@
+export function ToggleRow({
+	checked,
+	onChange,
+	label,
+	description,
+	icon,
+	iconClass,
+	iconBadge,
+	activeColor,
+	activeThumbColor,
+	dense,
+	labelClassName,
+	padding: paddingProp,
+	id,
+	highlighted,
+}: {
+	checked: boolean;
+	onChange: (checked: boolean) => void;
+	label: string;
+	description?: React.ReactNode;
+	icon?: React.ReactNode;
+	iconClass?: string;
+	/** Small marker pinned to the icon's bottom-right corner, e.g. a warning. */
+	iconBadge?: React.ReactNode;
+	activeColor?: string;
+	activeThumbColor?: string;
+	dense?: boolean;
+	/** Overrides the label's default sentence-style typography — used for plain, borderless rows that should match the small-caps field-label style used elsewhere on the page. */
+	labelClassName?: string;
+	/** Overrides the row's default padding — pass "" for a borderless row that shouldn't add its own inset. */
+	padding?: string;
+	/** Anchor id, targeted when a settings search result links directly to this row. */
+	id?: string;
+	/** Plays the settings-search jump highlight animation once. */
+	highlighted?: boolean;
+}) {
+	const hasIcon = icon !== undefined;
+	const padding = paddingProp ?? (dense ? "p-3" : "px-4 py-3.5");
+
+	return (
+		<label
+			id={id}
+			className={
+				(hasIcon
+					? `flex cursor-pointer items-start gap-3 ${padding} transition-colors hover-fill`
+					: `flex min-h-14 cursor-pointer justify-between gap-4 ${padding} ${description ? "items-start" : "items-center"}`) +
+				(highlighted ? " animate-settings-highlight" : "")
+			}
+		>
+			{hasIcon && (
+				<div className={`relative shrink-0 rounded-2xl p-2.5 ${iconClass ?? ""}`}>
+					{icon}
+					{iconBadge && <span className="absolute -bottom-0.5 -end-0.5 flex">{iconBadge}</span>}
+				</div>
+			)}
+			<span className={hasIcon ? "min-w-0 flex-1" : ""}>
+				<span className={labelClassName ?? `block text-sm ${hasIcon ? "font-semibold leading-snug" : "font-medium"}`}>
+					{label}
+				</span>
+				{description && (
+					<span className={`block text-xs leading-relaxed text-[var(--text-muted)] ${hasIcon ? "mt-0.5" : "mt-1"}`}>
+						{description}
+					</span>
+				)}
+			</span>
+			<span
+				className={`relative inline-flex h-7 w-12 flex-shrink-0 cursor-pointer items-center ${!hasIcon && description ? "mt-1" : hasIcon ? "mt-0.5" : ""}`}
+				style={{
+					"--toggle-active": activeColor ?? "var(--accent)",
+					"--toggle-thumb-active": activeThumbColor ?? "var(--accent-contrast)",
+				} as React.CSSProperties}
+			>
+				<input
+					type="checkbox"
+					checked={checked}
+					onChange={(event) => onChange(event.target.checked)}
+					onClick={(e) => e.stopPropagation()}
+					className="peer absolute inset-0 z-10 m-0 cursor-pointer opacity-0"
+				/>
+				<span className="absolute inset-0 rounded-full border border-[var(--border)] bg-[var(--surface)] transition-colors peer-checked:border-transparent peer-checked:bg-[var(--toggle-active)]" />
+				<span className="absolute start-1 h-5 w-5 rounded-full bg-[var(--text)] transition-transform peer-checked:translate-x-5 rtl:peer-checked:-translate-x-5 peer-checked:bg-[var(--toggle-thumb-active)]" />
+			</span>
+		</label>
+	);
+}

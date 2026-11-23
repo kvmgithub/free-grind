@@ -1,27 +1,135 @@
-import { Heart, Loader2, MessageCircle, Triangle } from "lucide-react";
-import { type RefObject, type UIEvent } from "react";
+import {
+	Pencil,
+	Compass,
+	ExternalLink,
+	Globe,
+	Hash,
+	Heart,
+	MessageCircle,
+	MessageSquare,
+	Music,
+	Plane,
+	Ruler,
+	Scale,
+	Search,
+	Shield,
+	Sparkles,
+	Syringe,
+	MapPin,
+	User,
+	ShieldCheck,
+	Flame,
+	Calendar,
+} from "lucide-react";
+import { HomeFilled, MapPinFilled } from "../../../../components/icons/FilledIcons";
+import { FacebookIcon, InstagramIcon, XIcon } from "../../../../components/icons/BrandIcons";
+import { type CSSProperties, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { toast } from "react-hot-toast";
 import type { ProfileDetail } from "../../GridPage.types";
+import type { TravelPlan } from "../../../../types/travel";
 import {
 	formatDistance,
 	formatEnumArray,
 	formatEnumValue,
 	formatHeightCm,
-	formatOptionalNumber,
 	formatTimeAgo,
 	formatWeightKg,
 	shouldHideField,
 } from "../utils";
+import { reverseGeocodeCityDistrictForGeohash } from "../geocoding";
 import { getProfileImageUrl, getThumbImageUrl } from "../../../../utils/media";
-import blankProfileImage from "../../../../images/blank-profile.png";
-import freegrindLogo from "../../../../images/freegrind-logo.webp";
+import { resolveAvatarSrc } from "../../../../services/avatarStore";
+import { ProfileImage } from "../../../../components/ui/profile-image";
+import { Chip } from "../../../../components/ui/chip";
+import { RightNowIcon } from "../../../../components/icons/RightNowIcon";
 import { TapSelector } from "./TapSelector";
+import { TapFlyBurst, createTapFlyBurst, mutualTapIdFor, tapFlyBurstDuration, type TapFlyBurstState } from "../../../../components/TapFlyBurst";
+import { useInterestData } from "../../../../hooks/queries/useInterestQueries";
+import { setCarouselDrag, useCarouselSwipe } from "./useCarouselSwipe";
 import type { ChatContactIndexRecord } from "../../../../types/chat-contact-index";
-import { formatDateTime24 } from "../../chat/chatUtils";
 import { formatRelativeTime } from "../../../../utils/relativeTime";
 import { usePreferences } from "../../../../contexts/PreferencesContext";
+import { formatTravelDateRange } from "../utils";
+import { decodeGeohash } from "../../../../utils/geohash";
+import { appLog } from "../../../../utils/logger";
+import { SEXUAL_POSITION_ICONS } from "../../profile-option-builders";
+import { isIos } from "../../../../services/saveMedia";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { useProfileSpotifyFavorites } from "../../../../hooks/queries/useProfileQueries";
+import { proxyMediaUrl } from "../../../../utils/mediaProxy";
+import { haptic } from "../../../../utils/haptics";
+import { PRIVACY_BLUR_CLASS, PRIVACY_BLUR_TRANSITION_CLASS, useProfilePhotoPrivacy } from "../../../../hooks/useProfilePhotoPrivacy";
+import { useBlurReveal } from "../../../../hooks/useBlurReveal";
+import { ProfileNetworkSection } from "../../profile-network/ProfileNetworkSection";
 
 type LabelMap = Record<number, string>;
+
+// Profile-written text (About, Right Now): shown in full, line breaks kept,
+// long words/links wrapped instead of running off the card.
+
+const PROFILE_TEXT_CLASS =
+	"whitespace-pre-wrap text-[15px] leading-relaxed text-[var(--text)] [overflow-wrap:anywhere] select-text";
+
+function TravelPlanRow({
+	plan,
+	t,
+	isDesktopLike,
+}: {
+	plan: TravelPlan;
+	t: ReturnType<typeof useTranslation>["t"];
+	isDesktopLike: boolean;
+}) {
+	const [location, setLocation] = useState<string | null>(null);
+
+	useEffect(() => {
+		let cancelled = false;
+		void reverseGeocodeCityDistrictForGeohash(plan.geohash).then((label) => {
+			if (!cancelled) {
+				setLocation(label);
+			}
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, [plan.geohash]);
+
+	const handleOpenMaps = () => {
+		const decoded = decodeGeohash(plan.geohash);
+		const lat = (decoded.lat[0] + decoded.lat[1]) / 2;
+		const lon = (decoded.lon[0] + decoded.lon[1]) / 2;
+		const url = isDesktopLike
+			? `https://www.google.com/maps/search/?api=1&query=${lat},${lon}`
+			: isIos()
+			? `https://maps.apple.com/?ll=${lat},${lon}&q=${lat},${lon}`
+			: `geo:${lat},${lon}?q=${lat},${lon}`;
+		openUrl(url).catch((error) => {
+			appLog.error("Failed to open map URL", error);
+			window.open(url, "_blank");
+		});
+	};
+
+	return (
+		<button
+			type="button"
+			onClick={handleOpenMaps}
+			className="flex min-h-12 w-full items-start gap-3 px-4 py-2.5 text-start transition hover-fill"
+		>
+			<Plane className="mt-0.5 h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+			<div className="min-w-0 flex-1">
+				<p className="text-[15px] text-[var(--text)]">
+					{location ?? t("profile_details.travel_resolving_location")}
+				</p>
+				<p className="text-xs text-[var(--text-muted)]">
+					{formatTravelDateRange(plan.startDate, plan.endDate)}
+				</p>
+				{plan.notes?.trim() && (
+					<p className="mt-1 text-sm italic text-[var(--text-muted)]">{plan.notes.trim()}</p>
+				)}
+			</div>
+		</button>
+	);
+}
 
 type ProfileDetailsContentProps = {
 	activeProfile: ProfileDetail;
@@ -30,37 +138,26 @@ type ProfileDetailsContentProps = {
 	showMobileCarousel: boolean;
 	mobileCarouselRef: RefObject<HTMLDivElement | null>;
 	mobileCarouselPhotoIndex: number;
-	handleMobileCarouselScroll: (event: UIEvent<HTMLDivElement>) => void;
+	onPhotoIndexChange?: (index: number) => void;
 	openPhotoViewer: (index: number) => void;
-	photoCreatedAtByHash: Record<string, { createdAt: number | null; takenOnGrindr: boolean | null }>;
 	activeProfileName: string;
-	estimatedCreatedAt: string;
+	/** "Joined …" line (real or estimated date); null hides it. */
+	accountCreatedLabel: string | null;
+	travelPlans?: TravelPlan[];
 	profileStatusLabel: string;
+	profileStatusLevel: "online" | "ending_soon" | "recent" | "offline";
+	ownTags?: string[];
 	profileDistance: number | null;
 	chatContactStatus: ChatContactIndexRecord | null;
 	messageProfileId: string | null;
-	usesFreegrind: boolean;
 	onMessageProfile?: (profileId: string) => void;
 	onTapProfile?: (profileId: string, tapId?: number) => void;
-	onBlockProfile?: (profileId: string) => void;
-	onUnblockProfile?: (profileId: string) => void;
-	onToggleFavoriteProfile?: (
-		profileId: string,
-		currentlyFavorite: boolean,
-	) => void | Promise<void>;
-	isFavorite: boolean;
-	isTogglingFavorite: boolean;
-	isBlocked: boolean;
-	isBlockingProfile: boolean;
+	onTagClick?: (tag: string) => void;
 	isTapDisabled: boolean;
 	isTapBlocked: boolean;
 	isTapActive: boolean;
 	tapId: number;
 	tapButtonClassName: string;
-	onTriangleProfile?: (profileId: string) => void;
-	isTriangleDisabled: boolean;
-	triangleButtonClassName: string;
-	isLocatingProfile: boolean;
 	hasTagsContent: boolean;
 	hasAboutContent: boolean;
 	hasExpectationsFields: boolean;
@@ -71,6 +168,7 @@ type ProfileDetailsContentProps = {
 	formattedActivePronouns: string;
 	lookingForLabels: LabelMap;
 	meetAtLabels: LabelMap;
+	nsfwLabels: LabelMap;
 	tribeLabels: LabelMap;
 	hivStatusLabels: LabelMap;
 	sexualHealthLabels: LabelMap;
@@ -79,6 +177,15 @@ type ProfileDetailsContentProps = {
 	bodyTypeLabels: LabelMap;
 	ethnicityLabels: LabelMap;
 	relationshipStatusLabels: LabelMap;
+	extraTopSection?: ReactNode;
+	hidePicturesSection?: boolean;
+	/** Display-only copy (e.g. a swipe preview): skips its own data fetches. */
+	isPreview?: boolean;
+	/** The content sits on a native card (the desktop modal) rather than the page. */
+	isOnCard?: boolean;
+	isChatLinkedProfile?: boolean;
+	/** Own profile: opens edit mode at the linked profiles section. */
+	onManageLinkedProfiles?: () => void;
 };
 
 export function ProfileDetailsContent({
@@ -88,34 +195,25 @@ export function ProfileDetailsContent({
 	showMobileCarousel,
 	mobileCarouselRef,
 	mobileCarouselPhotoIndex,
-	handleMobileCarouselScroll,
+	onPhotoIndexChange,
 	openPhotoViewer,
-	photoCreatedAtByHash,
 	activeProfileName,
-	estimatedCreatedAt,
+	accountCreatedLabel,
+	travelPlans,
 	profileStatusLabel,
+	profileStatusLevel,
+	ownTags = [],
 	profileDistance,
 	chatContactStatus,
 	messageProfileId,
-	usesFreegrind,
 	onMessageProfile,
 	onTapProfile,
-	onBlockProfile,
-	onUnblockProfile,
-	onToggleFavoriteProfile,
-	isFavorite,
-	isTogglingFavorite,
-	isBlocked,
-	isBlockingProfile,
+	onTagClick,
 	isTapDisabled,
 	isTapBlocked,
 	isTapActive,
 	tapId,
 	tapButtonClassName,
-	onTriangleProfile,
-	isTriangleDisabled,
-	triangleButtonClassName,
-	isLocatingProfile,
 	hasTagsContent,
 	hasAboutContent,
 	hasExpectationsFields,
@@ -126,6 +224,7 @@ export function ProfileDetailsContent({
 	formattedActivePronouns,
 	lookingForLabels,
 	meetAtLabels,
+	nsfwLabels,
 	tribeLabels,
 	hivStatusLabels,
 	sexualHealthLabels,
@@ -134,116 +233,184 @@ export function ProfileDetailsContent({
 	bodyTypeLabels,
 	ethnicityLabels,
 	relationshipStatusLabels,
+	extraTopSection,
+	hidePicturesSection = false,
+	isPreview = false,
+	isOnCard = false,
+	isChatLinkedProfile = false,
+	onManageLinkedProfiles,
 }: ProfileDetailsContentProps) {
-	const { t } = useTranslation();
+	const { t, i18n } = useTranslation();
+	// Only chat partners get their photos locally cached (see avatarStore.ts) —
+	// ordinary Grid/Browse viewing stays uncached to avoid storing every photo
+	// of every profile a user swipes past.
+	const photoSrc = (hash: string, size: "1024x1024" | "320x320") => {
+		const url = size === "1024x1024" ? getProfileImageUrl(hash, size) : getThumbImageUrl(hash, size);
+		return proxyMediaUrl(resolveAvatarSrc(hash, url, { cache: isChatLinkedProfile, sourceUrl: url }) ?? url);
+	};
 	const { unitsPreset } = usePreferences();
+	// Safe-for-work mode shows the default-profile placeholder instead of the photos.
+	const photoPrivacy = useProfilePhotoPrivacy();
+	const visiblePhotoHashes = photoPrivacy === "hide" ? [] : activeProfilePhotoHashes;
+	// Blurred photos: the first tap unblurs one, the next opens it (like chat media).
+	const photoReveal = useBlurReveal(photoPrivacy === "blur");
+	const photoTapProps = (hash: string, index: number) => ({
+		onClick: () => {
+			if (photoReveal.revealOnTap(hash)) return;
+			openPhotoViewer(index);
+		},
+		...photoReveal.hoverProps(hash),
+	});
+	const { data: spotifyFavorites } = useProfileSpotifyFavorites(activeProfile.profileId, !isPreview);
+	const favoriteSongs = spotifyFavorites ?? [];
 	const hasChatHistory = Boolean(chatContactStatus?.hasChatted) || (chatContactStatus?.unreadCount ?? 0) > 0;
 	const lastMessageLabel = formatRelativeTime(chatContactStatus?.lastMessageTimestamp ?? null);
+	const visibleTravelPlans = useMemo(
+		() => (travelPlans ?? []).filter((plan) => plan.showOnProfile && plan.endDate >= Date.now()),
+		[travelPlans],
+	);
+	const hasTravelPlans = visibleTravelPlans.length > 0;
+	const rightNowTextTrimmed = activeProfile.rightNowText?.trim();
+	// rightNowText disappears from the live profile response once the person
+	// goes offline, but rightNowPosted (the post's own timestamp) stays put
+	// as long as the post itself hasn't expired — that's the actual signal
+	// for "does this profile currently have an active Right Now", independent
+	// of online/offline status.
+	const hasRightNow =
+		typeof activeProfile.rightNowPosted === "number" &&
+		Number.isFinite(activeProfile.rightNowPosted) &&
+		activeProfile.rightNowPosted > 0;
+	// The detail block below (header + text box) needs actual text to show —
+	// unlike the compact badge next to the name, which only needs an active
+	// post (rightNowPosted) and would otherwise render an empty box.
+	const hasRightNowDetail = hasRightNow && Boolean(rightNowTextTrimmed);
+	const isRightNowHosting = activeProfile.rightNow === "HOSTING";
+	const socialNetworks = activeProfile.socialNetworks;
+	const socialLinks = [
+		{ key: "instagram", handle: socialNetworks?.instagram?.userId, url: `https://instagram.com/${socialNetworks?.instagram?.userId}`, icon: InstagramIcon },
+		{ key: "twitter", handle: socialNetworks?.twitter?.userId, url: `https://x.com/${socialNetworks?.twitter?.userId}`, icon: XIcon },
+		{ key: "facebook", handle: socialNetworks?.facebook?.userId, url: `https://facebook.com/${socialNetworks?.facebook?.userId}`, icon: FacebookIcon },
+	].filter((link): link is typeof link & { handle: string } => Boolean(link.handle));
+	const rightNowPostedLabel = hasRightNow ? formatRelativeTime(activeProfile.rightNowPosted ?? null) : null;
 
-	const renderPhotoCreatedBadge = (hash: string) => {
-		const meta = photoCreatedAtByHash[hash] ?? null;
-		const timeLabel = meta?.createdAt ? formatDateTime24(meta.createdAt) : null;
-		if (!timeLabel && !meta?.takenOnGrindr) return null;
-		return (
-			<div className="pointer-events-none absolute left-2 top-2 inline-flex items-center gap-1 rounded-full bg-black/65 px-2 py-1 text-[10px] font-semibold text-white ring-1 ring-white/25">
-				{meta?.takenOnGrindr ? (
-					<img
-						src={freegrindLogo}
-						alt={t("chat.thread.taken_on_grindr")}
-						className="h-3.5 w-3.5 rounded-full"
-					/>
-				) : null}
-				{timeLabel ? <span>{timeLabel}</span> : null}
-			</div>
+	const renderPhotoCreatedBadge = (_hash: string) => null;
+
+	// Same fly-to-center burst as the profile's bottom bar tap button,
+	// including its mutual variant when they already tapped us.
+	const [tapBurst, setTapBurst] = useState<TapFlyBurstState | null>(null);
+	const tapSelectorWrapRef = useRef<HTMLDivElement | null>(null);
+	const { data: interestData } = useInterestData();
+
+	const handleTapWithBurst = (profileId: string, tapIdArg?: number) => {
+		const id = tapIdArg ?? 1;
+		const receivedTapType =
+			interestData?.taps?.find((item) => item.profileId === String(profileId))?.tapType ?? null;
+		setTapBurst(
+			createTapFlyBurst(id, tapSelectorWrapRef.current, mutualTapIdFor(activeProfile?.lastReceivedTapTimestamp, receivedTapType)),
 		);
+		onTapProfile?.(profileId, id);
 	};
 
-	const handleBlockAction = () => {
-		if (!messageProfileId || isBlockingProfile) {
-			return;
-		}
+	useEffect(() => {
+		if (!tapBurst) return;
+		const timer = setTimeout(() => setTapBurst(null), tapFlyBurstDuration(tapBurst));
+		return () => clearTimeout(timer);
+	}, [tapBurst]);
+	useEffect(() => {
+		const el = mobileCarouselRef.current;
+		if (el) setCarouselDrag(el, null);
+	}, [activeProfile?.profileId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-		if (isBlocked) {
-			onUnblockProfile?.(messageProfileId);
-			return;
-		}
+	useCarouselSwipe(mobileCarouselRef, {
+		enabled: showMobileCarousel && !isDesktopLike,
+		count: activeProfilePhotoHashes.length,
+		index: mobileCarouselPhotoIndex,
+		onIndexChange: onPhotoIndexChange,
+	});
 
-		onBlockProfile?.(messageProfileId);
-	};
+	const PositionIcon = activeProfile?.sexualPosition != null
+		? (SEXUAL_POSITION_ICONS[activeProfile.sexualPosition] ?? Compass)
+		: null;
 
-	const handleFavoriteAction = () => {
-		if (!messageProfileId || !onToggleFavoriteProfile || isTogglingFavorite) {
-			return;
-		}
-
-		void onToggleFavoriteProfile(messageProfileId, isFavorite);
-	};
 
 	return (
-		<div className="grid gap-6">
+		<div className="grid gap-8 @container">
+			{tapBurst && <TapFlyBurst burst={tapBurst} />}
+			{!hidePicturesSection && (visiblePhotoHashes.length > 0 || !isDesktopLike) && (
 			<div>
-				{activeProfilePhotoHashes.length > 0 ? (
+				{visiblePhotoHashes.length > 0 ? (
 					<>
 						{showMobileCarousel && !isDesktopLike ? (
 							<>
-								{/* Mobile Carousel View: We use negative margins (-mx and -mt) to break out of the parent padding
-								   and achieve a seamless edge-to-edge look that flushes with the header and screen sides. */}
-								<div className="sm:hidden -mx-[var(--app-px)] -mt-4">
+								<div className="relative sm:hidden -mx-[var(--app-px)]">
 									<div
 										ref={mobileCarouselRef}
-										onScroll={handleMobileCarouselScroll}
-										/* Edge-to-edge look: Only border-b is used to avoid a double-border effect with the sticky header's border.
-										   Rounded corners are removed to ensure the images touch the screen edges perfectly. */
-										className="flex snap-x snap-mandatory overflow-x-auto border-b border-[var(--border)]"
+										className="relative h-[min(78dvh,calc(100vw*1.55))] overflow-hidden"
+										style={{ "--carousel-index": mobileCarouselPhotoIndex } as CSSProperties}
 									>
-										{activeProfilePhotoHashes.map((hash, index) => (
-											<button
-												type="button"
+										{visiblePhotoHashes.map((hash, index) => (
+											<div
 												key={hash}
-												onClick={() => openPhotoViewer(index)}
-												className="aspect-[2/3] w-full shrink-0 snap-center snap-always overflow-hidden"
-												aria-label={t("profile_details.open_photo", { index: index + 1 })}
+												data-carousel-slide={index}
+												style={{
+													transform: `translateY(calc((${index} - var(--carousel-index, ${mobileCarouselPhotoIndex})) * 100% + var(--carousel-drag, 0px)))`,
+													transition: "var(--carousel-transition, transform 300ms ease-out)",
+												}}
+												className="absolute inset-0 overflow-hidden"
 											>
-											<div className="relative h-full w-full">
+												<button
+													type="button"
+													{...photoTapProps(hash, index)}
+													className="absolute inset-0 z-10"
+													aria-label={t("profile_details.open_photo", { index: index + 1 })}
+												/>
 												<img
-													/* Using ProfileImageUrl with 1024x1024 for the carousel to ensure high-quality visuals
-													   on high-density mobile screens, as thumbnails (320x320) appear blurry here. */
-													src={getProfileImageUrl(hash, "1024x1024")}
+													src={photoSrc(hash, "1024x1024")}
 													alt={t("profile_details.photo_alt", { name: activeProfileName })}
-													className="h-full w-full object-cover"
+													className={`h-full w-full object-cover ${PRIVACY_BLUR_TRANSITION_CLASS} ${photoReveal.isBlurred(hash) ? PRIVACY_BLUR_CLASS : ""}`}
 												/>
 												{renderPhotoCreatedBadge(hash)}
 											</div>
-											</button>
 										))}
+										<div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-36 bg-gradient-to-b from-black/65 to-transparent" />
 									</div>
-									{activeProfilePhotoHashes.length > 1 ? (
-										<div className="mt-2 flex items-center justify-center gap-1.5">
-											{activeProfilePhotoHashes.map((hash, index) => (
-												<span
-													key={`${hash}-dot`}
-													className={`h-1.5 w-1.5 rounded-full ${index === mobileCarouselPhotoIndex ? "bg-[var(--text)]" : "bg-[var(--border)]"}`}
-													aria-hidden="true"
-												/>
-											))}
+									{visiblePhotoHashes.length > 1 && (
+										<div className="absolute end-3 inset-y-0 z-20 flex flex-col items-center justify-center">
+											<div className="flex flex-col items-center gap-1.5 rounded-full bg-black/30 px-[5px] py-[10px] backdrop-blur-sm">
+												{visiblePhotoHashes.map((hash, index) => (
+													<button
+														key={`${hash}-dot`}
+														type="button"
+														onClick={() => {
+															onPhotoIndexChange?.(index);
+														}}
+														className="flex items-center justify-center p-1.5 -m-1.5"
+														aria-label={t("profile_details.open_photo", { index: index + 1 })}
+													>
+														<span
+															className={`w-1.5 rounded-full transition-[height,background-color] duration-300 ease-out ${index === mobileCarouselPhotoIndex ? "h-3 bg-white" : "h-1.5 bg-white/40"}`}
+														/>
+													</button>
+												))}
+											</div>
 										</div>
-									) : null}
+									)}
 								</div>
 
-								<div className="hidden grid-cols-3 gap-2 sm:grid sm:grid-cols-4 lg:grid-cols-6">
-									{activeProfilePhotoHashes.map((hash, index) => (
+								<div className="hidden grid-cols-3 gap-2 sm:grid sm:grid-cols-4 @3xl:grid-cols-6">
+									{visiblePhotoHashes.map((hash, index) => (
 										<button
 											type="button"
 											key={hash}
-											onClick={() => openPhotoViewer(index)}
+											{...photoTapProps(hash, index)}
 											className="overflow-hidden rounded-xl border border-[var(--border)]"
 											aria-label={t("profile_details.open_photo", { index: index + 1 })}
 										>
 											<div className="relative">
 												<img
-													src={getThumbImageUrl(hash, "320x320")}
+													src={photoSrc(hash, "320x320")}
 													alt={t("profile_details.photo_alt", { name: activeProfileName })}
-													className="aspect-square w-full object-cover"
+													className={`aspect-square w-full object-cover ${PRIVACY_BLUR_TRANSITION_CLASS} ${photoReveal.isBlurred(hash) ? PRIVACY_BLUR_CLASS : ""}`}
 												/>
 												{renderPhotoCreatedBadge(hash)}
 											</div>
@@ -252,20 +419,20 @@ export function ProfileDetailsContent({
 								</div>
 							</>
 						) : (
-							<div className="grid grid-cols-3 gap-2 sm:grid-cols-4 lg:grid-cols-6">
-								{activeProfilePhotoHashes.map((hash, index) => (
+							<div className="grid grid-cols-3 gap-2 sm:grid-cols-4 @3xl:grid-cols-6">
+								{visiblePhotoHashes.map((hash, index) => (
 									<button
 										type="button"
 										key={hash}
-										onClick={() => openPhotoViewer(index)}
+										{...photoTapProps(hash, index)}
 										className="overflow-hidden rounded-xl border border-[var(--border)]"
 										aria-label={t("profile_details.open_photo", { index: index + 1 })}
 									>
 										<div className="relative">
 											<img
-												src={getThumbImageUrl(hash, "320x320")}
+												src={photoSrc(hash, "320x320")}
 												alt={t("profile_details.photo_alt", { name: activeProfileName })}
-												className="aspect-square w-full object-cover"
+												className={`aspect-square w-full object-cover ${PRIVACY_BLUR_TRANSITION_CLASS} ${photoReveal.isBlurred(hash) ? PRIVACY_BLUR_CLASS : ""}`}
 											/>
 											{renderPhotoCreatedBadge(hash)}
 										</div>
@@ -275,508 +442,521 @@ export function ProfileDetailsContent({
 						)}
 					</>
 				) : (
-					<div className="max-w-sm overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface-2)]">
-						<img
-							src={blankProfileImage}
-							alt={t("profile_details.default_profile")}
-							className="aspect-square w-full object-cover"
-						/>
-					</div>
+					<>
+						{showMobileCarousel && !isDesktopLike ? (
+							<div className="relative sm:hidden -mx-[var(--app-px)]">
+								<div className="relative h-[min(78dvh,calc(100vw*1.55))] overflow-hidden">
+									<ProfileImage
+										alt={t("profile_details.default_profile")}
+										className="h-full w-full object-cover"
+									/>
+								</div>
+						</div>
+						) : null}
+						{!isDesktopLike && (
+							<div className={`${showMobileCarousel ? "hidden sm:block" : ""} overflow-hidden rounded-xl border border-[var(--border)]`}>
+								<ProfileImage
+									alt={t("profile_details.default_profile")}
+									className="aspect-square w-full object-cover"
+								/>
+							</div>
+						)}
+					</>
 				)}
 			</div>
+			)}
 
-			<div className="rounded-2xl border border-[var(--border)] bg-[var(--surface-2)] p-4">
-				<div className="flex flex-wrap items-end justify-between gap-3">
-					<div>
-						<p className="text-lg font-semibold sm:text-xl">
+			<div className="px-3">
+				<div className="flex items-start justify-between gap-3">
+					<div className="min-w-0 flex-1">
+						<h2 className="text-2xl font-bold leading-tight tracking-tight sm:text-3xl">
 							{activeProfileName}
-							<span
-								className={`ml-2 font-medium text-[var(--text-muted)] ${
-									!activeProfile.age || !Number.isFinite(activeProfile.age)
-										? "text-sm"
-										: "text-base"
-								}`}
-							>
-								({formatOptionalNumber(activeProfile.age, t)})
-							</span>
-						</p>
-						<p className="mt-1 text-xs text-[var(--text-muted)]">
-							<span className="font-semibold text-[var(--text)]">{t("profile_details.user_id")}:</span> {activeProfile.profileId}
-						</p>
-						<p className="mt-1 text-xs text-[var(--text-muted)]">
-							<span className="font-semibold text-[var(--text)]">{t("profile_details.est_created")}:</span> {estimatedCreatedAt}
-						</p>
-					</div>
-					<div className="grid gap-1 text-xs text-[var(--text-muted)] sm:text-right">
-						<p>
-							<span className="font-semibold text-[var(--text)]">{t("profile_details.status")}:</span> {profileStatusLabel}
-						</p>
-						<p>
-							<span className="font-semibold text-[var(--text)]">{t("profile_details.distance")}:</span> {formatDistance(profileDistance, t, unitsPreset)}
-						</p>
+							{activeProfile.age && Number.isFinite(activeProfile.age) && (
+								<span className="ms-2 text-xl font-normal text-[var(--text-muted)] sm:text-2xl">
+									{activeProfile.age}
+								</span>
+							)}
+						</h2>
+						<div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-[var(--text-muted)]">
+							{profileStatusLabel && (
+								<span className="flex items-center gap-1.5">
+									<span className={`h-2 w-2 rounded-full ${
+										profileStatusLevel === "online" ? "bg-emerald-400"
+										: profileStatusLevel === "ending_soon" ? "bg-amber-400"
+										: "bg-[var(--text-muted)]/40"
+									}`} />
+									{profileStatusLabel}
+								</span>
+							)}
+							{hasRightNow && (
+								<span className="flex items-center gap-1 font-semibold" style={{ color: "var(--right-now)" }}>
+									{isRightNowHosting ? (
+										<>
+											<HomeFilled className="h-3.5 w-3.5" />
+											{t("right_now.hosting")}
+										</>
+									) : (
+										<>
+											<RightNowIcon className="h-3.5 w-3.5" />
+											{t("profile_details.right_now")}
+										</>
+									)}
+								</span>
+							)}
+							{profileDistance !== undefined && profileDistance !== null && (
+								<span className="flex items-center gap-1">
+									<MapPinFilled className="h-3.5 w-3.5" />
+									{formatDistance(profileDistance, t, unitsPreset)}
+								</span>
+							)}
+							{activeProfile.isNew && (
+								<span className="flex items-center gap-1 font-semibold text-[var(--accent)]">
+									<Sparkles className="h-3.5 w-3.5 fill-current" />
+									{t("profile_details.recently_joined")}
+								</span>
+							)}
+						</div>
+						{(PositionIcon != null && !shouldHideField(formatEnumValue(activeProfile.sexualPosition, sexualPositionLabels)) || !shouldHideField(formatHeightCm(activeProfile.height, t, unitsPreset)) || !shouldHideField(formatWeightKg(activeProfile.weight, t, unitsPreset)) || !shouldHideField(formatEnumValue(activeProfile.bodyType, bodyTypeLabels, t))) && (
+							<div className="mt-1 flex items-center gap-x-3 text-sm text-[var(--text-muted)]">
+								{PositionIcon != null && !shouldHideField(formatEnumValue(activeProfile.sexualPosition, sexualPositionLabels)) && (
+									<span className="flex items-center gap-1">
+										<PositionIcon className="h-3.5 w-3.5 -translate-x-px" />
+										{formatEnumValue(activeProfile.sexualPosition, sexualPositionLabels, t)}
+									</span>
+								)}
+								{!shouldHideField(formatHeightCm(activeProfile.height, t, unitsPreset)) && (
+									<span className="flex items-center gap-1">
+										<Ruler className="h-3.5 w-3.5" />
+										{formatHeightCm(activeProfile.height, t, unitsPreset)}
+									</span>
+								)}
+								{!shouldHideField(formatWeightKg(activeProfile.weight, t, unitsPreset)) && (
+									<span className="flex items-center gap-1">
+										<Scale className="h-3.5 w-3.5" />
+										{formatWeightKg(activeProfile.weight, t, unitsPreset)}
+									</span>
+								)}
+								{!shouldHideField(formatEnumValue(activeProfile.bodyType, bodyTypeLabels, t)) && (
+									<span className="flex items-center gap-1">
+										<User className="h-3.5 w-3.5" />
+										{formatEnumValue(activeProfile.bodyType, bodyTypeLabels, t)}
+									</span>
+								)}
+							</div>
+						)}
 					</div>
 				</div>
-				{hasChatHistory ? (
-					<p className="mt-1 text-xs text-[var(--text-muted)]">
-						<span className="font-semibold text-[var(--text)]">{t("profile_details.chat_history")}:</span>{" "}
-						{lastMessageLabel ? t("profile_details.last_message", { time: lastMessageLabel }) : t("profile_details.chatted_before")}
-						{(chatContactStatus?.unreadCount ?? 0) > 0
-							? ` • ${chatContactStatus?.unreadCount ?? 0} ${t("chat.unread")}`
-							: ""}
-					</p>
-				) : null}
-				{usesFreegrind && (
-					<div className="mt-2 flex items-center gap-2">
-						<img
-							src={freegrindLogo}
-							alt="Free Grind user"
-							title={t("profile_details.uses_free_grind")}
-							className="h-5 w-5 rounded-full border border-[var(--border)]"
-						/>
+				{hasChatHistory && (
+					<div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-[var(--text-muted)]">
+						<span className="flex items-center gap-1">
+							<MessageCircle className="h-3 w-3" />
+							{lastMessageLabel
+								? t("profile_details.last_message", { time: lastMessageLabel })
+								: t("profile_details.chatted_before")
+							}
+						</span>
 					</div>
 				)}
-				{messageProfileId && onMessageProfile ? (
-					<div className="mt-3 grid gap-2">
-						<div className="grid grid-cols-[1.2fr_auto_1.2fr] items-center gap-2">
-						<button
-							type="button"
-							onClick={() => onMessageProfile(messageProfileId)}
-							className="inline-flex h-10 items-center justify-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 text-sm font-semibold text-[var(--text)] transition hover:border-[var(--accent)]"
-						>
-							<MessageCircle className="h-4 w-4" />
-							{t("profile_details.message")}
-						</button>
-						<TapSelector
-							profileId={messageProfileId}
-							onTapProfile={onTapProfile!}
-							isTapDisabled={isTapDisabled}
-							isTapBlocked={isTapBlocked}
-							isTapActive={isTapActive}
-							tapId={tapId}
-							tapButtonClassName={tapButtonClassName}
-						/>
+				{isDesktopLike && messageProfileId && onMessageProfile ? (
+					<div className="mt-3 flex items-center justify-center gap-4 py-1">
 						<button
 							type="button"
 							onClick={() => {
-								if (messageProfileId && onTriangleProfile) {
-									onTriangleProfile(messageProfileId);
-								}
+								haptic(10);
+								onMessageProfile(messageProfileId);
 							}}
-							disabled={isTriangleDisabled}
-							className={triangleButtonClassName}
-							aria-label="Run location finder"
-							title={isLocatingProfile ? "Location finder running" : "Location finder"}
+							className="inline-flex h-12 w-12 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface-2)] text-[var(--text)] shadow transition hover:bg-[var(--surface)]"
+							aria-label={t("profile_details.message")}
 						>
-							<Triangle className="h-4 w-4" />
-							{isLocatingProfile ? "Locating..." : "Locate"}
+							<MessageCircle className="h-5 w-5" />
 						</button>
+						<div ref={tapSelectorWrapRef}>
+							<TapSelector
+								profileId={messageProfileId}
+								onTapProfile={handleTapWithBurst}
+								isTapDisabled={isTapDisabled}
+								isTapBlocked={isTapBlocked}
+								isTapActive={isTapActive}
+								tapId={tapId}
+								tapButtonClassName={tapButtonClassName}
+							/>
 						</div>
-						{onToggleFavoriteProfile ? (
-							<button
-								type="button"
-								onClick={handleFavoriteAction}
-								disabled={isTogglingFavorite}
-								className={`inline-flex h-10 items-center justify-center gap-2 rounded-xl border px-3 text-sm font-semibold transition disabled:opacity-70 ${
-									isFavorite
-										? "border-pink-500/45 bg-pink-500/10 text-pink-300 hover:border-pink-400 hover:bg-pink-500/15"
-										: "border-[var(--border)] bg-[var(--surface)] text-[var(--text)] hover:border-[var(--accent)]"
-								}`}
-							>
-								{isTogglingFavorite ? (
-									<Loader2 className="h-4 w-4 animate-spin" />
-								) : (
-									<Heart className={`h-4 w-4 ${isFavorite ? "fill-current" : ""}`} />
-								)}
-								{isFavorite
-									? t("profile_details.unfavorite")
-									: t("browse_filters.options.favorites")}
-							</button>
-						) : null}
-						{(onBlockProfile || onUnblockProfile) ? (
-							<button
-								type="button"
-								onClick={handleBlockAction}
-								onPointerUp={(event) => {
-									if (event.pointerType === "mouse") {
-										return;
-									}
-									event.preventDefault();
-									handleBlockAction();
-								}}
-								disabled={isBlockingProfile}
-								className={`relative z-20 inline-flex h-10 items-center justify-center rounded-xl border px-3 text-sm font-semibold transition disabled:opacity-70 ${
-									isBlocked
-										? "border-[var(--border)] bg-[var(--surface)] text-[var(--text)] hover:border-[var(--accent)]"
-										: "border-red-500/45 bg-red-500/10 text-red-300 hover:border-red-400 hover:bg-red-500/15"
-								}`}
-							>
-								{isBlockingProfile
-									? isBlocked
-										? t("profile_details.unblock_in_progress")
-										: t("profile_details.block_in_progress")
-									: isBlocked
-										? t("profile_details.unblock")
-										: t("profile_details.block")}
-							</button>
-						) : null}
 					</div>
 				) : null}
 			</div>
 
-			<div className="grid gap-4 lg:grid-cols-[1.25fr_1fr]">
-				<div className="grid gap-4">
+			{extraTopSection}
+
+			{(hasTagsContent || hasAboutContent || hasExpectationsFields || hasHealthFields || hasRightNowDetail || hasStatsFields || hasSocialFields || hasTravelPlans) && (
+			<div className="grid gap-8 px-3">
+				{(hasTagsContent || hasAboutContent || hasRightNowDetail || hasExpectationsFields || hasHealthFields) && (
+				<div className="grid gap-8">
+					{hasRightNowDetail && (
+						<div>
+							<p
+								className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.1em]"
+								style={{ color: "var(--right-now)" }}
+							>
+								{isRightNowHosting ? <HomeFilled className="h-3.5 w-3.5" /> : <RightNowIcon className="h-3.5 w-3.5" />}
+								{isRightNowHosting ? t("right_now.hosting") : t("profile_details.right_now")}
+								{rightNowPostedLabel && (
+									<span className="font-medium normal-case tracking-normal text-[var(--text-muted)]">· {rightNowPostedLabel}</span>
+								)}
+							</p>
+							{/* Same card as the About text, tinted in the Right Now color. */}
+							<div
+								className="rounded-2xl px-4 py-3"
+								style={{ backgroundColor: "color-mix(in srgb, var(--right-now) 14%, var(--surface-2))" }}
+							>
+								<p className={PROFILE_TEXT_CLASS}>{rightNowTextTrimmed}</p>
+							</div>
+						</div>
+					)}
+
 					{hasTagsContent && (
-						<div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3">
-							<p className="text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
+						<div>
+							<p className="mb-2 text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
 								{t("profile_details.tags")}
 							</p>
-							<div className="mt-2 flex flex-wrap gap-2">
-								{activeProfile.profileTags.map((tag) => (
-									<span
-										key={tag}
-										className="rounded-full border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1 text-xs"
-									>
-										{tag}
-									</span>
-								))}
+							<div className="flex flex-wrap gap-2">
+								{activeProfile.profileTags.map((tag) => {
+									const isMatch = ownTags.some(
+										(own) => own.toLowerCase() === tag.toLowerCase(),
+									);
+									return (
+										<Chip
+											key={tag}
+											size="sm"
+											// The card color on the page; on a card that would vanish, so the tint.
+											fill={isOnCard ? "tint" : "card"}
+											selected={isMatch}
+											onClick={() => onTagClick?.(tag)}
+											className={onTagClick ? undefined : "cursor-default"}
+										>
+											{tag}
+										</Chip>
+									);
+								})}
 							</div>
 						</div>
 					)}
 
 					{hasAboutContent && (
-						<div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3">
-							<p className="text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
+						<div>
+							<p className="mb-2 text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
 								{t("profile_details.about")}
 							</p>
-							<p className="mt-2 text-sm leading-relaxed text-[var(--text)]">
-								{activeProfile.aboutMe?.trim()}
-							</p>
+							{/* Native card (like SheetCard): no border, the full text as written. */}
+							<div className="rounded-2xl bg-[var(--surface-2)] px-4 py-3">
+								<p className={PROFILE_TEXT_CLASS}>{activeProfile.aboutMe?.trim()}</p>
+							</div>
 						</div>
 					)}
 
 					{hasExpectationsFields && (
-						<div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3">
-							<p className="text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
+						<div>
+							<p className="mb-2 text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
 								{t("profile_details.expectations")}
 							</p>
-							<div className="mt-2 grid gap-1 text-sm text-[var(--text-muted)]">
-								{!shouldHideField(
-									formatEnumArray(
-										activeProfile.lookingFor,
-										lookingForLabels,
-									),
-								) && (
-									<p>
-										<span className="font-semibold text-[var(--text)]">
-											{t("profile_details.looking_for")}:
-										</span>{" "}
-										{formatEnumArray(
-											activeProfile.lookingFor,
-											lookingForLabels,
-											t
-										)}
-									</p>
+							<div className="space-y-2.5">
+								{!shouldHideField(formatEnumArray(activeProfile.lookingFor, lookingForLabels)) && (
+									<div className="flex items-start gap-2.5">
+										<Search className="mt-0.5 h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+										<p className="text-sm">
+											<span className="font-semibold text-[var(--text)]">{t("profile_details.looking_for")}:</span>{" "}
+											<span className="text-[var(--text-muted)]">{formatEnumArray(activeProfile.lookingFor, lookingForLabels, t)}</span>
+										</p>
+									</div>
 								)}
-								{!shouldHideField(
-									formatEnumArray(activeProfile.meetAt, meetAtLabels, t),
-								) && (
-									<p>
-										<span className="font-semibold text-[var(--text)]">
-											{t("profile_details.meet_at")}:
-										</span>{" "}
-										{formatEnumArray(
-											activeProfile.meetAt,
-											meetAtLabels,
-											t
-										)}
-									</p>
+								{!shouldHideField(formatEnumArray(activeProfile.meetAt, meetAtLabels, t)) && (
+									<div className="flex items-start gap-2.5">
+										<MapPin className="mt-0.5 h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+										<p className="text-sm">
+											<span className="font-semibold text-[var(--text)]">{t("profile_details.meet_at")}:</span>{" "}
+											<span className="text-[var(--text-muted)]">{formatEnumArray(activeProfile.meetAt, meetAtLabels, t)}</span>
+										</p>
+									</div>
 								)}
-								{!shouldHideField(
-									formatEnumArray(
-										activeProfile.grindrTribes,
-										tribeLabels,
-										t
-									),
-								) && (
-									<p>
-										<span className="font-semibold text-[var(--text)]">
-											{t("profile_details.tribes")}:
-										</span>{" "}
-										{formatEnumArray(
-											activeProfile.grindrTribes,
-											tribeLabels,
-											t
-										)}
-									</p>
+								{activeProfile.nsfw != null && !shouldHideField(formatEnumValue(activeProfile.nsfw, nsfwLabels, t)) && (
+									<div className="flex items-start gap-2.5">
+										<Shield className="mt-0.5 h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+										<p className="text-sm">
+											<span className="font-semibold text-[var(--text)]">{t("profile_details.accept_nsfw")}:</span>{" "}
+											<span className="text-[var(--text-muted)]">{formatEnumValue(activeProfile.nsfw, nsfwLabels, t)}</span>
+										</p>
+									</div>
+								)}
+								{!shouldHideField(formatEnumArray(activeProfile.grindrTribes, tribeLabels, t)) && (
+									<div className="flex items-start gap-2.5">
+										<Flame className="mt-0.5 h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+										<p className="text-sm">
+											<span className="font-semibold text-[var(--text)]">{t("profile_details.tribes")}:</span>{" "}
+											<span className="text-[var(--text-muted)]">{formatEnumArray(activeProfile.grindrTribes, tribeLabels, t)}</span>
+										</p>
+									</div>
+								)}
+								{!shouldHideField(formatEnumArray(activeProfile.tribesImInto, tribeLabels, t)) && (
+									<div className="flex items-start gap-2.5">
+										<Flame className="mt-0.5 h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+										<p className="text-sm">
+											<span className="font-semibold text-[var(--text)]">{t("profile_details.tribes_im_into")}:</span>{" "}
+											<span className="text-[var(--text-muted)]">{formatEnumArray(activeProfile.tribesImInto, tribeLabels, t)}</span>
+										</p>
+									</div>
 								)}
 								{!shouldHideField(formattedActiveGenders) && (
-									<p>
-										<span className="font-semibold text-[var(--text)]">
-											{t("profile_details.genders")}:
-										</span>{" "}
-										{formattedActiveGenders}
-									</p>
+									<div className="flex items-start gap-2.5">
+										<User className="mt-0.5 h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+										<p className="text-sm">
+											<span className="font-semibold text-[var(--text)]">{t("profile_details.genders")}:</span>{" "}
+											<span className="text-[var(--text-muted)]">{formattedActiveGenders}</span>
+										</p>
+									</div>
 								)}
 								{!shouldHideField(formattedActivePronouns) && (
-									<p>
-										<span className="font-semibold text-[var(--text)]">
-											{t("profile_details.pronouns")}:
-										</span>{" "}
-										{formattedActivePronouns}
-									</p>
-								)}
-								{!shouldHideField(
-									activeProfile.rightNowText?.trim(),
-								) && (
-									<p>
-										<span className="font-semibold text-[var(--text)]">
-											{t("profile_details.right_now")}:
-										</span>{" "}
-										{activeProfile.rightNowText?.trim()}
-									</p>
+									<div className="flex items-start gap-2.5">
+										<MessageSquare className="mt-0.5 h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+										<p className="text-sm">
+											<span className="font-semibold text-[var(--text)]">{t("profile_details.pronouns")}:</span>{" "}
+											<span className="text-[var(--text-muted)]">{formattedActivePronouns}</span>
+										</p>
+									</div>
 								)}
 							</div>
 						</div>
 					)}
 
 					{hasHealthFields && (
-						<div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3">
-							<p className="text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
+						<div>
+							<p className="mb-2 text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
 								{t("profile_details.health")}
 							</p>
-							<div className="mt-2 grid gap-1 text-sm text-[var(--text-muted)]">
-								{!shouldHideField(
-									formatEnumValue(
-										activeProfile.hivStatus,
-										hivStatusLabels,
-									),
-								) && (
-									<p>
-										<span className="font-semibold text-[var(--text)]">
-											{t("profile_details.hiv_status")}:
-										</span>{" "}
-										{formatEnumValue(
-											activeProfile.hivStatus,
-											hivStatusLabels,
-											t
-										)}
-									</p>
+							<div className="space-y-2.5">
+								{!shouldHideField(formatEnumValue(activeProfile.hivStatus, hivStatusLabels)) && (
+									<div className="flex items-start gap-2.5">
+										<Shield className="mt-0.5 h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+										<p className="text-sm">
+											<span className="font-semibold text-[var(--text)]">{t("profile_details.hiv_status")}:</span>{" "}
+											<span className="text-[var(--text-muted)]">{formatEnumValue(activeProfile.hivStatus, hivStatusLabels, t)}</span>
+										</p>
+									</div>
 								)}
 								{activeProfile.lastTestedDate && (
-									<p>
-										<span className="font-semibold text-[var(--text)]">
-											{t("profile_details.last_tested")}:
-										</span>{" "}
-										{formatTimeAgo(activeProfile.lastTestedDate, t)}
-									</p>
+									<div className="flex items-start gap-2.5">
+										<Calendar className="mt-0.5 h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+										<p className="text-sm">
+											<span className="font-semibold text-[var(--text)]">{t("profile_details.last_tested")}:</span>{" "}
+											<span className="text-[var(--text-muted)]">{formatTimeAgo(activeProfile.lastTestedDate, t)}</span>
+										</p>
+									</div>
 								)}
-								{!shouldHideField(
-									formatEnumArray(
-										activeProfile.sexualHealth,
-										sexualHealthLabels,
-										t
-									),
-								) && (
-									<p>
-										<span className="font-semibold text-[var(--text)]">
-											{t("profile_details.sexual_health")}:
-										</span>{" "}
-										{formatEnumArray(
-											activeProfile.sexualHealth,
-											sexualHealthLabels,
-											t
-										)}
-									</p>
+								{!shouldHideField(formatEnumArray(activeProfile.sexualHealth, sexualHealthLabels, t)) && (
+									<div className="flex items-start gap-2.5">
+										<ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+										<p className="text-sm">
+											<span className="font-semibold text-[var(--text)]">{t("profile_details.sexual_health")}:</span>{" "}
+											<span className="text-[var(--text-muted)]">{formatEnumArray(activeProfile.sexualHealth, sexualHealthLabels, t)}</span>
+										</p>
+									</div>
 								)}
-								{!shouldHideField(
-									formatEnumArray(
-										activeProfile.vaccines,
-										vaccineLabels,
-										t
-									),
-								) && (
-									<p>
-										<span className="font-semibold text-[var(--text)]">
-											{t("profile_details.vaccines")}:
-										</span>{" "}
-										{formatEnumArray(
-											activeProfile.vaccines,
-											vaccineLabels,
-											t
-										)}
-									</p>
+								{!shouldHideField(formatEnumArray(activeProfile.vaccines, vaccineLabels, t)) && (
+									<div className="flex items-start gap-2.5">
+										<Syringe className="mt-0.5 h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+										<p className="text-sm">
+											<span className="font-semibold text-[var(--text)]">{t("profile_details.vaccines")}:</span>{" "}
+											<span className="text-[var(--text-muted)]">{formatEnumArray(activeProfile.vaccines, vaccineLabels, t)}</span>
+										</p>
+									</div>
 								)}
 							</div>
 						</div>
 					)}
 				</div>
+				)}
 
-				<div className="grid gap-4">
+				{(hasStatsFields || hasTravelPlans || hasSocialFields) && (
+				<div className="grid gap-8">
 					{hasStatsFields && (
-						<div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3">
-							<p className="text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
+						<div>
+							<p className="mb-2 text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
 								{t("profile_details.stats")}
 							</p>
-							<div className="mt-2 grid grid-cols-2 gap-2 text-sm text-[var(--text-muted)]">
-								{!shouldHideField(
-									formatEnumValue(
-										activeProfile.sexualPosition,
-										sexualPositionLabels,
-									),
-								) && (
-									<div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2">
-										<p className="text-[10px] uppercase tracking-[0.08em]">
-											{t("profile_details.position")}
-										</p>
-										<p className="mt-1 font-medium text-[var(--text)]">
-											{formatEnumValue(
-												activeProfile.sexualPosition,
-												sexualPositionLabels,
-												t
-											)}
-										</p>
+							<div className="space-y-2.5">
+								{PositionIcon != null && !shouldHideField(formatEnumValue(activeProfile.sexualPosition, sexualPositionLabels)) && (
+									<div className="flex items-center gap-2.5">
+										<PositionIcon className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+										<p className="text-sm text-[var(--text-muted)]">{formatEnumValue(activeProfile.sexualPosition, sexualPositionLabels, t)}</p>
 									</div>
 								)}
-								{!shouldHideField(
-									formatHeightCm(activeProfile.height, t, unitsPreset),
-								) && (
-									<div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2">
-										<p className="text-[10px] uppercase tracking-[0.08em]">
-											{t("profile_details.height")}
-										</p>
-										<p className="mt-1 font-medium text-[var(--text)]">
-											{formatHeightCm(activeProfile.height, t, unitsPreset)}
-										</p>
+								{!shouldHideField(formatHeightCm(activeProfile.height, t, unitsPreset)) && (
+									<div className="flex items-center gap-2.5">
+										<Ruler className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+										<p className="text-sm text-[var(--text-muted)]">{formatHeightCm(activeProfile.height, t, unitsPreset)}</p>
 									</div>
 								)}
-								{!shouldHideField(
-									formatWeightKg(activeProfile.weight, t, unitsPreset),
-								) && (
-									<div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2">
-										<p className="text-[10px] uppercase tracking-[0.08em]">
-											{t("profile_details.weight")}
-										</p>
-										<p className="mt-1 font-medium text-[var(--text)]">
-											{formatWeightKg(activeProfile.weight, t, unitsPreset)}
-										</p>
+								{!shouldHideField(formatWeightKg(activeProfile.weight, t, unitsPreset)) && (
+									<div className="flex items-center gap-2.5">
+										<Scale className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+										<p className="text-sm text-[var(--text-muted)]">{formatWeightKg(activeProfile.weight, t, unitsPreset)}</p>
 									</div>
 								)}
-								{!shouldHideField(
-									formatEnumValue(
-										activeProfile.bodyType,
-										bodyTypeLabels,
-										t
-									),
-								) && (
-									<div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2">
-										<p className="text-[10px] uppercase tracking-[0.08em]">
-											{t("profile_details.body_type")}
-										</p>
-										<p className="mt-1 font-medium text-[var(--text)]">
-											{formatEnumValue(
-												activeProfile.bodyType,
-												bodyTypeLabels,
-												t
-											)}
-										</p>
+								{!shouldHideField(formatEnumValue(activeProfile.bodyType, bodyTypeLabels, t)) && (
+									<div className="flex items-center gap-2.5">
+										<User className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+										<p className="text-sm text-[var(--text-muted)]">{formatEnumValue(activeProfile.bodyType, bodyTypeLabels, t)}</p>
 									</div>
 								)}
-								{!shouldHideField(
-									formatEnumValue(
-										activeProfile.ethnicity,
-										ethnicityLabels,
-										t
-									),
-								) && (
-									<div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2">
-										<p className="text-[10px] uppercase tracking-[0.08em]">
-											{t("profile_details.ethnicity")}
-										</p>
-										<p className="mt-1 font-medium text-[var(--text)]">
-											{formatEnumValue(
-												activeProfile.ethnicity,
-												ethnicityLabels,
-												t
-											)}
-										</p>
+								{!shouldHideField(formatEnumValue(activeProfile.ethnicity, ethnicityLabels, t)) && (
+									<div className="flex items-center gap-2.5">
+										<Globe className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+										<p className="text-sm text-[var(--text-muted)]">{formatEnumValue(activeProfile.ethnicity, ethnicityLabels, t)}</p>
 									</div>
 								)}
-								{!shouldHideField(
-									formatEnumValue(
-										activeProfile.relationshipStatus,
-										relationshipStatusLabels,
-										t
-									),
-								) && (
-									<div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-2">
-										<p className="text-[10px] uppercase tracking-[0.08em]">
-											{t("profile_details.relationship")}
-										</p>
-										<p className="mt-1 font-medium text-[var(--text)]">
-											{formatEnumValue(
-												activeProfile.relationshipStatus,
-												relationshipStatusLabels,
-												t
-											)}
-										</p>
+								{!shouldHideField(formatEnumValue(activeProfile.relationshipStatus, relationshipStatusLabels, t)) && (
+									<div className="flex items-center gap-2.5">
+										<Heart className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+										<p className="text-sm text-[var(--text-muted)]">{formatEnumValue(activeProfile.relationshipStatus, relationshipStatusLabels, t)}</p>
 									</div>
 								)}
 							</div>
 						</div>
 					)}
 
+					{hasTravelPlans && (
+						<div>
+							<p className="mb-2 text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
+								{t("profile_details.travel_plans")}
+							</p>
+							{/* Same native list card as the social links below. */}
+							<div className="overflow-hidden rounded-2xl bg-[var(--surface-2)] [--hover-base:var(--surface-2)]">
+								{visibleTravelPlans.map((plan, index) => (
+									<div key={plan.travelPlanId}>
+										{index > 0 && <div className="ms-11 h-px bg-[var(--border)]" />}
+										<TravelPlanRow plan={plan} t={t} isDesktopLike={isDesktopLike} />
+									</div>
+								))}
+							</div>
+						</div>
+					)}
+
 					{hasSocialFields && (
-						<div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3">
-							<p className="text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
+						<div>
+							<p className="mb-2 text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
 								{t("profile_details.social")}
 							</p>
-							<div className="mt-2 grid gap-1 text-sm text-[var(--text-muted)]">
-								{activeProfile.socialNetworks?.instagram?.userId && (
-									<p>
-										<span className="font-semibold text-[var(--text)]">
-											{t("profile_details.instagram")}:
-										</span>{" "}
-										<a
-											href={`https://instagram.com/${activeProfile.socialNetworks.instagram.userId}`}
-											target="_blank"
-											rel="noopener noreferrer"
-											className="text-[var(--text)] underline hover:opacity-75"
+							{/* One native list card (like the private notes): a row per network,
+							    inset dividers, opened through the opener like the Spotify songs. */}
+							<div className="overflow-hidden rounded-2xl bg-[var(--surface-2)] [--hover-base:var(--surface-2)]">
+								{socialLinks.map((link, index) => (
+									<div key={link.key}>
+										{index > 0 && <div className="ms-11 h-px bg-[var(--border)]" />}
+										<button
+											type="button"
+											onClick={() => {
+												openUrl(link.url).catch((error) => appLog.error("Failed to open social link", error));
+											}}
+											className="flex min-h-12 w-full items-center gap-3 px-4 text-start transition hover-fill"
 										>
-											{activeProfile.socialNetworks.instagram.userId}
-										</a>
-									</p>
-								)}
-								{activeProfile.socialNetworks?.twitter?.userId && (
-									<p>
-										<span className="font-semibold text-[var(--text)]">
-											{t("profile_details.x")}:
-										</span>{" "}
-										<a
-											href={`https://x.com/${activeProfile.socialNetworks.twitter.userId}`}
-											target="_blank"
-											rel="noopener noreferrer"
-											className="text-[var(--text)] underline hover:opacity-75"
-										>
-											{activeProfile.socialNetworks.twitter.userId}
-										</a>
-									</p>
-								)}
-								{activeProfile.socialNetworks?.facebook?.userId && (
-									<p>
-										<span className="font-semibold text-[var(--text)]">
-											{t("profile_details.facebook")}:
-										</span>{" "}
-										<a
-											href={`https://facebook.com/${activeProfile.socialNetworks.facebook.userId}`}
-											target="_blank"
-											rel="noopener noreferrer"
-											className="text-[var(--text)] underline hover:opacity-75"
-										>
-											{activeProfile.socialNetworks.facebook.userId}
-										</a>
-									</p>
-								)}
+											<link.icon className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+											<span className="min-w-0 flex-1 truncate text-[15px] text-[var(--text)]">{link.handle}</span>
+											<ExternalLink className="h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]" />
+										</button>
+									</div>
+								))}
 							</div>
+						</div>
+					)}
+				</div>
+				)}
+			</div>
+			)}
+
+			{favoriteSongs.length > 0 && (
+				<div className="px-3">
+					<p className="mb-2 text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
+						{t("profile_details.spotify.title")}
+					</p>
+					<div className="grid grid-cols-5 gap-2">
+						{favoriteSongs.map((song) => {
+							const artistLabel = song.artists.join(", ");
+							return (
+								<button
+									key={song.id}
+									type="button"
+									disabled={!song.externalUrl}
+									onClick={() => {
+										if (song.externalUrl) {
+											void openUrl(song.externalUrl);
+										}
+									}}
+									className="group min-w-0 text-start disabled:cursor-default"
+								>
+									<span className="relative block aspect-square w-full overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--surface-2)] transition group-hover:border-[var(--accent)] group-enabled:group-hover:shadow-lg">
+										{song.albumImageUrl ? (
+											<img
+												src={song.albumImageUrl}
+												alt=""
+												loading="lazy"
+												className="h-full w-full object-cover"
+											/>
+										) : (
+											<span className="flex h-full w-full items-center justify-center bg-[var(--surface-3)]">
+												<Music className="h-5 w-5 text-[var(--text-muted)]" />
+											</span>
+										)}
+										{song.externalUrl && (
+											<span className="absolute bottom-1 end-1 flex h-5 w-5 items-center justify-center rounded-full bg-black/55 opacity-0 transition group-hover:opacity-100">
+												<ExternalLink className="h-3 w-3 text-white" />
+											</span>
+										)}
+									</span>
+									<span className="mt-1 block truncate text-xs font-medium text-[var(--text)]">{song.name}</span>
+									{artistLabel && (
+										<span className="block truncate text-[10px] leading-tight text-[var(--text-muted)]">{artistLabel}</span>
+									)}
+								</button>
+							);
+						})}
+					</div>
+				</div>
+			)}
+
+			{/* Linked profiles + reputation index (Free Grind server, flag profile-reputation). */}
+			<ProfileNetworkSection profileId={String(activeProfile.profileId)} isPreview={isPreview} onManage={onManageLinkedProfiles} />
+
+			<div className="px-3">
+				<p className="mb-2 text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
+					{t("profile_details.account_info")}
+				</p>
+				<div className="space-y-2.5">
+					<button
+						type="button"
+						onClick={async () => {
+							try {
+								await navigator.clipboard.writeText(String(activeProfile.profileId));
+								haptic(10);
+								toast.success(t("profile_details.profile_id_copied"));
+							} catch (error) {
+								appLog.error("Failed to copy profile ID to clipboard", error);
+							}
+						}}
+						className="flex cursor-pointer items-center gap-2.5 text-start"
+					>
+						<Hash className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+						<p className="text-sm text-[var(--text-muted)] select-text">{activeProfile.profileId}</p>
+					</button>
+					{accountCreatedLabel && (
+						<div className="flex items-center gap-2.5">
+							<Calendar className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+							<p className="text-sm text-[var(--text-muted)]">{accountCreatedLabel}</p>
+						</div>
+					)}
+					{typeof activeProfile.lastUpdatedTime === "number" && activeProfile.lastUpdatedTime > 0 && (
+						<div className="flex items-center gap-2.5">
+							<Pencil className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+							<p className="text-sm text-[var(--text-muted)]">
+								{t("profile_details.last_updated", { date: new Date(activeProfile.lastUpdatedTime).toLocaleDateString(i18n.language) })}
+							</p>
 						</div>
 					)}
 				</div>

@@ -1,8 +1,7 @@
 /**
  * ChatRealtimeBridge — runs the chat WebSocket app-wide while the user is
- * authenticated, so incoming messages always trigger an in-app toast (and a
- * desktop notification on supported platforms) regardless of the current
- * route.
+ * authenticated, so incoming messages always trigger an in-app toast
+ * regardless of the current route.
  *
  * Architecture:
  * - Owns the singleton ChatRealtimeManager (previously owned by ChatPage).
@@ -12,28 +11,205 @@
  * - Persists incoming messages to chatLog and shows a toast — suppressed
  *   when the user is already viewing the conversation in the foreground or
  *   when the message was sent by the current user.
+ * - Foreground system notifications: since this WebSocket delivers events
+ *   instantly while FCM always carries relay delay, incoming messages/taps
+ *   trigger an OS notification right here (only while the document is
+ *   visible — backgrounded delivery stays on FCM). Desktop/iOS go through
+ *   `notifyLocal()`; Android goes through the native `FreeGrindBridge`, whose
+ *   `NotificationPoster` dedupes against the later FCM push for the same
+ *   message/tap so it never shows twice.
+ * - While the app is in the foreground, incoming messages (for a chat that
+ *   isn't open) and taps show an in-app toast instead of an OS notification;
+ *   tapping it opens the chat / the sender's profile.
  */
 
-import { useEffect, useRef, useState } from "react";
-import { useLocation } from "react-router-dom";
+import { useCallback, useEffect, useRef } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
+import { useTranslation } from "react-i18next";
+import { platform } from "@tauri-apps/plugin-os";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useQueryClient } from "@tanstack/react-query";
+import { markRightNowRequestsUnseen } from "../services/rightNowRequestsSignal";
+import toast from "react-hot-toast";
+import { BANNER_TOAST_CLASS } from "./AppToaster";
+import { NotificationBanner } from "./NotificationBanner";
+import { haptic } from "../utils/haptics";
 import { useAuth } from "../contexts/useAuth";
-import { useApi } from "../hooks/useApi";
-import { ChatRealtimeManager } from "../services/chatRealtime";
-import { TauriWebSocket, isTauriRuntime } from "../services/tauriWebSocket";
+import { ChatRealtimeManager, setActiveRealtimeManager } from "../services/chatRealtime";
+import { isTauriRuntime } from "../services/tauriWebSocket";
+import { installAppLifecycle } from "../services/appLifecycle";
 import * as chatLog from "../services/chatLog";
 import {
 	incrementUnreadCountForProfile,
 	clearUnreadCountForProfile,
 } from "../services/chatContactIndex";
+import {
+	archiveRemovedGroup,
+	restoreRejoinedGroup,
+	toggleArchiveOnConversationDelete,
+	reconcileArchivedConversationForProfile,
+	reconcileBlockStateWithBlockedList,
+	CHAT_SYSTEM_MESSAGE_EVENT,
+	CHAT_ARCHIVE_STATE_EVENT,
+	type ChatArchiveStateChangeDetail,
+} from "../services/conversationArchive";
+import { unhideConversationOnNewMessage } from "../services/conversationHide";
 import { messageSchema, type Message } from "../types/messages";
 import type { RealtimeEnvelope, RealtimeStatus } from "../types/chat-realtime";
 import { appLog } from "../utils/logger";
-import { getOtherParticipant } from "../pages/app/chat/chatUtils";
-import { getConversation } from "../services/conversationDirectory";
+import {
+	getMediaCaptureTarget,
+	getOtherParticipant,
+	getNotificationBodyLabel,
+	getParticipantAvatarUrl,
+} from "../pages/app/chat/chatUtils";
+import { fetchAndStoreMedia } from "../services/mediaStore";
+import { captureAlbumsForMessages } from "../services/albumStore";
+import { captureReplyPreviewsForMessages } from "../services/replyMediaStore";
+import { getConversation, getDisplayName } from "../services/conversationDirectory";
+import { deleteConversationCascade, hasMessage, saveProfileSnapshot, updatePreviewTextForEditedMessage } from "../services/chatDb";
+import { GROUP_REMOVED_EVENT, type GroupRemovedDetail, applyGroupRealtimeEvent } from "../services/groupChatStore";
+import { isGroupConversationId } from "../utils/groupChat";
+import { PROFILE_LINK_EVENT } from "../services/api/reputationMethods";
+import { invalidateProfileLinks } from "../hooks/queries/useReputationQueries";
+import { runAutomationRulesForSender } from "../utils/automationRules";
+import { getTapEmoji } from "../pages/app/interest/interestUtils";
+import { looksLikeMessageUpdate } from "../utils/messageUpdates";
+import { isChatOpen } from "../services/openChatState";
+import { useApiFunctions } from "../hooks/useApiFunctions";
+import { useBlockedProfileIds } from "../hooks/queries/useProfileQueries";
+import { isReadReceiptsHidden } from "../utils/privacy";
+import { classifyProfileAccess } from "../utils/profileAccessStatus";
+import { onViewReceived } from "../grindr-workarounds";
+import {
+	isChatNotificationsEnabled,
+	isForegroundNotificationsEnabled,
+	isTapNotificationsEnabled,
+} from "../utils/notificationSettings";
+import {
+	notifyLocal,
+	clearChatNotifications,
+	markSeenInForeground,
+	withdrawMessageNotification,
+} from "../services/localNotify";
+
+let cachedIsAndroid: boolean | null = null;
+function isAndroidRuntime(): boolean {
+	if (cachedIsAndroid != null) return cachedIsAndroid;
+	if (!isTauriRuntime()) {
+		cachedIsAndroid = false;
+		return false;
+	}
+	try {
+		cachedIsAndroid = platform() === "android";
+	} catch {
+		cachedIsAndroid = false;
+	}
+	return cachedIsAndroid;
+}
+
+let cachedIsDesktop: boolean | null = null;
+// `@tauri-apps/api/window`'s window-management calls (isFocused,
+// onFocusChanged, ...) reject with "window api not available on mobile" on
+// Android/iOS — there's no windowing concept there. Must gate on this, not
+// just `isTauriRuntime()` (true on mobile too).
+function isDesktopRuntime(): boolean {
+	if (cachedIsDesktop != null) return cachedIsDesktop;
+	if (!isTauriRuntime()) {
+		cachedIsDesktop = false;
+		return false;
+	}
+	try {
+		const p = platform();
+		cachedIsDesktop = p === "windows" || p === "macos" || p === "linux";
+	} catch {
+		cachedIsDesktop = false;
+	}
+	return cachedIsDesktop;
+}
+
+// `document.visibilityState` alone isn't reliable for "is the window
+// actually visible to the user" here — WebView2 doesn't consistently flip it
+// to "hidden" when the native window is merely minimized (as opposed to a
+// browser tab switch). Tauri's own window focus state doesn't have that gap,
+// so it's tracked separately (see the effect below) and combined here.
+let isWindowFocusedCached = true;
+
+function isAppForeground(): boolean {
+	return (
+		(typeof document === "undefined" || document.visibilityState === "visible") &&
+		isWindowFocusedCached
+	);
+}
 
 export const CHAT_REALTIME_EVENT = "fg:chat-realtime-event";
 export const CHAT_REALTIME_STATUS = "fg:chat-realtime-status";
+// Fired when realtime events may have been missed (socket came back after
+// a drop, or the Rust bridge lagged) — listeners refetch over REST.
+export const CHAT_REALTIME_RESYNC = "fg:chat-realtime-resync";
 export const TAP_RECEIVED_EVENT = "fg:tap-received";
+export const VIEW_RECEIVED_EVENT = "fg:view-received";
+export const TYPING_STATUS_EVENT = "fg:typing-status";
+export const VIDEO_CALL_INCOMING_EVENT = "fg:video-call-incoming";
+export const VIDEO_CALL_ENDED_EVENT = "fg:video-call-ended";
+// Fresh bodies of dynamic (album) messages after chat.v1.refresh_dynamic —
+// detail is Message[], already persisted to chatLog.
+export const CHAT_DYNAMIC_REFRESH_EVENT = "fg:chat-dynamic-refresh";
+
+const DYNAMIC_MESSAGE_TYPES = new Set(["Album", "ExpiringAlbum", "ExpiringAlbumV2", "ProfileLinkRequest", "RightNowRequestIncoming"]);
+const REFRESH_BATCH_SIZE = 100;
+// Re-exported so existing importers (e.g. ChatPage.tsx) don't need to change
+// where they pull this from — conversationArchive.ts is now the source of
+// truth since it also dispatches this event from applySelfBlockAction.
+export { CHAT_SYSTEM_MESSAGE_EVENT };
+
+export type TypingStatusDetail = {
+	conversationId: string;
+	profileId: string;
+	status: "Typing" | "Cleared" | "Sent";
+};
+
+export type VideoCallIncomingDetail = {
+	channelId: string;
+	senderId: string;
+};
+
+function parseIncomingCallPayload(payload: unknown): VideoCallIncomingDetail | null {
+	if (!payload || typeof payload !== "object") return null;
+	const r = payload as Record<string, unknown>;
+	const channelId = typeof r.channelId === "string" ? r.channelId : null;
+	const sender = r.senderId;
+	const senderId =
+		typeof sender === "string" ? sender : typeof sender === "number" ? String(sender) : null;
+	if (!channelId || !senderId) return null;
+	return { channelId, senderId };
+}
+
+export type VideoCallEndedDetail = {
+	channelId: string;
+	senderId: string;
+	recipientId: string;
+	result: string;
+	duration: number;
+};
+
+function parseCallEndedPayload(payload: unknown): VideoCallEndedDetail | null {
+	if (!payload || typeof payload !== "object") return null;
+	const r = payload as Record<string, unknown>;
+	const channelId = typeof r.channelId === "string" ? r.channelId : null;
+	if (!channelId) return null;
+	const toId = (v: unknown): string =>
+		typeof v === "string" ? v : typeof v === "number" ? String(v) : "";
+	const duration = typeof r.duration === "number" ? r.duration : Number(r.duration) || 0;
+	const result = typeof r.result === "string" ? r.result : "UNKNOWN";
+	return {
+		channelId,
+		senderId: toId(r.senderId),
+		recipientId: toId(r.recipientId),
+		result,
+		duration,
+	};
+}
 
 // Global cache to allow late-mounting components (like ChatPage) to see the
 // current connection status immediately.
@@ -82,7 +258,7 @@ function parseTapPayload(payload: unknown): TapReceivedDetail | null {
 	const display =
 		typeof r.senderDisplayName === "string" && r.senderDisplayName.trim()
 			? r.senderDisplayName.trim()
-			: profileId;
+			: "";
 	const image =
 		typeof r.senderProfileImageHash === "string" && r.senderProfileImageHash
 			? r.senderProfileImageHash
@@ -100,6 +276,27 @@ function parseTapPayload(payload: unknown): TapReceivedDetail | null {
 		timestamp: Number.isFinite(timestamp) ? timestamp : Date.now(),
 		tapType: Number.isFinite(tapType as number) ? (tapType as number) : null,
 		isMutual: r.isMutual === true,
+	};
+}
+
+export type ViewReceivedDetail = {
+	profileId: string;
+	imageHash: string | null;
+	timestamp: number;
+	viewedCount: number;
+};
+
+function parseViewPayload(payload: unknown): ViewReceivedDetail | null {
+	if (!payload || typeof payload !== "object") return null;
+	const r = payload as Record<string, unknown>;
+	const mostRecent = r.mostRecent as Record<string, unknown> | undefined;
+	if (!mostRecent || mostRecent.profileId == null || mostRecent.profileId === "") return null;
+
+	return {
+		profileId: String(mostRecent.profileId),
+		imageHash: (mostRecent.photoHash as string) || null,
+		timestamp: Number(mostRecent.timestamp) || Date.now(),
+		viewedCount: Number(r.viewedCount) || 0,
 	};
 }
 
@@ -134,69 +331,194 @@ function extractMessages(envelope: RealtimeEnvelope): Message[] {
 	});
 }
 
-export function ChatRealtimeBridge() {
-	const { userId } = useAuth();
-	const { callMethod } = useApi();
-	const location = useLocation();
+// The chatDb lookup also catches updates the payload alone can't (e.g. us
+// removing our reaction) — anything already stored isn't new.
+async function isMessageUpdate(m: Message, userId: string | number | null | undefined): Promise<boolean> {
+	if (looksLikeMessageUpdate(m, userId)) return true;
+	return hasMessage(m.messageId).catch(() => false);
+}
 
-	const [token, setToken] = useState<string | null>(null);
+export function ChatRealtimeBridge() {
+	const { userId, settingsReady } = useAuth();
+    const apiFunctions = useApiFunctions();
+	const queryClient = useQueryClient();
+	const location = useLocation();
+	const { t } = useTranslation();
+
+	const tRef = useRef(t);
+	useEffect(() => {
+		tRef.current = t;
+	}, [t]);
+
+	const navigate = useNavigate();
+	const navigateRef = useRef(navigate);
+	useEffect(() => {
+		navigateRef.current = navigate;
+	}, [navigate]);
 
 	const pathRef = useRef(location.pathname);
 	useEffect(() => {
 		pathRef.current = location.pathname;
 	}, [location.pathname]);
 
+	// Keeps `isWindowFocusedCached` (used by `isAppForeground()`) in sync —
+	// see that function's comment for why `document.visibilityState` alone
+	// can't be trusted for the minimized case on this platform.
+	useEffect(() => {
+		if (!isDesktopRuntime()) return;
+		let unlisten: (() => void) | undefined;
+		let cancelled = false;
+
+		const appWindow = getCurrentWindow();
+		void appWindow.isFocused().then((focused) => {
+			if (!cancelled) isWindowFocusedCached = focused;
+		});
+		void appWindow
+			.onFocusChanged(({ payload }) => {
+				isWindowFocusedCached = payload;
+			})
+			.then((fn) => {
+				if (cancelled) {
+					fn();
+				} else {
+					unlisten = fn;
+				}
+			});
+
+		return () => {
+			cancelled = true;
+			unlisten?.();
+		};
+	}, []);
+
 	const userIdRef = useRef<number | null>(userId);
 	useEffect(() => {
 		userIdRef.current = userId;
 	}, [userId]);
 
-	// Fetch the WS token whenever the authenticated user changes.
+	// tap.v1.tap_sent and tap.v2.tap_sent can both fire for the same real tap
+	// during the server's version rollout — dedupe by sender within a short
+	// window so we don't double-toast/double-notify for one tap.
+	const recentTapSendersRef = useRef<Map<string, number>>(new Map());
+	const shouldProcessIncomingTap = useCallback((profileId: string) => {
+		const now = Date.now();
+		const seen = recentTapSendersRef.current;
+		for (const [key, seenAt] of seen) {
+			if (now - seenAt > 10_000) {
+				seen.delete(key);
+			}
+		}
+		if (seen.has(profileId)) {
+			return false;
+		}
+		seen.set(profileId, now);
+		return true;
+	}, []);
+
+	// A profile still existing (isProfileFound) doesn't mean a conversation
+	// archived by *our own* block should reopen — we chose that, and merely
+	// receiving a stray/in-flight WS event for them (e.g. a read receipt
+	// that was already in transit when the block landed) shouldn't undo it.
+	// Only reconcile activity for profiles we haven't blocked ourselves.
+	const { data: blockedProfileIdsData } = useBlockedProfileIds(userId != null);
+	const blockedProfileIdsRef = useRef<Set<string>>(new Set());
+	useEffect(() => {
+		blockedProfileIdsRef.current = new Set(blockedProfileIdsData ?? []);
+	}, [blockedProfileIdsData]);
+
+	// Catches a block or unblock made on another device while this device's
+	// app wasn't running at all, or otherwise missed here (so no WS event or
+	// 403 ever had a chance to tell it) — see reconcileBlockStateWithBlockedList.
+	// Runs whenever the blocked-profile-ids data actually changes (a new
+	// array reference only happens on genuine query success), typically once
+	// at app start and again on any later refetch. Gated on settingsReady,
+	// not just userId, so this can't run against the previous account's
+	// chatDb file (or the pre-login legacy one) while setActiveChatDbUser is
+	// still switching — it would read/write the wrong conversations table.
+	useEffect(() => {
+		if (userId == null || !settingsReady || !blockedProfileIdsData) {
+			return;
+		}
+		void reconcileBlockStateWithBlockedList(blockedProfileIdsData);
+	}, [userId, settingsReady, blockedProfileIdsData]);
+
+	// A conversation getting unarchived anywhere (this component's own WS
+	// handling, ChatPage's foreground reappearance check, or inboxSync's
+	// background walk) can mean a block cleared on another device — refresh
+	// the blocked-profile-ids cache so the chat header's unblock button
+	// (isBlockedBySelf in ChatPage) doesn't keep showing stale state that
+	// nothing else would otherwise think to refetch for up to its 10-minute
+	// staleTime.
+	useEffect(() => {
+		const handleArchiveStateChange = (event: Event) => {
+			const detail = (event as CustomEvent<ChatArchiveStateChangeDetail>).detail;
+			if (detail?.archived === false) {
+				void queryClient.invalidateQueries({ queryKey: ["blocked-profile-ids"] });
+			}
+		};
+		window.addEventListener(CHAT_ARCHIVE_STATE_EVENT, handleArchiveStateChange);
+		return () => {
+			window.removeEventListener(CHAT_ARCHIVE_STATE_EVENT, handleArchiveStateChange);
+		};
+	}, [queryClient]);
+
+	// In-app toast whenever someone else blocks or unblocks us. Every
+	// reconciliation path that determines this (the live WS event, ChatPage's
+	// foreground reappearance check, inboxSync's background walk) funnels
+	// through inserting a "SystemBlocked"/"SystemUnblocked" message and
+	// dispatching this same event — listening once here, app-wide, catches
+	// all of them regardless of which screen is open. Deliberately skips the
+	// "...BySelf" variants: those are our own block/unblock action, already
+	// visible from the confirmation dialog and immediate UI change that
+	// triggered it, not something we need telling about again.
+	useEffect(() => {
+		const handleSystemMessage = (event: Event) => {
+			const messages = (event as CustomEvent<Message[]>).detail;
+			if (!Array.isArray(messages)) return;
+			for (const message of messages) {
+				if (message.type !== "SystemBlocked" && message.type !== "SystemUnblocked") {
+					continue;
+				}
+				// getDisplayName falls back to the other participant's profile ID
+				// when the conversation has no name (e.g. never nicknamed/messaged
+				// enough to get one) — a bare "someone" is only shown when the
+				// conversation isn't even in the directory yet.
+				const name =
+					getDisplayName(message.conversationId, userIdRef.current) ??
+					tRef.current("common.unknown_display_name");
+				if (message.type === "SystemBlocked") {
+					toast(
+						tRef.current("chat.block_toast.blocked_by_other", {
+							defaultValue: "{{name}} blocked you",
+							name,
+						}),
+					);
+				} else {
+					toast.success(
+						tRef.current("chat.block_toast.unblocked_by_other", {
+							defaultValue: "{{name}} unblocked you",
+							name,
+						}),
+					);
+				}
+			}
+		};
+		window.addEventListener(CHAT_SYSTEM_MESSAGE_EVENT, handleSystemMessage as EventListener);
+		return () => {
+			window.removeEventListener(CHAT_SYSTEM_MESSAGE_EVENT, handleSystemMessage as EventListener);
+		};
+	}, []);
+
+	// Boot the realtime manager whenever the user is authenticated.
+	// getToken is called fresh on every (re)connect so an expired token
+	// never blocks reconnection.
 	useEffect(() => {
 		if (!userId) {
-			setToken(null);
 			if (lastKnownStatus !== "idle") {
 				dispatchStatus("idle");
 			}
-			// appLog.debug("[chat-ws:bridge] no user; skipping token fetch");
 			return;
 		}
-
-		let active = true;
-		void callMethod("websocket_token")
-			.then((tok) => {
-				if (!active) return;
-				// Ensure we handle both raw string and potential object wrappers
-				const value = typeof tok === "string" ? tok : null;
-
-				/*
-				appLog.debug("[chat-ws:bridge] token received", {
-					success: !!value,
-					type: typeof tok,
-					length: value?.length ?? 0
-				});
-				*/
-
-				setToken(value);
-				if (!value) {
-					dispatchStatus("polling");
-				}
-			})
-			.catch(() => {
-				if (!active) return;
-				setToken(null);
-				dispatchStatus("polling");
-				appLog.warn("[chat-ws:bridge] token fetch failed");
-			});
-
-		return () => {
-			active = false;
-		};
-	}, [callMethod, userId]);
-
-	// Boot the realtime manager once we have a token.
-	useEffect(() => {
-		if (!token) return;
 
 		/*
 		appLog.debug("[chat-ws:bridge] starting manager", {
@@ -204,100 +526,562 @@ export function ChatRealtimeBridge() {
 		});
 		*/
 
+		// Shared by both the conversation.delete handling below and the
+		// "any activity from an archived profile" recheck: deleted/banned
+		// profiles are simply missing from this response instead of
+		// erroring, same as the stale-share cleanup on the albums page.
+		const isProfileFound = async (profileId: string): Promise<boolean> => {
+			try {
+				const raw = await apiFunctions.getProfilesByIds([profileId]);
+				const profiles =
+					raw && typeof raw === "object" && Array.isArray((raw as { profiles?: unknown }).profiles)
+						? (raw as { profiles: unknown[] }).profiles
+						: [];
+				return profiles.some(
+					(p) =>
+						p &&
+						typeof p === "object" &&
+						String((p as { profileId?: unknown }).profileId) === profileId,
+				);
+			} catch {
+				return true;
+			}
+		};
+
+		// A fresh chat.v1.conversation.delete that isn't self-attributed could
+		// mean either "they blocked us" or "their profile was deleted/banned" —
+		// isProfileFound (a bulk profile lookup) can't reliably tell those apart.
+		// classifyProfileAccess reads GET /v7/profiles/:id's stub-response quirk
+		// (see its own doc comment) — an immediate and reliable signal (confirmed
+		// live right after a block, no propagation delay), unlike attempting to
+		// load the conversation's messages, which can lag behind the block being
+		// enacted server-side.
+		const checkConversationAccessible = async (
+			profileId: string,
+		): Promise<"accessible" | "not_found" | "blocked"> => {
+			try {
+				const profile = await apiFunctions.getProfileDetail(profileId);
+				const status = classifyProfileAccess(profile);
+				// A profile that just blocked us is often still fully fetchable for
+				// a few seconds before it collapses to the nulled stub — snapshot
+				// it while we can (awaited, so it lands before recordBlockEvent reads
+				// it) so the Block Activity entry can show a name + avatar even for
+				// someone we never had a chat thread with. Mirrors GridProfilePage/
+				// ChatPage, which snapshot on any accessible fetch.
+				if (status === "accessible") {
+					await saveProfileSnapshot(profileId, JSON.stringify(profile)).catch(() => {});
+				}
+				return status;
+			} catch {
+				return "accessible";
+			}
+		};
+
+		// Fallback for toggleArchiveOnConversationDelete's self/other
+		// disambiguation: the local self-action marker only exists when the
+		// block came from this device, so blocking the same profile from
+		// another device would otherwise show as "You were blocked" here.
+		// Fetches fresh (bypassing the cached blockedProfileIdsRef/query
+		// staleTime) rather than risking a stale answer — this only runs on an
+		// actual chat.v1.conversation.delete event, rare enough that a live
+		// network round trip here is cheap, and correctness matters more than
+		// saving one request for exactly this decision.
+		const isBlockedByMe = async (profileId: string): Promise<boolean> => {
+			try {
+				const blockedIds = await apiFunctions.getBlockedProfileIds();
+				// Seed the "blocked-profile-ids" query cache with this fresh
+				// result — it's what ChatPage's unblock button (and every other
+				// consumer) reads, and its 10-minute staleTime would otherwise
+				// leave a block made on another device invisible here until the
+				// next unrelated refetch, even after reopening the inbox.
+				queryClient.setQueryData<string[]>(["blocked-profile-ids"], blockedIds);
+				return blockedIds.includes(profileId);
+			} catch {
+				return false;
+			}
+		};
+
+		// Any incoming activity from a profile whose conversation is
+		// currently archived (typing, a read receipt, a tap, a view, a
+		// message) is a live signal they might be reachable again — recheck
+		// and pull it out of archive instead of waiting for the next
+		// chat.v1.conversation.delete, inbox reload, or profile-page visit.
+		const maybeUnarchiveOnActivity = (profileId: string | number | null | undefined) => {
+			if (profileId == null) return;
+			const id = String(profileId);
+			if (blockedProfileIdsRef.current.has(id)) return;
+			void reconcileArchivedConversationForProfile(id, isProfileFound);
+		};
+
+		// While the app is in the foreground, incoming messages for a chat
+		// that isn't open (the caller already skips the open one) show an
+		// in-app toast instead of an OS notification. Android won't post the
+		// later FCM push on top of it: NotificationPoster drops pushes while
+		// the app is visible ("realtime bridge covers it"), and FCM handles
+		// the background case on its own. Desktop/iOS have no competing push
+		// channel at all, so in the background they still notify through
+		// notifyLocal() (e.g. minimized window).
+		const triggerIncomingMessageNotification = (m: Message) => {
+			if (!isChatNotificationsEnabled()) return;
+
+			const conv = getConversation(m.conversationId);
+			// Groups: "<group>" as title, "<sender>: <text>" as body, the sender's photo.
+			const groupSender = isGroupConversationId(m.conversationId)
+				? conv?.data.participants.find((p) => p.profileId === Number(m.senderId)) ?? null
+				: null;
+			const senderName = conv?.data.name?.trim() || tRef.current("common.unknown_display_name");
+			const label = getNotificationBodyLabel(m, tRef.current);
+			const bodyText = groupSender?.displayName ? `${groupSender.displayName}: ${label}` : label;
+
+			if (isAppForeground()) {
+				if (!isForegroundNotificationsEnabled()) return;
+				const other = groupSender ?? (conv ? getOtherParticipant(conv, userIdRef.current) : null);
+				const avatarUrl = getParticipantAvatarUrl(other?.primaryMediaHash);
+				const chatPath = `/chat/${encodeURIComponent(m.conversationId)}`;
+				toast(
+					(tst) => (
+						<NotificationBanner
+							title={senderName}
+							body={bodyText}
+							avatarUrl={avatarUrl}
+							onOpen={() => {
+								toast.dismiss(tst.id);
+								navigateRef.current(chatPath);
+							}}
+						/>
+					),
+					{
+						// One toast per conversation — a burst of messages updates
+						// it in place instead of stacking.
+						id: `chat:${m.conversationId}`,
+						className: BANNER_TOAST_CLASS,
+						duration: 4000,
+					},
+				);
+				haptic(15);
+				return;
+			}
+
+			if (isAndroidRuntime()) return;
+			void notifyLocal({ title: senderName, body: bodyText, group: m.conversationId });
+		};
+
+		const triggerTapNotification = (tap: TapReceivedDetail) => {
+			if (
+				!isAppForeground() ||
+				!isTapNotificationsEnabled() ||
+				!isForegroundNotificationsEnabled()
+			)
+				return;
+
+			// The taps list already shows it live there — no need to announce it.
+			const onTapsRoute =
+				pathRef.current === "/interest" || pathRef.current.startsWith("/interest/");
+			if (onTapsRoute) return;
+
+			const senderName = tap.displayName || tRef.current("common.unknown_display_name");
+			// Plain taps use the native Android notification's text; a tap back
+			// keeps its own (the push has no mutual variant, but it's worth knowing).
+			const bodyText = tap.isMutual
+				? tRef.current("chat.notifications.tapped_you_back")
+				: tRef.current("push_notifications.tap_notification_body");
+
+			// This only ever runs in the foreground, so an in-app toast replaces
+			// the OS notification here rather than stacking on top of it. Android
+			// won't post the later FCM push either: NotificationPoster drops
+			// pushes while the app is visible ("realtime bridge covers it").
+			const profilePath = `/profile/${encodeURIComponent(tap.profileId)}`;
+			const tapEmoji = getTapEmoji(tap.tapType);
+			const avatarUrl = getParticipantAvatarUrl(tap.imageHash);
+			toast(
+				(tst) => (
+					<NotificationBanner
+						title={senderName}
+						body={bodyText}
+						avatarUrl={avatarUrl}
+						fallbackIcon={<span className="text-xl leading-none">{tapEmoji}</span>}
+						badge={avatarUrl ? tapEmoji : undefined}
+						onOpen={() => {
+							toast.dismiss(tst.id);
+							navigateRef.current(profilePath);
+						}}
+					/>
+				),
+				{
+					id: `tap:${tap.profileId}`,
+					className: BANNER_TOAST_CLASS,
+					duration: 3500,
+				},
+			);
+			haptic(15);
+		};
+
+		let lastResyncAt = 0;
+		const requestResync = (reason: string) => {
+			const now = Date.now();
+			if (now - lastResyncAt < 2_000) return;
+			lastResyncAt = now;
+			appLog.debug(`[chat-ws:bridge] resync (${reason})`);
+			void queryClient.invalidateQueries({ queryKey: ["interest", "list"] });
+			window.dispatchEvent(new CustomEvent(CHAT_REALTIME_RESYNC));
+		};
+
 		const manager = new ChatRealtimeManager({
-			url: "wss://grindr.mobi/v1/ws",
-			getToken: () => token,
+			getOwnProfileId: () => userIdRef.current,
 			onStatusChange: (status) => {
 				dispatchStatus(status);
 			},
+			onReconnect: () => requestResync("reconnected"),
+			onEventsDropped: () => requestResync("events dropped"),
 			onEvent: async (envelope) => {
-				// appLog.debug(`[chat-ws:bridge] onEvent type=${envelope.type} payload=${JSON.stringify(envelope.payload)}`);
+				appLog.debug(`[chat-ws:bridge] onEvent type=${envelope.type} payload=${JSON.stringify(envelope.payload)}`);
 
 				// Dispatch event AFTER potential DB updates if we want consistency,
 				// or BEFORE if we want speed. Let's do DB updates first for critical stuff.
 
-				// tap.v1.tap_sent — fires on both sender + recipient. We only
-				// surface incoming taps (where we are the recipient).
-				if (envelope.type === "tap.v1.tap_sent") {
+				// tap.v1.tap_sent / tap.v2.tap_sent — fire on both sender + recipient.
+				// We only surface incoming taps (where we are the recipient). v2
+				// carries isMutual in its payload; v1 does not, so isMutual only
+				// resolves reliably once a v2 event (or its own REST response) arrives.
+				if (envelope.type === "tap.v1.tap_sent" || envelope.type === "tap.v2.tap_sent") {
 					const tap = parseTapPayload(envelope.payload);
 					const currentUserId = userIdRef.current;
 					if (
 						tap &&
 						currentUserId != null &&
-						Number(tap.profileId) !== Number(currentUserId)
+						Number(tap.profileId) !== Number(currentUserId) &&
+						shouldProcessIncomingTap(tap.profileId)
 					) {
+						appLog.debug(`[chat-ws:bridge] Incoming tap received from profileId: ${tap.profileId}`);
+						if (isAppForeground()) markSeenInForeground({ tapSenderId: String(tap.profileId) });
 						window.dispatchEvent(
 							new CustomEvent<TapReceivedDetail>(TAP_RECEIVED_EVENT, {
 								detail: tap,
 							}),
 						);
-						// appLog.debug("[chat-ws:bridge] tap", { from: tap.displayName });
+						triggerTapNotification(tap);
+						maybeUnarchiveOnActivity(tap.profileId);
+						runAutomationRulesForSender(tap.profileId, "tap_received", apiFunctions).catch(() => {});
 					}
 				}
 
-				if (envelope.type === "chat.v1.read" || envelope.type === "chat.v1.message_read") {
-					const payloads: unknown[] = [envelope.payload, envelope.data, envelope];
-					for (const payload of payloads) {
-						if (!payload || typeof payload !== "object") continue;
-						const record = payload as Record<string, unknown>;
-						const cid = (record.conversationId || record.cid) as string | undefined;
-						const rawTs = Number(record.timestamp || record.ts);
-						const ts = rawTs < 100_000_000_000 ? rawTs * 1000 : rawTs;
-						const senderId = Number(record.profileId || record.senderId);
+				// rightnow.v1.request — someone asked to connect about our Right Now
+				// post: refresh the requests inbox and light the Right Now nav dot
+				// (unless that page is already open).
+				if (envelope.type === "rightnow.v1.request") {
+					void queryClient.invalidateQueries({ queryKey: ["rightnow", "requests", "inbox"] });
+					const currentUserId = userIdRef.current;
+					if (currentUserId != null && !window.location.pathname.startsWith("/right-now")) {
+						markRightNowRequestsUnseen(currentUserId);
+					}
+				}
+
+				if (envelope.type === "viewed_me.v1.new_view_received") {
+					const view = parseViewPayload(envelope.payload);
+					if (view) {
+						appLog.debug(`[chat-ws:bridge] Incoming view received. Total views: ${view.viewedCount}`);
+						// Grindr workarounds see the event before the refetch it triggers.
+						void onViewReceived(view)
+							.catch(() => {})
+							.finally(() => {
+								window.dispatchEvent(
+									new CustomEvent<ViewReceivedDetail>(VIEW_RECEIVED_EVENT, {
+										detail: view,
+									}),
+								);
+							});
+						maybeUnarchiveOnActivity(view.profileId);
+					}
+				}
+
+				if (envelope.type === "videocall.v1.incoming_call") {
+					const call = parseIncomingCallPayload(envelope.payload);
+					if (call) {
+						appLog.debug(`[chat-ws:bridge] Incoming video call from profileId: ${call.senderId}`);
+						window.dispatchEvent(
+							new CustomEvent<VideoCallIncomingDetail>(VIDEO_CALL_INCOMING_EVENT, {
+								detail: call,
+							}),
+						);
+					}
+				}
+
+				if (envelope.type === "videocall.v1.call_ended") {
+					const ended = parseCallEndedPayload(envelope.payload);
+					if (ended) {
+						appLog.debug(`[chat-ws:bridge] Video call ended: ${JSON.stringify(ended)}`);
+						window.dispatchEvent(
+							new CustomEvent<VideoCallEndedDetail>(VIDEO_CALL_ENDED_EVENT, {
+								detail: ended,
+							}),
+						);
+					}
+				}
+
+				// chat.v1.refresh_dynamic — an album was shared, unshared, its
+				// expiration changed or it was viewed. The event carries no
+				// message, only the conversation: re-fetch every dynamic message
+				// we have for it (Refresh messages) so e.g. an unshared album's
+				// message turns not-viewable without reopening the chat.
+				if (envelope.type === "chat.v1.refresh_dynamic") {
+					const record = envelope.payload as Record<string, unknown> | undefined;
+					const cid = typeof record?.conversationId === "string" ? record.conversationId : null;
+					if (cid) {
+						try {
+							const { messages: stored } = await chatLog.readLog(cid);
+							const ids = stored
+								.filter((m) => !m.unsent && (m.dynamic === true || DYNAMIC_MESSAGE_TYPES.has(m.type)))
+								.map((m) => m.messageId);
+							const refreshed: Message[] = [];
+							for (let i = 0; i < ids.length; i += REFRESH_BATCH_SIZE) {
+								refreshed.push(
+									...(await apiFunctions.refreshMessages({
+										conversationId: cid,
+										messageIds: ids.slice(i, i + REFRESH_BATCH_SIZE),
+									})),
+								);
+							}
+							if (refreshed.length > 0) {
+								await chatLog.appendMessages(cid, refreshed);
+								captureAlbumsForMessages(refreshed, cid, (id) => apiFunctions.getAlbum(id), userIdRef.current);
+								window.dispatchEvent(
+									new CustomEvent<Message[]>(CHAT_DYNAMIC_REFRESH_EVENT, { detail: refreshed }),
+								);
+							}
+						} catch (error) {
+							appLog.warn("[chat-ws:bridge] refresh_dynamic failed", error);
+						}
+					}
+				}
+
+				// Linked profiles (Free Grind server, flag profile-reputation): a link
+				// or request changed. Requests and confirmations arrive as chat
+				// messages (banner + push like any message); this only refreshes
+				// the profile sections and the links page.
+				if (envelope.type === PROFILE_LINK_EVENT) {
+					invalidateProfileLinks(queryClient);
+				}
+
+				// Group chats (Free Grind server): invites, changes, and being out of a group.
+				if (typeof envelope.type === "string" && envelope.type.startsWith("chat.v1.group.")) {
+					const removed = applyGroupRealtimeEvent(envelope.type, envelope.payload);
+					// Back in a group we'd left (re-invited and joined, maybe elsewhere): live again.
+					const updated = (envelope.payload as { group?: { conversationId?: string; myStatus?: string } } | undefined)?.group;
+					if (envelope.type === "chat.v1.group.updated" && updated?.myStatus === "ACTIVE" && updated.conversationId) {
+						await restoreRejoinedGroup(updated.conversationId);
+					}
+					if (removed) {
+						void clearChatNotifications(removed.conversationId).catch(() => {});
+						if (removed.reason === "declined") {
+							// Only an invite: there's no conversation to keep.
+							await deleteConversationCascade(removed.conversationId).catch((error: unknown) => {
+								appLog.warn("[chat-ws:bridge] dropping group conversation failed", error);
+							});
+						} else {
+							// Left (maybe on another device), removed or the group is gone:
+							// it stays readable but archived until the user deletes it.
+							await archiveRemovedGroup(removed.conversationId, removed.reason === "left" ? "left" : "removed");
+						}
+						window.dispatchEvent(new CustomEvent<GroupRemovedDetail>(GROUP_REMOVED_EVENT, { detail: removed }));
+					}
+				}
+
+				if (envelope.type === "chat.v1.typing_status") {
+					const record = envelope.payload as Record<string, unknown> | undefined;
+					if (record) {
+						const conversationId = record.conversationId as string | undefined;
+						const profileId = record.profileId as string | undefined;
+						const status = record.status as string | undefined;
+						if (conversationId && profileId && status) {
+							window.dispatchEvent(
+								new CustomEvent<TypingStatusDetail>(TYPING_STATUS_EVENT, {
+									detail: { conversationId, profileId, status: status as TypingStatusDetail["status"] },
+								}),
+							);
+							if (userIdRef.current != null && Number(profileId) !== Number(userIdRef.current)) {
+								maybeUnarchiveOnActivity(profileId);
+							}
+						}
+					}
+				}
+
+				if (envelope.type === "chat.v1.conversation_read") {
+					const record = envelope.payload as Record<string, unknown> | undefined;
+					if (record) {
+						const cid = record.conversationId as string | undefined;
+						const ts = Number(record.timestamp); // already milliseconds per API spec
+						const senderId = Number(record.profileId);
 
 						if (cid && !Number.isNaN(ts) && !Number.isNaN(senderId) && userIdRef.current != null) {
 							if (senderId !== userIdRef.current) {
-								// The other person read our messages
 								await chatLog.appendMessages(cid, [], ts);
+								maybeUnarchiveOnActivity(senderId);
 							} else {
-								// WE read the messages (possibly on another device)
-								// Try to find the profileId for this conversation to clear the index
+								// This is the server echoing back that *we* read this
+								// conversation — possibly from another of our own
+								// devices — so any system notification still showing
+								// for it here is now stale.
+								void clearChatNotifications(cid).catch(() => {});
+
 								const conv = getConversation(cid);
-								if (conv) {
+								if (conv && !isReadReceiptsHidden(cid)) {
 									const other = getOtherParticipant(conv, userIdRef.current);
 									if (other?.profileId) {
 										await clearUnreadCountForProfile(String(other.profileId)).catch(() => {});
 									}
 								}
 							}
-							break;
+						}
+					}
+				}
+
+				// chat.v1.conversation.delete — fires both when we're blocked/deleted
+				// and on unblock, with nothing in the payload to tell which. Toggle
+				// based on current archived state instead: never delete, and never
+				// archive an already-archived conversation again. Runs before the
+				// forwarded CustomEvent below so any mounted ChatPage listener sees
+				// DB-consistent state.
+				if (
+					envelope.type === "chat.v1.conversation.delete" &&
+					envelope.payload &&
+					typeof envelope.payload === "object"
+				) {
+					const record = envelope.payload as Record<string, unknown>;
+					const ids = Array.isArray(record.conversationIds)
+						? (record.conversationIds as unknown[]).filter(
+								(id): id is string => typeof id === "string",
+							)
+						: [];
+					if (ids.length > 0) {
+						// Like open-grind: a deleted conversation takes its
+						// notification with it.
+						for (const id of ids) void clearChatNotifications(id).catch(() => {});
+						const notificationId =
+							typeof envelope.notificationId === "string" ? envelope.notificationId : null;
+						const { systemMessages } = await toggleArchiveOnConversationDelete(
+							ids,
+							notificationId,
+							isProfileFound,
+							isBlockedByMe,
+							checkConversationAccessible,
+							userIdRef.current,
+						);
+						if (systemMessages.length > 0) {
+							window.dispatchEvent(
+								new CustomEvent<Message[]>(CHAT_SYSTEM_MESSAGE_EVENT, {
+									detail: systemMessages,
+								}),
+							);
 						}
 					}
 				}
 
 				const messages = extractMessages(envelope);
 				if (messages.length > 0) {
-					// Persist (idempotent) so navigating to the chat shows the message
-					// even if ChatPage is not mounted right now.
 					const byConv = new Map<string, Message[]>();
 					for (const m of messages) {
+						let messageText = "";
+						const msgBody: any = m.body;
+						if (msgBody && typeof msgBody.text === "string") {
+							messageText = msgBody.text;
+						}
+
+						const fromOther = userIdRef.current != null && Number(m.senderId) !== Number(userIdRef.current);
+						if (fromOther && m.unsent) withdrawMessageNotification(m.conversationId, m.messageId);
+						// Edited (Free Grind server): the stored inbox preview follows when it shows this message.
+						if (m.editedAt != null && !m.unsent && typeof msgBody?.text === "string") {
+							void updatePreviewTextForEditedMessage(m.conversationId, m.messageId, msgBody.text).catch(() => undefined);
+						}
+						// chat.v1.message_sent also fires when a message is unsent or
+						// reacted to, re-delivering the original message (same
+						// messageId). Reacting to their message would otherwise look
+						// like a new incoming one — notification + unread bump.
+						// Group membership lines (joined, left, …) are stored but never
+						// notify or count as unread (the server doesn't count them either).
+						const isIncoming =
+							fromOther && m.type !== "GroupEvent" && !(await isMessageUpdate(m, userIdRef.current));
+
+						// --- CUSTOM AUTOMATION RULES ---
+						if (isIncoming && m.senderId) {
+							const { blocked: blockedByNewChat } = await runAutomationRulesForSender(
+								String(m.senderId),
+								"new_chat",
+								apiFunctions,
+								undefined,
+								messageText,
+							).catch(() => ({ blocked: false, matchedRuleNames: [] }));
+							if (blockedByNewChat) continue; // A rule blocked the sender — skip processing this message.
+
+							// Dedupes per messageId rather than per sender — the custom-rule
+							// equivalent of the forbidden keyword check above (e.g. a
+							// "message contains keyword" rule), evaluated once per message.
+							const { blocked: blockedByMessage } = await runAutomationRulesForSender(
+								String(m.senderId),
+								"message_received",
+								apiFunctions,
+								undefined,
+								messageText,
+								m.messageId,
+							).catch(() => ({ blocked: false, matchedRuleNames: [] }));
+							if (blockedByMessage) continue;
+						}
+						// -----------------------------
+
 						const list = byConv.get(m.conversationId) ?? [];
 						list.push(m);
 						byConv.set(m.conversationId, list);
 
+						if (isIncoming) {
+							// Already delivered in the app (open chat, banner or
+							// unread badge) — the later FCM push mustn't notify.
+							if (isAppForeground()) markSeenInForeground({ messageId: m.messageId });
+							maybeUnarchiveOnActivity(m.senderId);
+							void unhideConversationOnNewMessage(m.conversationId);
+						}
+
 						// Update local contact index for unread badge persistence
-						if (
-							userIdRef.current != null &&
-							Number(m.senderId) !== Number(userIdRef.current)
-						) {
-							// Don't increment if we are currently looking at this conversation
-							const path = pathRef.current;
+						if (isIncoming) {
+							// What ChatPage reports as on screen, not the route:
+							// the desktop split view and chats opened from a
+							// profile don't carry the conversation in the URL.
+							// Foreground too — a minimized window still "shows"
+							// the chat, but the user can't actually see it.
 							const isViewingThisChat =
-								path === `/app/chat/${m.conversationId}` ||
-								path.startsWith(`/app/chat/${m.conversationId}/`);
+								isAppForeground() && isChatOpen(m.conversationId, m.senderId);
 							if (!isViewingThisChat) {
-								await incrementUnreadCountForProfile(
-									String(m.senderId),
-									m.conversationId,
-									m.timestamp,
-								).catch((err) => {
-									appLog.warn("[chat-ws:bridge] failed to increment unread", err);
-								});
+								// The per-profile index is for 1:1 chats; a group's
+								// unread count comes from its inbox entry.
+								if (!isGroupConversationId(m.conversationId)) {
+									await incrementUnreadCountForProfile(
+										String(m.senderId),
+										m.conversationId,
+										m.timestamp,
+									).catch((err) => {
+										appLog.warn("[chat-ws:bridge] failed to increment unread", err);
+									});
+								}
+								triggerIncomingMessageNotification(m);
 							}
 						}
 					}
+					
 					for (const [cid, msgs] of byConv) {
 						await chatLog.appendMessages(cid, msgs);
+						for (const msg of msgs) {
+							const target = getMediaCaptureTarget(msg);
+							if (!target) continue;
+							void fetchAndStoreMedia({
+								mediaKey: target.mediaKey,
+								kind: target.kind,
+								url: target.url,
+								conversationId: cid,
+								messageId: msg.messageId,
+								// Our own media is kept even with archive mode off.
+								viewOnce: target.viewOnce && Number(msg.senderId) !== Number(userIdRef.current),
+							});
+						}
+						captureAlbumsForMessages(msgs, cid, (id) => apiFunctions.getAlbum(id), userIdRef.current);
+						captureReplyPreviewsForMessages(msgs, cid);
 					}
 				}
 
@@ -308,38 +1092,24 @@ export function ChatRealtimeBridge() {
 					}),
 				);
 			},
-			onRawMessage: (raw) => {
-				// appLog.debug(`[chat-ws:bridge:raw] ${JSON.stringify(raw)}`);
-			},
 			onParseError: (raw, error) => {
 				appLog.warn("[chat-ws:bridge:parse-error]", { raw, error });
 			},
-			buildSocket: isTauriRuntime()
-				? (url) => new TauriWebSocket(url) as unknown as WebSocket
-				: undefined,
 		});
 
 		manager.start();
+		setActiveRealtimeManager(manager);
 
-		// Handle Foreground/Background shifts on Android
-		const handleVisibilityChange = () => {
-			if (document.visibilityState === "visible") {
-				// appLog.debug("[chat-ws:bridge] app visible; checking connection...");
-				// Restarting the manager is the safest way to ensure a fresh,
-				// functional socket after a potentially long background sleep.
-				manager.stop({ suppressStatus: true });
-				manager.start();
-			}
-		};
-
-		document.addEventListener("visibilitychange", handleVisibilityChange);
+		// Suspend/resume and network changes force a fresh socket on the Rust
+		// side; the manager just sees the resulting close/open.
+		const uninstallLifecycle = installAppLifecycle();
 
 		return () => {
-			// appLog.debug("[chat-ws:bridge] stopping manager");
-			document.removeEventListener("visibilitychange", handleVisibilityChange);
+			uninstallLifecycle();
+			setActiveRealtimeManager(null);
 			manager.stop({ suppressStatus: true });
 		};
-	}, [token]);
+	}, [userId]);
 
 	return null;
 }

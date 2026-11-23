@@ -1,99 +1,78 @@
-import { decode } from "@msgpack/msgpack";
+/**
+ * ChatRealtimeManager — the webview's view of the Rust-owned realtime socket.
+ *
+ * grindr.rs owns the one real socket (auth, fingerprinting, reconnect with
+ * backoff) and forwards everything as `grindr-ws://event`. This class keeps a
+ * single listener on that stream for as long as it runs and mirrors the Rust
+ * connection state; it deliberately has no reconnect logic of its own. An
+ * earlier per-socket wrapper with its own JS backoff unregistered its listener
+ * on every Rust-side drop and only re-listened once its own (longer) timer
+ * fired, silently losing every event that arrived in between — and its
+ * "reconnects" never reached the real socket anyway.
+ *
+ * Forcing a fresh socket (resume, network change) is `appLifecycle`'s job.
+ */
+
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
 	ChatRealtimeManagerOptions,
 	RealtimeEnvelope,
 	RealtimeStatus,
 } from "../types/chat-realtime";
+import { directConversationProfiles } from "../utils/groupChat";
 import { appLog } from "../utils/logger";
+import { logWsEventToTerminal } from "./tauriWebSocket";
+import { setWsConnectionState, traceWsFrame, traceWsStatus } from "./wsTrace";
 
-async function normalizeSocketData(data: unknown): Promise<{
-	kind: "text" | "blob" | "arraybuffer" | "unknown";
-	size: number | null;
-	text: string | null;
-	bytes: Uint8Array | null;
-	raw: unknown;
-}> {
-	if (typeof data === "string") {
-		return {
-			kind: "text",
-			size: data.length,
-			text: data,
-			bytes: null,
-			raw: data,
-		};
-	}
+type BridgeEvent =
+	| { kind: "open" }
+	| { kind: "message"; data: string }
+	| { kind: "lagged"; skipped: number }
+	| { kind: "close"; code: number; reason: string }
+	| { kind: "error"; message: string };
 
-	if (data instanceof Blob) {
-		const buffer = await data.arrayBuffer();
-		const bytes = new Uint8Array(buffer);
-		const text = new TextDecoder().decode(bytes);
-		return {
-			kind: "blob",
-			size: data.size,
-			text,
-			bytes,
-			raw: data,
-		};
-	}
+const WS_EVENT_NAME = "grindr-ws://event";
+const COMMAND_TIMEOUT_MS = 10_000;
+// How long a sent message stays eligible for the message_sent fallback match,
+// even after its command timed out — a late echo must still land on it, not
+// on a newer send to the same person.
+const SEND_MATCH_WINDOW_MS = 60_000;
 
-	if (data instanceof ArrayBuffer) {
-		const bytes = new Uint8Array(data);
-		const text = new TextDecoder().decode(bytes);
-		return {
-			kind: "arraybuffer",
-			size: data.byteLength,
-			text,
-			bytes,
-			raw: data,
-		};
-	}
+type PendingSend = { ref: string; targetId: string | null; group: boolean; type: unknown; sentAt: number };
 
+function messageSendTarget(payload: unknown): { targetId: string | null; group: boolean; type: unknown } {
+	const p = payload as { type?: unknown; target?: { type?: unknown; targetId?: unknown } } | null;
+	const targetId = p?.target?.targetId;
 	return {
-		kind: "unknown",
-		size: null,
-		text: null,
-		bytes: null,
-		raw: data,
+		targetId: targetId == null ? null : String(targetId),
+		group: p?.target?.type === "Group",
+		type: p?.type,
 	};
 }
 
 export class ChatRealtimeManager {
 	private readonly options: ChatRealtimeManagerOptions;
-	private socket: WebSocket | null = null;
-	private reconnectTimer: number | null = null;
-	private heartbeatTimer: number | null = null;
-	private livenessTimer: number | null = null;
-	private reconnectAttempts = 0;
+	private unlisten: UnlistenFn | null = null;
 	private stopped = true;
-	private suppressDisconnectStatus = false;
-	private lastActivityAt = 0;
-	private readonly handleOnline = () => {
-		if (this.stopped) {
-			return;
-		}
-		// appLog.debug("[chat-ws] browser online event triggered");
-		if (!this.socket) {
-			void this.connect();
-		}
-	};
-	private readonly handleOffline = () => {
-		if (this.stopped) {
-			return;
-		}
-		// appLog.debug("[chat-ws] browser offline event triggered");
-		this.setStatus("disconnected");
-		if (this.socket) {
-			this.socket.close();
-		}
-	};
+	// Bumped on every start/stop so a listen() or ws_status that resolves after
+	// the run it belonged to has ended can tell and back out.
+	private generation = 0;
+	// Bumped on every open/close event, so a ws_status answer that raced one
+	// doesn't overwrite the newer state the event carried.
+	private stateVersion = 0;
+	private connected = false;
+	private hasConnected = false;
+	private pendingCommands = new Map<
+		string,
+		{ resolve: (result: unknown) => void; reject: (err: Error) => void; timer: number }
+	>();
+	// chat.v1.message.send commands still eligible for the message_sent
+	// fallback match (see dispatchEvent), oldest first.
+	private pendingSends: PendingSend[] = [];
 
 	constructor(options: ChatRealtimeManagerOptions) {
-		this.options = {
-			heartbeatMs: 15_000,
-			maxSilenceMs: 300_000,
-			maxBackoffMs: 20_000,
-			...options,
-		};
+		this.options = options;
 	}
 
 	start() {
@@ -101,257 +80,248 @@ export class ChatRealtimeManager {
 			return;
 		}
 		this.stopped = false;
-		this.suppressDisconnectStatus = false;
-		window.addEventListener("online", this.handleOnline);
-		window.addEventListener("offline", this.handleOffline);
-		void this.connect();
+		const generation = ++this.generation;
+		this.setStatus("connecting");
+		void this.bootstrap(generation);
 	}
 
 	stop(options?: { suppressStatus?: boolean }) {
-		this.stopped = true;
-		this.suppressDisconnectStatus = options?.suppressStatus ?? false;
-		window.removeEventListener("online", this.handleOnline);
-		window.removeEventListener("offline", this.handleOffline);
-		this.clearReconnect();
-		this.clearHeartbeat();
-		this.clearLiveness();
-		if (this.socket) {
-			this.socket.close();
-			this.socket = null;
+		if (this.stopped) {
 			return;
 		}
-
-		if (!this.suppressDisconnectStatus) {
+		this.stopped = true;
+		this.generation += 1;
+		this.unlisten?.();
+		this.unlisten = null;
+		this.connected = false;
+		this.hasConnected = false;
+		this.clearPendingCommands(new Error("WebSocket stopped"));
+		setWsConnectionState("disconnected");
+		if (!options?.suppressStatus) {
 			this.setStatus("disconnected");
 		}
+	}
+
+	send(commandType: string, payload: unknown): Promise<unknown> {
+		return new Promise((resolve, reject) => {
+			if (this.stopped || !this.connected) {
+				reject(new Error("WebSocket not connected"));
+				return;
+			}
+			const ref = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+			const timer = window.setTimeout(() => {
+				// The send stays in pendingSends: the command did go out, so a
+				// late message_sent still belongs to it, not to the next send.
+				this.pendingCommands.delete(ref);
+				reject(new Error("WebSocket command timed out"));
+			}, COMMAND_TIMEOUT_MS);
+			this.pendingCommands.set(ref, { resolve, reject, timer });
+			if (commandType === "chat.v1.message.send") {
+				const now = Date.now();
+				this.pendingSends = this.pendingSends.filter(
+					(p) => now - p.sentAt < SEND_MATCH_WINDOW_MS,
+				);
+				this.pendingSends.push({ ref, ...messageSendTarget(payload), sentAt: now });
+			}
+			// The Rust side injects the session token itself.
+			const msg = { type: commandType, ref, payload };
+			const raw = JSON.stringify(msg);
+			appLog.debug("[chat-ws:send] outgoing", raw);
+			traceWsFrame("out", raw);
+			invoke("ws_send", { payload: raw }).catch((err: unknown) => {
+				const pending = this.pendingCommands.get(ref);
+				if (!pending) return;
+				window.clearTimeout(pending.timer);
+				this.pendingCommands.delete(ref);
+				this.pendingSends = this.pendingSends.filter((p) => p.ref !== ref);
+				reject(err instanceof Error ? err : new Error(String(err)));
+			});
+		});
+	}
+
+	isConnected(): boolean {
+		return !this.stopped && this.connected;
+	}
+
+	private async bootstrap(generation: number) {
+		try {
+			const unlisten = await listen<BridgeEvent>(WS_EVENT_NAME, (event) => {
+				if (generation !== this.generation) return;
+				this.handleEvent(event.payload);
+			});
+			if (generation !== this.generation) {
+				unlisten();
+				return;
+			}
+			this.unlisten = unlisten;
+
+			// Starts grindr.rs's socket task unless it's already running.
+			await invoke("ws_connect");
+
+			// The bridge only reports transitions; the socket may well be up
+			// already (manager restarted for a new user, StrictMode remount).
+			const version = this.stateVersion;
+			const connected = await invoke<boolean>("ws_status");
+			if (generation !== this.generation || version !== this.stateVersion) {
+				return;
+			}
+			if (connected) {
+				this.markConnected();
+			}
+		} catch (error) {
+			appLog.warn("[chat-ws] bootstrap failed", error);
+			if (generation === this.generation) {
+				this.setStatus("error");
+			}
+		}
+	}
+
+	private handleEvent(event: BridgeEvent) {
+		if (event.kind === "message") {
+			traceWsFrame("in", event.data);
+		} else {
+			const { kind, ...details } = event;
+			traceWsStatus(kind, details);
+		}
+		switch (event.kind) {
+			case "open":
+				this.stateVersion += 1;
+				this.markConnected();
+				return;
+			case "close":
+				this.stateVersion += 1;
+				appLog.debug("[chat-ws] close", event);
+				this.connected = false;
+				this.clearPendingCommands(new Error("WebSocket closed"));
+				// grindr.rs reconnects on its own; nothing to schedule here.
+				this.setStatus("reconnecting");
+				return;
+			case "message":
+				this.handleMessage(event.data);
+				return;
+			case "lagged":
+				appLog.warn(`[chat-ws] bridge dropped ${event.skipped} events`);
+				this.options.onEventsDropped?.();
+				return;
+			case "error":
+				appLog.warn("[chat-ws] error", event.message);
+				return;
+		}
+	}
+
+	private markConnected() {
+		// grindr.rs re-sends Connected without a Disconnected in between in
+		// some paths; only a real transition counts.
+		if (this.connected) return;
+		this.connected = true;
+		setWsConnectionState("connected");
+		this.setStatus("connected");
+		if (this.hasConnected) {
+			this.options.onReconnect?.();
+		}
+		this.hasConnected = true;
+	}
+
+	private handleMessage(data: string) {
+		let envelope: RealtimeEnvelope;
+		try {
+			envelope = JSON.parse(data) as RealtimeEnvelope;
+		} catch (error) {
+			this.options.onParseError?.(data, error);
+			return;
+		}
+		this.dispatchEvent(envelope);
 	}
 
 	private setStatus(next: RealtimeStatus) {
 		this.options.onStatusChange?.(next);
 	}
 
-	private clearReconnect() {
-		if (this.reconnectTimer != null) {
-			window.clearTimeout(this.reconnectTimer);
-			this.reconnectTimer = null;
+	private clearPendingCommands(err: Error) {
+		for (const pending of this.pendingCommands.values()) {
+			window.clearTimeout(pending.timer);
+			pending.reject(err);
 		}
+		this.pendingCommands.clear();
+		this.pendingSends = [];
 	}
 
-	private clearHeartbeat() {
-		if (this.heartbeatTimer != null) {
-			window.clearInterval(this.heartbeatTimer);
-			this.heartbeatTimer = null;
-		}
-	}
-
-	private clearLiveness() {
-		if (this.livenessTimer != null) {
-			window.clearInterval(this.livenessTimer);
-			this.livenessTimer = null;
-		}
-	}
-
-	private markActivity() {
-		this.lastActivityAt = Date.now();
-	}
-
-	private buildUrlWithToken(baseUrl: string, token: string | null): string {
-		if (!token) {
-			return baseUrl;
-		}
-
-		try {
-			const url = new URL(baseUrl);
-			url.searchParams.set("token", token);
-			return url.toString();
-		} catch {
-			return baseUrl;
-		}
-	}
-
-	private scheduleReconnect() {
-		if (this.stopped) {
-			return;
-		}
-
-		const exp = Math.min(this.reconnectAttempts, 6);
-		const delay = Math.min(
-			this.options.maxBackoffMs ?? 25_000,
-			1000 * Math.pow(2, exp),
-		);
-		const jitter = Math.floor(Math.random() * 300);
-
-		this.setStatus("reconnecting");
-		this.clearReconnect();
-		this.reconnectTimer = window.setTimeout(() => {
-			void this.connect();
-		}, delay + jitter);
-	}
-
-	private startHeartbeat() {
-		this.clearHeartbeat();
-		// We disable the manual JSON ping for now because the server is returning
-		// "Could not convert frame to command". The Rust backend (tungstenite)
-		// already handles low-level WebSocket pings automatically.
-		/*
-		const heartbeatMs = this.options.heartbeatMs ?? 25_000;
-		this.heartbeatTimer = window.setInterval(() => {
-			if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+	private dispatchEvent(envelope: RealtimeEnvelope) {
+		appLog.debug("[chat-ws:recv] incoming", JSON.stringify(envelope));
+		const eventType = (envelope as Record<string, unknown>).type as string | undefined;
+		// appLog.debug never reaches the Tauri terminal (browser-console-only,
+		// stripped in prod builds) — mirror just the readable event name there
+		// too, so event traffic is visible without devtools open.
+		logWsEventToTerminal(eventType ?? "(no type)");
+		// Every command is answered on `<type>.response`, echoing our ref and
+		// carrying an HTTP-shaped status.
+		const ref = (envelope as Record<string, unknown>).ref as string | undefined;
+		if (ref) {
+			this.pendingSends = this.pendingSends.filter((p) => p.ref !== ref);
+			const pending = this.pendingCommands.get(ref);
+			if (pending) {
+				window.clearTimeout(pending.timer);
+				this.pendingCommands.delete(ref);
+				const status = (envelope as Record<string, unknown>).status as number | undefined;
+				if (status != null && status >= 400) {
+					pending.reject(new Error(`WS command failed with status ${status}`));
+				} else {
+					pending.resolve(envelope.payload);
+				}
 				return;
 			}
-
-			try {
-				this.socket.send(
-					JSON.stringify({
-						type: "ping",
-					}),
-				);
-			} catch {
-				this.socket.close();
-			}
-		}, heartbeatMs);
-		*/
-	}
-
-	private startLivenessWatchdog() {
-		this.clearLiveness();
-		const silenceMs = this.options.maxSilenceMs ?? 180_000;
-		const heartbeatMs = this.options.heartbeatMs ?? 25_000;
-		this.livenessTimer = window.setInterval(
-			() => {
-				if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
-					return;
-				}
-				if (this.lastActivityAt <= 0) {
-					return;
-				}
-				if (Date.now() - this.lastActivityAt > silenceMs) {
-					appLog.warn("[chat-ws] liveness watchdog triggered; closing socket");
-					this.socket.close();
-				}
-			},
-			Math.max(heartbeatMs, 10_000),
-		);
-	}
-
-	private async connect() {
-		if (this.stopped) {
+		}
+		// A response whose command already settled (timed out, or matched via
+		// the fallback below) — nothing else consumes these.
+		if (eventType?.endsWith(".response")) {
 			return;
 		}
-
-		this.setStatus("connecting");
-		// appLog.debug("[chat-ws] connect() invoked");
-		this.clearReconnect();
-
-		if (this.socket) {
-			// appLog.debug("[chat-ws] cleaning up existing socket before new connect");
-			const oldSocket = this.socket;
-			this.socket = null;
-			try {
-				oldSocket.onopen = null;
-				oldSocket.onmessage = null;
-				oldSocket.onerror = null;
-				oldSocket.onclose = null;
-				oldSocket.close();
-			} catch (error) {
-				appLog.warn("[chat-ws] error closing old socket", error);
+		// Fallback for message sends, in case the response is late or missing:
+		// the chat.v1.message_sent echo (ref always null). That event fires for
+		// *every* message in our conversations, incoming ones included, so only
+		// take one we sent to that send's recipient — never one from them.
+		if (eventType === "chat.v1.message_sent") {
+			const msg = envelope.payload as
+				| { senderId?: unknown; conversationId?: unknown; type?: unknown }
+				| undefined;
+			const conversationId = typeof msg?.conversationId === "string" ? msg.conversationId : null;
+			const participants: string[] = directConversationProfiles(conversationId) ?? [];
+			const ownId = this.options.getOwnProfileId?.() ?? null;
+			const index = this.pendingSends.findIndex((p) => {
+				if (p.targetId == null || msg?.type !== p.type) return false;
+				// Group: only our own echo in that group (needs our id; without it, no fallback).
+				if (p.group) return ownId != null && conversationId === `group:${p.targetId}` && String(msg?.senderId) === String(ownId);
+				return String(msg?.senderId) !== p.targetId && participants.includes(p.targetId);
+			});
+			if (index !== -1) {
+				const [match] = this.pendingSends.splice(index, 1);
+				const pending = this.pendingCommands.get(match.ref);
+				if (pending) {
+					window.clearTimeout(pending.timer);
+					this.pendingCommands.delete(match.ref);
+					pending.resolve(envelope.payload);
+				}
+				// Fall through to onEvent so ChatRealtimeBridge still persists the message
 			}
 		}
-
-		try {
-			// appLog.debug("[chat-ws] fetching token...");
-			const token = this.options.getToken
-				? await this.options.getToken()
-				: null;
-
-			const url = this.buildUrlWithToken(this.options.url, token);
-			// appLog.debug("[chat-ws] building socket instance...", { url_len: url.length });
-
-			const socket = this.options.buildSocket
-				? this.options.buildSocket(url)
-				: new WebSocket(url);
-
-			this.socket = socket;
-
-			socket.onopen = () => {
-				if (this.socket !== socket) {
-					// appLog.debug("[chat-ws] ignoring onopen for stale socket");
-					return;
-				}
-				// appLog.debug("[chat-ws] onopen triggered");
-				this.reconnectAttempts = 0;
-				this.markActivity();
-				this.setStatus("connected");
-				this.startHeartbeat();
-				this.startLivenessWatchdog();
-			};
-
-			socket.onmessage = (event) => {
-				if (this.socket !== socket) return;
-				void (async () => {
-					const normalized = await normalizeSocketData(event.data);
-					// Ensure we don't process data if the socket was replaced or stopped during normalization
-					if (this.socket !== socket || this.stopped) return;
-
-					this.markActivity();
-					this.options.onRawMessage?.(normalized);
-
-					// Prefer JSON text decoding; fallback to msgpack for binary frames.
-					if (normalized.text) {
-						try {
-							const parsed = JSON.parse(normalized.text) as RealtimeEnvelope;
-							this.options.onEvent(parsed);
-							return;
-						} catch {
-							// Continue to msgpack fallback.
-						}
-					}
-
-					if (normalized.bytes) {
-						try {
-							const decoded = decode(normalized.bytes);
-							if (decoded && typeof decoded === "object") {
-								this.options.onEvent(decoded as RealtimeEnvelope);
-								return;
-							}
-						} catch {
-							// Will report below.
-						}
-					}
-
-					this.options.onParseError?.(normalized, "Unable to decode frame");
-				})();
-			};
-
-			socket.onerror = (event) => {
-				if (this.socket !== socket) return;
-				appLog.warn("[chat-ws] onerror triggered", event);
-				this.setStatus("error");
-			};
-
-			socket.onclose = (event) => {
-				if (this.socket !== socket) {
-					// appLog.debug("[chat-ws] ignoring onclose for stale socket");
-					return;
-				}
-				// appLog.debug("[chat-ws] onclose triggered", { code: event.code, reason: event.reason });
-				this.clearHeartbeat();
-				this.clearLiveness();
-				this.socket = null;
-				if (this.stopped) {
-					if (!this.suppressDisconnectStatus) {
-						this.setStatus("disconnected");
-					}
-					this.suppressDisconnectStatus = false;
-					return;
-				}
-				this.reconnectAttempts += 1;
-				this.scheduleReconnect();
-			};
-		} catch (error) {
-			appLog.error("[chat-ws] connect failed during setup", error);
-			this.reconnectAttempts += 1;
-			this.scheduleReconnect();
-		}
+		this.options.onEvent(envelope);
 	}
+}
+
+let _activeManager: ChatRealtimeManager | null = null;
+
+export function setActiveRealtimeManager(
+	manager: ChatRealtimeManager | null,
+) {
+	_activeManager = manager;
+}
+
+export function sendViaRealtime(
+	commandType: string,
+	payload: unknown,
+): Promise<unknown> {
+	if (!_activeManager?.isConnected()) {
+		return Promise.reject(new Error("WebSocket not available"));
+	}
+	return _activeManager.send(commandType, payload);
 }

@@ -5,10 +5,30 @@ import {
 	useEffect,
 	ReactNode,
 	useCallback,
+	useRef,
+	useState,
+	useLayoutEffect,
+	useSyncExternalStore,
 } from "react";
 import z from "zod";
+import { appLog } from "../utils/logger";
+import { isDesktopDevice } from "../hooks/useDesktopBreakpoint";
 import { geohashSchema } from "../utils/geohash";
 import { UNIT_PRESETS, type UnitsPreset } from "../utils/units";
+import { REVEAL_STRENGTH_SUBTLE, REVEAL_STRENGTH_PRONOUNCED, type RevealStrength } from "../config/ui-constants";
+import { getSetting, setSetting } from "../services/chatDb";
+import { useAuth } from "./useAuth";
+import {
+	DEFAULT_GRID_QUICK_FILTERS,
+	DEFAULT_INBOX_QUICK_FILTERS,
+	DEFAULT_RIGHT_NOW_QUICK_FILTERS,
+	GRID_QUICK_FILTER_KEYS,
+	INBOX_QUICK_FILTER_KEYS,
+	RIGHT_NOW_QUICK_FILTER_KEYS,
+	type GridQuickFilterKey,
+	type InboxQuickFilterKey,
+	type RightNowQuickFilterKey,
+} from "../config/quick-filters";
 
 export const COLOR_SCHEMES = ["system", "light", "dark"] as const;
 export type ColorScheme = (typeof COLOR_SCHEMES)[number];
@@ -137,21 +157,97 @@ export const ACCENT_PRESETS: AccentPreset[] = [
 	{ name: "Teal", color: "#14b8a6", contrast: "#1a1a1a" },
 ];
 
+// geohash/locationName/useAutoLocation are per-profile (see the
+// settingsReady-gated load/save effect below, backed by chatDb) rather than
+// part of this shared localStorage blob, so they need safe defaults here —
+// old blobs still on disk may carry a stale geohash, and the local storage
+// write no longer includes any of the three going forward.
 const preferencesSchema = z.object({
-	geohash: geohashSchema.nullable(),
+	geohash: geohashSchema.nullable().default(null),
 	locationName: z.string().nullable().optional(),
-	colorScheme: z.enum(["system", "light", "dark"]).default("system"),
-	accentColor: z.string().default("#ffcc01"),
-	accentContrast: z.string().default("#1a1a1a"),
-	mobileGridColumns: z.enum(["2", "3"]).default("3"),
+	colorScheme: z.enum(["system", "light", "dark"]).default("dark"),
+	// Pure-black dark palette; only takes effect while the dark scheme is active.
+	amoledMode: z.boolean().default(false),
+	accentColor: z.string().default("#7c3aed"),
+	accentContrast: z.string().default("#ffffff"),
+	mobileGridColumns: z.enum(["2", "3", "4"]).default("3"),
+	// Column count of the Interest → Views grid on mobile, separate from the browse grid.
+	mobileViewsGridColumns: z.enum(["2", "3", "4"]).default("2"),
 	unitsPreset: z.enum(UNIT_PRESETS).default("world"),
 	blurIncomingMedia: z.boolean().default(false),
+	blurGridProfilePictures: z.boolean().default(false),
+	blurProfilePictures: z.boolean().default(false),
+	hideProfilePictures: z.boolean().default(false),
+	blurAlbumMedia: z.boolean().default(false),
+	blurRightNowMedia: z.boolean().default(false),
 	developerMode: z.boolean().default(false),
 	showDebugInfo: z.boolean().default(false),
+	testReminderDisabled: z.boolean().default(false),
 	useAutoLocation: z.boolean().default(false),
+	rightNowTestMode: z.boolean().default(false),
+	activeRightNowId: z.number().nullable().optional(),
+	activeRightNowExpiresAt: z.number().nullable().optional(),
+	/** Active session paused ("hidden") — the grid only takes on Right Now colors while it's public. */
+	activeRightNowHidden: z.boolean().optional(),
+	rightNowRemaining: z.number().default(0),
+	revealEffectEnabled: z.boolean().default(true),
+	revealEffectStrength: z.enum(["subtle", "pronounced"]).default("subtle"),
+	showAlbumSensitiveContentWarning: z.boolean().default(true),
+	openAlbumAsBottomSheet: z.boolean().default(false),
+	splitDrawerCategories: z.boolean().default(true),
+	// Chat composer: the action buttons sit inside the input pill (WhatsApp-style) instead of in a row below.
+	compactComposer: z.boolean().default(false),
+	sortDrawerMediaByFrequency: z.boolean().default(true),
+	keepScreenOn: z.boolean().default(false),
+	autoFocusLocationSearch: z.boolean().default(false),
+	autoFocusRightNowText: z.boolean().default(true),
+	// Swipe a chat row right to pin, left to delete (mobile).
+	chatRowSwipeActions: z.boolean().default(true),
+	// Enter sends a chat message (Shift+Enter is a newline). Device default: on for desktop, off on mobile.
+	enterToSend: z.boolean().default(false),
+	// Gesture that sends a saved phrase right away; the other one puts it into the composer ("off": tap only fills the composer).
+	savedPhraseSendGesture: z.enum(["off", "tap", "longPress"]).default("off"),
+	// Direction a chat message is swiped to reply to it (mobile). "outward": partner's messages left, ours right; "inward": the reverse.
+	swipeToReplyDirection: z.enum(["right", "left", "outward", "inward"]).default("right"),
+	// Video calls start with the camera on; when off, it has to be turned on in the call.
+	startCallsWithCameraOn: z.boolean().default(true),
+	// Camera a video call opens first on phones (front "user" / back "environment").
+	defaultCallCamera: z.enum(["user", "environment"]).default("user"),
+	// Tap type sent by double tapping a grid tile; null disables the gesture.
+	doubleTapTapType: z.number().int().min(0).max(2).nullable().default(1),
+	// What the grid double tap does while enabled: send the tap above or open the chat.
+	doubleTapAction: z.enum(["tap", "chat"]).default("tap"),
+	showGridTapStatus: z.boolean().default(true),
+	// Cruising spots (Free Grind server) on the grid and Right Now maps.
+	showCruisingSpots: z.boolean().default(true),
+	// Grid tiles of profiles hiding their distance show the estimated distance next to the icon; off: icon only.
+	showEstimatedDistance: z.boolean().default(true),
+	// Profile and chat status lines read "Online (12m left)"; off: just "Online".
+	showOnlineTimeLeft: z.boolean().default(true),
+	showLastOnline: z.boolean().default(true),
+	// Ordered quick filter pills shown above the grid, inbox and Right Now lists.
+	gridQuickFilters: z
+		.array(z.enum(GRID_QUICK_FILTER_KEYS))
+		.default([...DEFAULT_GRID_QUICK_FILTERS])
+		.catch([...DEFAULT_GRID_QUICK_FILTERS]),
+	inboxQuickFilters: z
+		.array(z.enum(INBOX_QUICK_FILTER_KEYS))
+		.default([...DEFAULT_INBOX_QUICK_FILTERS])
+		.catch([...DEFAULT_INBOX_QUICK_FILTERS]),
+	rightNowQuickFilters: z
+		.array(z.enum(RIGHT_NOW_QUICK_FILTER_KEYS))
+		.default([...DEFAULT_RIGHT_NOW_QUICK_FILTERS])
+		.catch([...DEFAULT_RIGHT_NOW_QUICK_FILTERS]),
+	defaultExpiringPhotos: z.boolean().default(false),
+	defaultAlbumExpirationType: z
+		.enum(["INDEFINITE", "ONCE", "TEN_MINUTES", "ONE_HOUR", "ONE_DAY"])
+		.default("INDEFINITE"),
+	// Own album uploads are sent with isFresh, so the people the album is shared with hear about them.
+	notifyAlbumUpdates: z.boolean().default(false),
 });
 
 type Preferences = z.infer<typeof preferencesSchema>;
+export type DoubleTapAction = Preferences["doubleTapAction"];
 
 interface PreferencesContextType extends Preferences {
 	setPreferences: (newValues: Partial<Preferences>) => Promise<void>;
@@ -167,12 +263,53 @@ type PreferencesAction =
 	| { type: "SET_LOCATION_NAME"; payload: string | null }
 	| { type: "SET_LOADING"; payload: boolean }
 	| { type: "SET_COLOR_SCHEME"; payload: ColorScheme }
-	| { type: "SET_MOBILE_GRID_COLUMNS"; payload: "2" | "3" }
+	| { type: "SET_AMOLED_MODE"; payload: boolean }
+	| { type: "SET_MOBILE_GRID_COLUMNS"; payload: "2" | "3" | "4" }
+	| { type: "SET_MOBILE_VIEWS_GRID_COLUMNS"; payload: "2" | "3" | "4" }
 	| { type: "SET_UNITS_PRESET"; payload: UnitsPreset }
 	| { type: "SET_BLUR_INCOMING_MEDIA"; payload: boolean }
+	| { type: "SET_BLUR_GRID_PROFILE_PICTURES"; payload: boolean }
+	| { type: "SET_BLUR_PROFILE_PICTURES"; payload: boolean }
+	| { type: "SET_HIDE_PROFILE_PICTURES"; payload: boolean }
+	| { type: "SET_BLUR_ALBUM_MEDIA"; payload: boolean }
+	| { type: "SET_BLUR_RIGHT_NOW_MEDIA"; payload: boolean }
 	| { type: "SET_DEVELOPER_MODE"; payload: boolean }
 	| { type: "SET_SHOW_DEBUG_INFO"; payload: boolean }
+	| { type: "SET_TEST_REMINDER_DISABLED"; payload: boolean }
 	| { type: "SET_AUTO_LOCATION"; payload: boolean }
+	| { type: "SET_RIGHT_NOW_TEST_MODE"; payload: boolean }
+	| { type: "SET_RIGHT_NOW_REMAINING"; payload: number }
+	| { type: "SET_RIGHT_NOW_HIDDEN"; payload: boolean }
+	| { type: "SET_REVEAL_EFFECT_ENABLED"; payload: boolean }
+	| { type: "SET_REVEAL_EFFECT_STRENGTH"; payload: RevealStrength }
+	| { type: "SET_SHOW_ALBUM_SENSITIVE_CONTENT_WARNING"; payload: boolean }
+	| { type: "SET_OPEN_ALBUM_AS_BOTTOM_SHEET"; payload: boolean }
+	| { type: "SET_SPLIT_DRAWER_CATEGORIES"; payload: boolean }
+	| { type: "SET_COMPACT_COMPOSER"; payload: boolean }
+	| { type: "SET_SORT_DRAWER_MEDIA_BY_FREQUENCY"; payload: boolean }
+	| { type: "SET_KEEP_SCREEN_ON"; payload: boolean }
+	| { type: "SET_DOUBLE_TAP_TAP_TYPE"; payload: number | null }
+	| { type: "SET_DOUBLE_TAP_ACTION"; payload: DoubleTapAction }
+	| { type: "SET_SHOW_GRID_TAP_STATUS"; payload: boolean }
+	| { type: "SET_SHOW_CRUISING_SPOTS"; payload: boolean }
+	| { type: "SET_SHOW_ESTIMATED_DISTANCE"; payload: boolean }
+	| { type: "SET_SHOW_ONLINE_TIME_LEFT"; payload: boolean }
+	| { type: "SET_SHOW_LAST_ONLINE"; payload: boolean }
+	| { type: "SET_GRID_QUICK_FILTERS"; payload: GridQuickFilterKey[] }
+	| { type: "SET_INBOX_QUICK_FILTERS"; payload: InboxQuickFilterKey[] }
+	| { type: "SET_RIGHT_NOW_QUICK_FILTERS"; payload: RightNowQuickFilterKey[] }
+	| { type: "SET_AUTO_FOCUS_LOCATION_SEARCH"; payload: boolean }
+	| { type: "SET_AUTO_FOCUS_RIGHT_NOW_TEXT"; payload: boolean }
+	| { type: "SET_CHAT_ROW_SWIPE_ACTIONS"; payload: boolean }
+	| { type: "SET_ENTER_TO_SEND"; payload: boolean }
+	| { type: "SET_SAVED_PHRASE_SEND_GESTURE"; payload: Preferences["savedPhraseSendGesture"] }
+	| { type: "SET_SWIPE_TO_REPLY_DIRECTION"; payload: Preferences["swipeToReplyDirection"] }
+	| { type: "SET_START_CALLS_WITH_CAMERA_ON"; payload: boolean }
+	| { type: "SET_DEFAULT_CALL_CAMERA"; payload: Preferences["defaultCallCamera"] }
+	| { type: "SET_DEFAULT_EXPIRING_PHOTOS"; payload: boolean }
+	| { type: "SET_DEFAULT_ALBUM_EXPIRATION_TYPE"; payload: Preferences["defaultAlbumExpirationType"] }
+	| { type: "SET_NOTIFY_ALBUM_UPDATES"; payload: boolean }
+	| { type: "SET_RIGHT_NOW_STATUS"; payload: { id: number | null; expiresAt: number | null } }
 	| { type: "SET_ACCENT"; payload: { color: string; contrast: string } };
 
 function preferencesReducer(
@@ -188,18 +325,104 @@ function preferencesReducer(
 			return { ...state, isLoading: action.payload };
 		case "SET_COLOR_SCHEME":
 			return { ...state, colorScheme: action.payload };
+		case "SET_AMOLED_MODE":
+			return { ...state, amoledMode: action.payload };
 		case "SET_MOBILE_GRID_COLUMNS":
 			return { ...state, mobileGridColumns: action.payload };
+		case "SET_MOBILE_VIEWS_GRID_COLUMNS":
+			return { ...state, mobileViewsGridColumns: action.payload };
 		case "SET_UNITS_PRESET":
 			return { ...state, unitsPreset: action.payload };
 		case "SET_BLUR_INCOMING_MEDIA":
 			return { ...state, blurIncomingMedia: action.payload };
+		case "SET_BLUR_GRID_PROFILE_PICTURES":
+			return { ...state, blurGridProfilePictures: action.payload };
+		case "SET_BLUR_PROFILE_PICTURES":
+			return { ...state, blurProfilePictures: action.payload };
+		case "SET_HIDE_PROFILE_PICTURES":
+			return { ...state, hideProfilePictures: action.payload };
+		case "SET_BLUR_ALBUM_MEDIA":
+			return { ...state, blurAlbumMedia: action.payload };
+		case "SET_BLUR_RIGHT_NOW_MEDIA":
+			return { ...state, blurRightNowMedia: action.payload };
 		case "SET_DEVELOPER_MODE":
 			return { ...state, developerMode: action.payload };
 		case "SET_SHOW_DEBUG_INFO":
 			return { ...state, showDebugInfo: action.payload };
+		case "SET_TEST_REMINDER_DISABLED":
+			return { ...state, testReminderDisabled: action.payload };
 		case "SET_AUTO_LOCATION":
 			return { ...state, useAutoLocation: action.payload };
+		case "SET_RIGHT_NOW_TEST_MODE":
+			return { ...state, rightNowTestMode: action.payload };
+		case "SET_RIGHT_NOW_REMAINING":
+			return { ...state, rightNowRemaining: action.payload };
+		case "SET_RIGHT_NOW_HIDDEN":
+			return { ...state, activeRightNowHidden: action.payload };
+		case "SET_REVEAL_EFFECT_ENABLED":
+			return { ...state, revealEffectEnabled: action.payload };
+		case "SET_REVEAL_EFFECT_STRENGTH":
+			return { ...state, revealEffectStrength: action.payload };
+		case "SET_SHOW_ALBUM_SENSITIVE_CONTENT_WARNING":
+			return { ...state, showAlbumSensitiveContentWarning: action.payload };
+		case "SET_OPEN_ALBUM_AS_BOTTOM_SHEET":
+			return { ...state, openAlbumAsBottomSheet: action.payload };
+		case "SET_SPLIT_DRAWER_CATEGORIES":
+			return { ...state, splitDrawerCategories: action.payload };
+		case "SET_COMPACT_COMPOSER":
+			return { ...state, compactComposer: action.payload };
+		case "SET_SORT_DRAWER_MEDIA_BY_FREQUENCY":
+			return { ...state, sortDrawerMediaByFrequency: action.payload };
+		case "SET_KEEP_SCREEN_ON":
+			return { ...state, keepScreenOn: action.payload };
+		case "SET_AUTO_FOCUS_LOCATION_SEARCH":
+			return { ...state, autoFocusLocationSearch: action.payload };
+		case "SET_AUTO_FOCUS_RIGHT_NOW_TEXT":
+			return { ...state, autoFocusRightNowText: action.payload };
+		case "SET_CHAT_ROW_SWIPE_ACTIONS":
+			return { ...state, chatRowSwipeActions: action.payload };
+		case "SET_ENTER_TO_SEND":
+			return { ...state, enterToSend: action.payload };
+		case "SET_SAVED_PHRASE_SEND_GESTURE":
+			return { ...state, savedPhraseSendGesture: action.payload };
+		case "SET_SWIPE_TO_REPLY_DIRECTION":
+			return { ...state, swipeToReplyDirection: action.payload };
+		case "SET_START_CALLS_WITH_CAMERA_ON":
+			return { ...state, startCallsWithCameraOn: action.payload };
+		case "SET_DEFAULT_CALL_CAMERA":
+			return { ...state, defaultCallCamera: action.payload };
+		case "SET_DOUBLE_TAP_TAP_TYPE":
+			return { ...state, doubleTapTapType: action.payload };
+		case "SET_DOUBLE_TAP_ACTION":
+			return { ...state, doubleTapAction: action.payload };
+		case "SET_SHOW_GRID_TAP_STATUS":
+			return { ...state, showGridTapStatus: action.payload };
+		case "SET_SHOW_CRUISING_SPOTS":
+			return { ...state, showCruisingSpots: action.payload };
+		case "SET_SHOW_ESTIMATED_DISTANCE":
+			return { ...state, showEstimatedDistance: action.payload };
+		case "SET_SHOW_ONLINE_TIME_LEFT":
+			return { ...state, showOnlineTimeLeft: action.payload };
+		case "SET_SHOW_LAST_ONLINE":
+			return { ...state, showLastOnline: action.payload };
+		case "SET_GRID_QUICK_FILTERS":
+			return { ...state, gridQuickFilters: action.payload };
+		case "SET_INBOX_QUICK_FILTERS":
+			return { ...state, inboxQuickFilters: action.payload };
+		case "SET_RIGHT_NOW_QUICK_FILTERS":
+			return { ...state, rightNowQuickFilters: action.payload };
+		case "SET_DEFAULT_EXPIRING_PHOTOS":
+			return { ...state, defaultExpiringPhotos: action.payload };
+		case "SET_DEFAULT_ALBUM_EXPIRATION_TYPE":
+			return { ...state, defaultAlbumExpirationType: action.payload };
+		case "SET_NOTIFY_ALBUM_UPDATES":
+			return { ...state, notifyAlbumUpdates: action.payload };
+		case "SET_RIGHT_NOW_STATUS":
+			return {
+				...state,
+				activeRightNowId: action.payload.id,
+				activeRightNowExpiresAt: action.payload.expiresAt,
+			};
 		case "SET_ACCENT":
 			return {
 				...state,
@@ -211,11 +434,53 @@ function preferencesReducer(
 	}
 }
 
-function applyTheme(colorScheme: ColorScheme, accentColor: string, accentContrast: string) {
+// Screens that always render dark (e.g. Right Now) bump this while mounted;
+// light then resolves to dark, while AMOLED still applies on top.
+let forcedDarkCount = 0;
+let lastThemeArgs: Parameters<typeof applyTheme> | null = null;
+const forcedDarkListeners = new Set<() => void>();
+
+function subscribeForcedDark(listener: () => void) {
+	forcedDarkListeners.add(listener);
+	return () => {
+		forcedDarkListeners.delete(listener);
+	};
+}
+
+function setForcedDark(delta: number) {
+	forcedDarkCount += delta;
+	if (lastThemeArgs) applyTheme(...lastThemeArgs);
+	forcedDarkListeners.forEach((listener) => listener());
+}
+
+export function useIsDarkSchemeForced(): boolean {
+	return useSyncExternalStore(subscribeForcedDark, () => forcedDarkCount > 0);
+}
+
+/** Forces the dark color scheme while the calling component is mounted. */
+export function useForceDarkScheme() {
+	useLayoutEffect(() => {
+		setForcedDark(1);
+		return () => setForcedDark(-1);
+	}, []);
+}
+
+function applyTheme(colorScheme: ColorScheme, amoledMode: boolean, accentColor: string, accentContrast: string, revealStrength: RevealStrength) {
+	lastThemeArgs = [colorScheme, amoledMode, accentColor, accentContrast, revealStrength];
 	const root = document.documentElement;
-	root.setAttribute("data-scheme", colorScheme);
+	root.setAttribute("data-scheme", forcedDarkCount > 0 ? "dark" : colorScheme);
+	if (amoledMode) {
+		root.setAttribute("data-amoled", "true");
+	} else {
+		root.removeAttribute("data-amoled");
+	}
 	root.style.setProperty("--accent", accentColor);
 	root.style.setProperty("--accent-contrast", accentContrast);
+
+	const strength = revealStrength === "pronounced" ? REVEAL_STRENGTH_PRONOUNCED : REVEAL_STRENGTH_SUBTLE;
+	root.style.setProperty("--reveal-translate-y", strength.translateY);
+	root.style.setProperty("--reveal-scale", strength.scale);
+	root.style.setProperty("--reveal-blur", strength.blur);
 
 	const styles = getComputedStyle(root);
 	const backgroundColor = styles.getPropertyValue("--bg").trim();
@@ -231,21 +496,111 @@ function applyTheme(colorScheme: ColorScheme, accentColor: string, accentContras
 	root.style.setProperty("--accent-readable", readableAccentColor);
 }
 
-const STORAGE_KEY = "app_preferences";
+export const PREFERENCES_STORAGE_KEY = "app_preferences";
+
+// Per-profile location settings — backed by the active account's chatDb
+// (see chatDb.ts's generic settings key/value store), not this shared
+// localStorage blob, so switching accounts switches location too.
+/** Per-profile db setting holding the location (geohash, name, auto); also read by restoredFavorites.ts. */
+export const LOCATION_SETTINGS_KEY = "locationPreferences";
+
+interface StoredLocationPrefs {
+	geohash: string | null;
+	locationName: string | null;
+	useAutoLocation: boolean;
+}
+
+// Per-profile Right Now session — same chatDb-backed store as location, so a
+// session never carries over to another account after switching. (The weekly
+// sessions left stay in the shared blob: EntitlementsBridge refetches them from
+// the server for every account anyway.)
+const RIGHT_NOW_SETTINGS_KEY = "rightNowPreferences";
+
+interface StoredRightNowPrefs {
+	activeRightNowId: number | null;
+	activeRightNowExpiresAt: number | null;
+	activeRightNowHidden?: boolean;
+}
+
+/** Older builds kept the Right Now state in the shared localStorage blob.
+ * Handed to whichever profile loads first without its own entry, then
+ * removed from the blob so no other profile inherits it. */
+function takeLegacyRightNowPrefs(): StoredRightNowPrefs | null {
+	try {
+		const stored = localStorage.getItem(PREFERENCES_STORAGE_KEY);
+		if (!stored) return null;
+		const decoded = JSON.parse(stored) as Record<string, unknown>;
+		if (!("activeRightNowId" in decoded) && !("activeRightNowExpiresAt" in decoded)) {
+			return null;
+		}
+		const legacy: StoredRightNowPrefs = {
+			activeRightNowId: typeof decoded.activeRightNowId === "number" ? decoded.activeRightNowId : null,
+			activeRightNowExpiresAt: typeof decoded.activeRightNowExpiresAt === "number" ? decoded.activeRightNowExpiresAt : null,
+		};
+		delete decoded.activeRightNowId;
+		delete decoded.activeRightNowExpiresAt;
+		localStorage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify(decoded));
+		return legacy;
+	} catch {
+		return null;
+	}
+}
 
 export function PreferencesProvider({ children }: { children: ReactNode }) {
 	const [state, dispatch] = useReducer(preferencesReducer, {
 		geohash: null,
 		locationName: null,
-		colorScheme: "system",
-		accentColor: "#ffcc01",
-		accentContrast: "#1a1a1a",
+		colorScheme: "dark",
+		amoledMode: false,
+		accentColor: "#7c3aed",
+		accentContrast: "#ffffff",
 		mobileGridColumns: "3",
+		mobileViewsGridColumns: "2",
 		unitsPreset: "world",
 		blurIncomingMedia: false,
+		blurGridProfilePictures: false,
+		blurProfilePictures: false,
+		hideProfilePictures: false,
+		blurAlbumMedia: false,
+		blurRightNowMedia: false,
 		developerMode: false,
 		showDebugInfo: false,
+		testReminderDisabled: false,
 		useAutoLocation: false,
+		rightNowTestMode: false,
+		activeRightNowId: null,
+		activeRightNowExpiresAt: null,
+		activeRightNowHidden: false,
+		rightNowRemaining: 0,
+		revealEffectEnabled: true,
+		revealEffectStrength: "subtle",
+		showAlbumSensitiveContentWarning: true,
+		openAlbumAsBottomSheet: false,
+		splitDrawerCategories: true,
+		compactComposer: false,
+		sortDrawerMediaByFrequency: true,
+		keepScreenOn: false,
+		autoFocusLocationSearch: false,
+		autoFocusRightNowText: true,
+		chatRowSwipeActions: true,
+		enterToSend: false,
+		savedPhraseSendGesture: "off",
+		swipeToReplyDirection: "right",
+		startCallsWithCameraOn: true,
+		defaultCallCamera: "user",
+		doubleTapTapType: 1,
+		doubleTapAction: "tap",
+		showGridTapStatus: true,
+		showCruisingSpots: true,
+		showEstimatedDistance: true,
+		showOnlineTimeLeft: true,
+		showLastOnline: true,
+		gridQuickFilters: [...DEFAULT_GRID_QUICK_FILTERS],
+		inboxQuickFilters: [...DEFAULT_INBOX_QUICK_FILTERS],
+		rightNowQuickFilters: [...DEFAULT_RIGHT_NOW_QUICK_FILTERS],
+		defaultExpiringPhotos: false,
+		defaultAlbumExpirationType: "INDEFINITE",
+		notifyAlbumUpdates: false,
 		isLoading: true,
 	});
 
@@ -253,27 +608,93 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 	useEffect(() => {
 		const loadPreferences = async () => {
 			try {
-				const stored = localStorage.getItem(STORAGE_KEY);
+				const stored = localStorage.getItem(PREFERENCES_STORAGE_KEY);
+				const deviceDefaultStrength = isDesktopDevice() ? "pronounced" : "subtle";
+				// Compact message bar on desktop, the full action row on mobile.
+				const deviceDefaultCompactComposer = isDesktopDevice();
+				// Enter sends on desktop; on a phone keyboard it starts a new line.
+				const deviceDefaultEnterToSend = isDesktopDevice();
+
 				if (stored) {
-					const decoded = JSON.parse(stored);
+					const decoded = JSON.parse(stored) as Record<string, unknown>;
+
+					// If the strength wasn't explicitly saved yet, use the device-based default
+					if (decoded.revealEffectStrength === undefined) {
+						decoded.revealEffectStrength = deviceDefaultStrength;
+					}
+					if (decoded.compactComposer === undefined) {
+						decoded.compactComposer = deviceDefaultCompactComposer;
+					}
+					// Formerly mobileEnterToSend (desktop always sent): keep a mobile opt-in.
+					if (decoded.enterToSend === undefined) {
+						decoded.enterToSend = deviceDefaultEnterToSend || decoded.mobileEnterToSend === true;
+					}
+					delete decoded.mobileEnterToSend;
+
 					const parsed = preferencesSchema.parse(decoded);
-					dispatch({ type: "SET_GEOHASH", payload: parsed.geohash });
-					dispatch({ type: "SET_LOCATION_NAME", payload: parsed.locationName ?? null });
+					// geohash/locationName/useAutoLocation are intentionally not
+					// dispatched here — they're per-profile and loaded by the
+					// settingsReady-gated effect below instead.
 					dispatch({ type: "SET_COLOR_SCHEME", payload: parsed.colorScheme });
+					dispatch({ type: "SET_AMOLED_MODE", payload: parsed.amoledMode });
 					dispatch({ type: "SET_MOBILE_GRID_COLUMNS", payload: parsed.mobileGridColumns });
+					dispatch({ type: "SET_MOBILE_VIEWS_GRID_COLUMNS", payload: parsed.mobileViewsGridColumns });
 					dispatch({ type: "SET_UNITS_PRESET", payload: parsed.unitsPreset });
 					dispatch({ type: "SET_BLUR_INCOMING_MEDIA", payload: parsed.blurIncomingMedia });
+					dispatch({ type: "SET_BLUR_GRID_PROFILE_PICTURES", payload: parsed.blurGridProfilePictures });
+					dispatch({ type: "SET_BLUR_PROFILE_PICTURES", payload: parsed.blurProfilePictures });
+					dispatch({ type: "SET_HIDE_PROFILE_PICTURES", payload: parsed.hideProfilePictures });
+					dispatch({ type: "SET_BLUR_ALBUM_MEDIA", payload: parsed.blurAlbumMedia });
+					dispatch({ type: "SET_BLUR_RIGHT_NOW_MEDIA", payload: parsed.blurRightNowMedia });
 					dispatch({ type: "SET_DEVELOPER_MODE", payload: parsed.developerMode });
 					dispatch({ type: "SET_SHOW_DEBUG_INFO", payload: parsed.showDebugInfo });
-					dispatch({ type: "SET_AUTO_LOCATION", payload: parsed.useAutoLocation });
+					dispatch({ type: "SET_TEST_REMINDER_DISABLED", payload: parsed.testReminderDisabled });
+					dispatch({ type: "SET_RIGHT_NOW_TEST_MODE", payload: parsed.rightNowTestMode });
+					dispatch({ type: "SET_REVEAL_EFFECT_ENABLED", payload: parsed.revealEffectEnabled });
+					dispatch({ type: "SET_REVEAL_EFFECT_STRENGTH", payload: parsed.revealEffectStrength });
+					dispatch({ type: "SET_SHOW_ALBUM_SENSITIVE_CONTENT_WARNING", payload: parsed.showAlbumSensitiveContentWarning });
+					dispatch({ type: "SET_OPEN_ALBUM_AS_BOTTOM_SHEET", payload: parsed.openAlbumAsBottomSheet });
+					dispatch({ type: "SET_SPLIT_DRAWER_CATEGORIES", payload: parsed.splitDrawerCategories });
+					dispatch({ type: "SET_COMPACT_COMPOSER", payload: parsed.compactComposer });
+					dispatch({ type: "SET_SORT_DRAWER_MEDIA_BY_FREQUENCY", payload: parsed.sortDrawerMediaByFrequency });
+					dispatch({ type: "SET_KEEP_SCREEN_ON", payload: parsed.keepScreenOn });
+					dispatch({ type: "SET_RIGHT_NOW_REMAINING", payload: parsed.rightNowRemaining });
+					dispatch({ type: "SET_AUTO_FOCUS_LOCATION_SEARCH", payload: parsed.autoFocusLocationSearch });
+					dispatch({ type: "SET_AUTO_FOCUS_RIGHT_NOW_TEXT", payload: parsed.autoFocusRightNowText });
+					dispatch({ type: "SET_CHAT_ROW_SWIPE_ACTIONS", payload: parsed.chatRowSwipeActions });
+					dispatch({ type: "SET_ENTER_TO_SEND", payload: parsed.enterToSend });
+					dispatch({ type: "SET_SAVED_PHRASE_SEND_GESTURE", payload: parsed.savedPhraseSendGesture });
+					dispatch({ type: "SET_SWIPE_TO_REPLY_DIRECTION", payload: parsed.swipeToReplyDirection });
+					dispatch({ type: "SET_START_CALLS_WITH_CAMERA_ON", payload: parsed.startCallsWithCameraOn });
+					dispatch({ type: "SET_DEFAULT_CALL_CAMERA", payload: parsed.defaultCallCamera });
+					dispatch({ type: "SET_DOUBLE_TAP_TAP_TYPE", payload: parsed.doubleTapTapType });
+					dispatch({ type: "SET_DOUBLE_TAP_ACTION", payload: parsed.doubleTapAction });
+					dispatch({ type: "SET_SHOW_GRID_TAP_STATUS", payload: parsed.showGridTapStatus });
+					dispatch({ type: "SET_SHOW_CRUISING_SPOTS", payload: parsed.showCruisingSpots });
+					dispatch({ type: "SET_SHOW_ESTIMATED_DISTANCE", payload: parsed.showEstimatedDistance });
+					dispatch({ type: "SET_SHOW_ONLINE_TIME_LEFT", payload: parsed.showOnlineTimeLeft });
+					dispatch({ type: "SET_SHOW_LAST_ONLINE", payload: parsed.showLastOnline });
+					dispatch({ type: "SET_GRID_QUICK_FILTERS", payload: parsed.gridQuickFilters });
+					dispatch({ type: "SET_INBOX_QUICK_FILTERS", payload: parsed.inboxQuickFilters });
+					dispatch({ type: "SET_RIGHT_NOW_QUICK_FILTERS", payload: parsed.rightNowQuickFilters });
+					dispatch({ type: "SET_DEFAULT_EXPIRING_PHOTOS", payload: parsed.defaultExpiringPhotos });
+					dispatch({ type: "SET_DEFAULT_ALBUM_EXPIRATION_TYPE", payload: parsed.defaultAlbumExpirationType });
+					dispatch({ type: "SET_NOTIFY_ALBUM_UPDATES", payload: parsed.notifyAlbumUpdates });
 					dispatch({
 						type: "SET_ACCENT",
 						payload: { color: parsed.accentColor, contrast: parsed.accentContrast },
 					});
-					applyTheme(parsed.colorScheme, parsed.accentColor, parsed.accentContrast);
+					applyTheme(parsed.colorScheme, parsed.amoledMode, parsed.accentColor, parsed.accentContrast, parsed.revealEffectStrength);
+				} else {
+					// No stored preferences at all, apply device defaults immediately
+					dispatch({ type: "SET_REVEAL_EFFECT_STRENGTH", payload: deviceDefaultStrength });
+					dispatch({ type: "SET_COMPACT_COMPOSER", payload: deviceDefaultCompactComposer });
+					dispatch({ type: "SET_ENTER_TO_SEND", payload: deviceDefaultEnterToSend });
+					// We also need to apply the theme with these defaults
+					applyTheme("dark", false, "#7c3aed", "#ffffff", deviceDefaultStrength);
 				}
 			} catch (error) {
-				console.error("Failed to load preferences:", error);
+				appLog.error("Failed to load preferences:", error);
 			} finally {
 				dispatch({ type: "SET_LOADING", payload: false });
 			}
@@ -282,30 +703,143 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 		loadPreferences();
 	}, []);
 
+	// Per-profile location — reload whenever the active account's chatDb is
+	// ready (settingsReady), so switching accounts also switches location
+	// instead of leaking the previous account's geohash/locationName. Kept
+	// out of `isLoading` until the first load resolves, otherwise consumers
+	// like GridPage's initial-auto-location effect would see the reducer's
+	// default useAutoLocation=false and skip auto-location before the real
+	// per-profile value has had a chance to arrive.
+	const { userId, settingsReady } = useAuth();
+	const [isLocationLoaded, setIsLocationLoaded] = useState(false);
+	useEffect(() => {
+		if (!settingsReady) {
+			return;
+		}
+		let cancelled = false;
+		void (async () => {
+			const stored = await getSetting<Partial<StoredLocationPrefs>>(LOCATION_SETTINGS_KEY);
+			if (cancelled) {
+				return;
+			}
+			dispatch({ type: "SET_GEOHASH", payload: stored?.geohash ?? null });
+			dispatch({ type: "SET_LOCATION_NAME", payload: stored?.locationName ?? null });
+			dispatch({ type: "SET_AUTO_LOCATION", payload: stored?.useAutoLocation ?? false });
+			setIsLocationLoaded(true);
+		})();
+		return () => {
+			cancelled = true;
+		};
+	}, [userId, settingsReady]);
+
+	// Per-profile Right Now session: cleared the moment the account changes (so
+	// the previous profile's session never shows for the new one), then loaded
+	// from the new account's chatDb once it's ready.
+	useEffect(() => {
+		dispatch({ type: "SET_RIGHT_NOW_STATUS", payload: { id: null, expiresAt: null } });
+		dispatch({ type: "SET_RIGHT_NOW_HIDDEN", payload: false });
+	}, [userId]);
+	useEffect(() => {
+		if (!settingsReady) {
+			return;
+		}
+		let cancelled = false;
+		void (async () => {
+			let stored = await getSetting<Partial<StoredRightNowPrefs>>(RIGHT_NOW_SETTINGS_KEY);
+			if (!stored) {
+				const legacy = takeLegacyRightNowPrefs();
+				if (legacy) {
+					await setSetting(RIGHT_NOW_SETTINGS_KEY, legacy);
+					stored = legacy;
+				}
+			}
+			if (cancelled) {
+				return;
+			}
+			dispatch({
+				type: "SET_RIGHT_NOW_STATUS",
+				payload: { id: stored?.activeRightNowId ?? null, expiresAt: stored?.activeRightNowExpiresAt ?? null },
+			});
+			dispatch({ type: "SET_RIGHT_NOW_HIDDEN", payload: stored?.activeRightNowHidden ?? false });
+		})();
+		return () => {
+			cancelled = true;
+		};
+	}, [userId, settingsReady]);
+
+	const stateRef = useRef(state);
+	stateRef.current = state;
+
 	const setPreferences = useCallback(
 		async (newValues: Partial<Preferences>) => {
-			const oldValues: Preferences = {
-				geohash: state.geohash,
-				locationName: state.locationName,
-				colorScheme: state.colorScheme,
-				accentColor: state.accentColor,
-				accentContrast: state.accentContrast,
-				mobileGridColumns: state.mobileGridColumns,
-				unitsPreset: state.unitsPreset,
-				blurIncomingMedia: state.blurIncomingMedia,
-				developerMode: state.developerMode,
-				showDebugInfo: state.showDebugInfo,
-				useAutoLocation: state.useAutoLocation,
-			};
+			const currentState = stateRef.current;
+			// Get current state to ensure we don't lose values not provided in newValues
 			const preferences: Preferences = {
-				...oldValues,
+				geohash: currentState.geohash,
+				locationName: currentState.locationName,
+				colorScheme: currentState.colorScheme,
+				amoledMode: currentState.amoledMode,
+				accentColor: currentState.accentColor,
+				accentContrast: currentState.accentContrast,
+				mobileGridColumns: currentState.mobileGridColumns,
+				mobileViewsGridColumns: currentState.mobileViewsGridColumns,
+				unitsPreset: currentState.unitsPreset,
+				blurIncomingMedia: currentState.blurIncomingMedia,
+				blurGridProfilePictures: currentState.blurGridProfilePictures,
+				blurProfilePictures: currentState.blurProfilePictures,
+				hideProfilePictures: currentState.hideProfilePictures,
+				blurAlbumMedia: currentState.blurAlbumMedia,
+				blurRightNowMedia: currentState.blurRightNowMedia,
+				developerMode: currentState.developerMode,
+				showDebugInfo: currentState.showDebugInfo,
+				testReminderDisabled: currentState.testReminderDisabled,
+				useAutoLocation: currentState.useAutoLocation,
+				rightNowTestMode: currentState.rightNowTestMode,
+				rightNowRemaining: currentState.rightNowRemaining,
+				revealEffectEnabled: currentState.revealEffectEnabled,
+				revealEffectStrength: currentState.revealEffectStrength,
+				showAlbumSensitiveContentWarning: currentState.showAlbumSensitiveContentWarning,
+				openAlbumAsBottomSheet: currentState.openAlbumAsBottomSheet,
+				splitDrawerCategories: currentState.splitDrawerCategories,
+				compactComposer: currentState.compactComposer,
+				sortDrawerMediaByFrequency: currentState.sortDrawerMediaByFrequency,
+				keepScreenOn: currentState.keepScreenOn,
+				autoFocusLocationSearch: currentState.autoFocusLocationSearch,
+				autoFocusRightNowText: currentState.autoFocusRightNowText,
+				chatRowSwipeActions: currentState.chatRowSwipeActions,
+				enterToSend: currentState.enterToSend,
+				savedPhraseSendGesture: currentState.savedPhraseSendGesture,
+				swipeToReplyDirection: currentState.swipeToReplyDirection,
+				startCallsWithCameraOn: currentState.startCallsWithCameraOn,
+				defaultCallCamera: currentState.defaultCallCamera,
+				doubleTapTapType: currentState.doubleTapTapType,
+				doubleTapAction: currentState.doubleTapAction,
+				showGridTapStatus: currentState.showGridTapStatus,
+				showCruisingSpots: currentState.showCruisingSpots,
+				showEstimatedDistance: currentState.showEstimatedDistance,
+				showOnlineTimeLeft: currentState.showOnlineTimeLeft,
+				showLastOnline: currentState.showLastOnline,
+				gridQuickFilters: currentState.gridQuickFilters,
+				inboxQuickFilters: currentState.inboxQuickFilters,
+				rightNowQuickFilters: currentState.rightNowQuickFilters,
+				defaultExpiringPhotos: currentState.defaultExpiringPhotos,
+				defaultAlbumExpirationType: currentState.defaultAlbumExpirationType,
+				notifyAlbumUpdates: currentState.notifyAlbumUpdates,
+				activeRightNowId: currentState.activeRightNowId ?? null,
+				activeRightNowExpiresAt: currentState.activeRightNowExpiresAt ?? null,
+				activeRightNowHidden: currentState.activeRightNowHidden ?? false,
 				...newValues,
 			};
 
 			// Validate before saving
-			preferencesSchema.parse(preferences);
+			try {
+				preferencesSchema.parse(preferences);
+			} catch (e) {
+				appLog.error("Validation failed in setPreferences:", e);
+				throw e;
+			}
 
-			// Update state
+			// Update state via dispatches
 			if (newValues.geohash !== undefined) {
 				dispatch({ type: "SET_GEOHASH", payload: newValues.geohash });
 			}
@@ -315,8 +849,14 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 			if (newValues.colorScheme !== undefined) {
 				dispatch({ type: "SET_COLOR_SCHEME", payload: newValues.colorScheme });
 			}
+			if (newValues.amoledMode !== undefined) {
+				dispatch({ type: "SET_AMOLED_MODE", payload: newValues.amoledMode });
+			}
 			if (newValues.mobileGridColumns !== undefined) {
 				dispatch({ type: "SET_MOBILE_GRID_COLUMNS", payload: newValues.mobileGridColumns });
+			}
+			if (newValues.mobileViewsGridColumns !== undefined) {
+				dispatch({ type: "SET_MOBILE_VIEWS_GRID_COLUMNS", payload: newValues.mobileViewsGridColumns });
 			}
 			if (newValues.unitsPreset !== undefined) {
 				dispatch({ type: "SET_UNITS_PRESET", payload: newValues.unitsPreset });
@@ -324,21 +864,153 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 			if (newValues.blurIncomingMedia !== undefined) {
 				dispatch({ type: "SET_BLUR_INCOMING_MEDIA", payload: newValues.blurIncomingMedia });
 			}
+			if (newValues.blurGridProfilePictures !== undefined) {
+				dispatch({ type: "SET_BLUR_GRID_PROFILE_PICTURES", payload: newValues.blurGridProfilePictures });
+			}
+			if (newValues.blurProfilePictures !== undefined) {
+				dispatch({ type: "SET_BLUR_PROFILE_PICTURES", payload: newValues.blurProfilePictures });
+			}
+			if (newValues.hideProfilePictures !== undefined) {
+				dispatch({ type: "SET_HIDE_PROFILE_PICTURES", payload: newValues.hideProfilePictures });
+			}
+			if (newValues.blurAlbumMedia !== undefined) {
+				dispatch({ type: "SET_BLUR_ALBUM_MEDIA", payload: newValues.blurAlbumMedia });
+			}
+			if (newValues.blurRightNowMedia !== undefined) {
+				dispatch({ type: "SET_BLUR_RIGHT_NOW_MEDIA", payload: newValues.blurRightNowMedia });
+			}
 			if (newValues.developerMode !== undefined) {
 				dispatch({ type: "SET_DEVELOPER_MODE", payload: newValues.developerMode });
 			}
 			if (newValues.showDebugInfo !== undefined) {
 				dispatch({ type: "SET_SHOW_DEBUG_INFO", payload: newValues.showDebugInfo });
 			}
+			if (newValues.testReminderDisabled !== undefined) {
+				dispatch({ type: "SET_TEST_REMINDER_DISABLED", payload: newValues.testReminderDisabled });
+			}
 			if (newValues.useAutoLocation !== undefined) {
 				dispatch({ type: "SET_AUTO_LOCATION", payload: newValues.useAutoLocation });
+			}
+			if (newValues.rightNowTestMode !== undefined) {
+				dispatch({ type: "SET_RIGHT_NOW_TEST_MODE", payload: newValues.rightNowTestMode });
+			}
+			if (newValues.rightNowRemaining !== undefined) {
+				dispatch({ type: "SET_RIGHT_NOW_REMAINING", payload: newValues.rightNowRemaining });
+			}
+			if (newValues.activeRightNowHidden !== undefined) {
+				dispatch({ type: "SET_RIGHT_NOW_HIDDEN", payload: newValues.activeRightNowHidden });
+			}
+			if (newValues.revealEffectEnabled !== undefined) {
+				dispatch({ type: "SET_REVEAL_EFFECT_ENABLED", payload: newValues.revealEffectEnabled });
+			}
+			if (newValues.revealEffectStrength !== undefined) {
+				dispatch({ type: "SET_REVEAL_EFFECT_STRENGTH", payload: newValues.revealEffectStrength });
+			}
+			if (newValues.showAlbumSensitiveContentWarning !== undefined) {
+				dispatch({ type: "SET_SHOW_ALBUM_SENSITIVE_CONTENT_WARNING", payload: newValues.showAlbumSensitiveContentWarning });
+			}
+			if (newValues.openAlbumAsBottomSheet !== undefined) {
+				dispatch({ type: "SET_OPEN_ALBUM_AS_BOTTOM_SHEET", payload: newValues.openAlbumAsBottomSheet });
+			}
+			if (newValues.splitDrawerCategories !== undefined) {
+				dispatch({ type: "SET_SPLIT_DRAWER_CATEGORIES", payload: newValues.splitDrawerCategories });
+			}
+			if (newValues.compactComposer !== undefined) {
+				dispatch({ type: "SET_COMPACT_COMPOSER", payload: newValues.compactComposer });
+			}
+			if (newValues.sortDrawerMediaByFrequency !== undefined) {
+				dispatch({ type: "SET_SORT_DRAWER_MEDIA_BY_FREQUENCY", payload: newValues.sortDrawerMediaByFrequency });
+			}
+			if (newValues.keepScreenOn !== undefined) {
+				dispatch({ type: "SET_KEEP_SCREEN_ON", payload: newValues.keepScreenOn });
+			}
+			if (newValues.autoFocusLocationSearch !== undefined) {
+				dispatch({ type: "SET_AUTO_FOCUS_LOCATION_SEARCH", payload: newValues.autoFocusLocationSearch });
+			}
+			if (newValues.autoFocusRightNowText !== undefined) {
+				dispatch({ type: "SET_AUTO_FOCUS_RIGHT_NOW_TEXT", payload: newValues.autoFocusRightNowText });
+			}
+			if (newValues.chatRowSwipeActions !== undefined) {
+				dispatch({ type: "SET_CHAT_ROW_SWIPE_ACTIONS", payload: newValues.chatRowSwipeActions });
+			}
+			if (newValues.enterToSend !== undefined) {
+				dispatch({ type: "SET_ENTER_TO_SEND", payload: newValues.enterToSend });
+			}
+			if (newValues.savedPhraseSendGesture !== undefined) {
+				dispatch({ type: "SET_SAVED_PHRASE_SEND_GESTURE", payload: newValues.savedPhraseSendGesture });
+			}
+			if (newValues.swipeToReplyDirection !== undefined) {
+				dispatch({ type: "SET_SWIPE_TO_REPLY_DIRECTION", payload: newValues.swipeToReplyDirection });
+			}
+			if (newValues.startCallsWithCameraOn !== undefined) {
+				dispatch({ type: "SET_START_CALLS_WITH_CAMERA_ON", payload: newValues.startCallsWithCameraOn });
+			}
+			if (newValues.defaultCallCamera !== undefined) {
+				dispatch({ type: "SET_DEFAULT_CALL_CAMERA", payload: newValues.defaultCallCamera });
+			}
+			if (newValues.doubleTapTapType !== undefined) {
+				dispatch({ type: "SET_DOUBLE_TAP_TAP_TYPE", payload: newValues.doubleTapTapType });
+			}
+			if (newValues.doubleTapAction !== undefined) {
+				dispatch({ type: "SET_DOUBLE_TAP_ACTION", payload: newValues.doubleTapAction });
+			}
+			if (newValues.showGridTapStatus !== undefined) {
+				dispatch({ type: "SET_SHOW_GRID_TAP_STATUS", payload: newValues.showGridTapStatus });
+			}
+			if (newValues.showCruisingSpots !== undefined) {
+				dispatch({ type: "SET_SHOW_CRUISING_SPOTS", payload: newValues.showCruisingSpots });
+			}
+			if (newValues.showEstimatedDistance !== undefined) {
+				dispatch({ type: "SET_SHOW_ESTIMATED_DISTANCE", payload: newValues.showEstimatedDistance });
+			}
+			if (newValues.showOnlineTimeLeft !== undefined) {
+				dispatch({ type: "SET_SHOW_ONLINE_TIME_LEFT", payload: newValues.showOnlineTimeLeft });
+			}
+			if (newValues.showLastOnline !== undefined) {
+				dispatch({ type: "SET_SHOW_LAST_ONLINE", payload: newValues.showLastOnline });
+			}
+			if (newValues.gridQuickFilters !== undefined) {
+				dispatch({ type: "SET_GRID_QUICK_FILTERS", payload: newValues.gridQuickFilters });
+			}
+			if (newValues.inboxQuickFilters !== undefined) {
+				dispatch({ type: "SET_INBOX_QUICK_FILTERS", payload: newValues.inboxQuickFilters });
+			}
+			if (newValues.rightNowQuickFilters !== undefined) {
+				dispatch({ type: "SET_RIGHT_NOW_QUICK_FILTERS", payload: newValues.rightNowQuickFilters });
+			}
+			if (newValues.defaultExpiringPhotos !== undefined) {
+				dispatch({ type: "SET_DEFAULT_EXPIRING_PHOTOS", payload: newValues.defaultExpiringPhotos });
+			}
+			if (newValues.defaultAlbumExpirationType !== undefined) {
+				dispatch({ type: "SET_DEFAULT_ALBUM_EXPIRATION_TYPE", payload: newValues.defaultAlbumExpirationType });
+			}
+			if (newValues.notifyAlbumUpdates !== undefined) {
+				dispatch({ type: "SET_NOTIFY_ALBUM_UPDATES", payload: newValues.notifyAlbumUpdates });
+			}
+			if (
+				newValues.activeRightNowId !== undefined ||
+				newValues.activeRightNowExpiresAt !== undefined
+			) {
+				dispatch({
+					type: "SET_RIGHT_NOW_STATUS",
+					payload: {
+						id:
+							newValues.activeRightNowId !== undefined
+								? newValues.activeRightNowId
+								: currentState.activeRightNowId ?? null,
+						expiresAt:
+							newValues.activeRightNowExpiresAt !== undefined
+								? newValues.activeRightNowExpiresAt
+								: currentState.activeRightNowExpiresAt ?? null,
+					},
+				});
 			}
 			if (newValues.accentColor !== undefined || newValues.accentContrast !== undefined) {
 				dispatch({
 					type: "SET_ACCENT",
 					payload: {
-						color: newValues.accentColor ?? state.accentColor,
-						contrast: newValues.accentContrast ?? state.accentContrast,
+						color: newValues.accentColor ?? currentState.accentColor,
+						contrast: newValues.accentContrast ?? currentState.accentContrast,
 					},
 				});
 			}
@@ -346,41 +1018,156 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 			// Apply theme immediately
 			applyTheme(
 				preferences.colorScheme,
+				preferences.amoledMode,
 				preferences.accentColor,
 				preferences.accentContrast,
+				preferences.revealEffectStrength,
 			);
 
-			// Persist to localStorage
-			localStorage.setItem(STORAGE_KEY, JSON.stringify(preferences));
+			// geohash/locationName/useAutoLocation are per-profile: persisted to
+			// the active account's chatDb instead of this shared blob.
+			if (
+				newValues.geohash !== undefined ||
+				newValues.locationName !== undefined ||
+				newValues.useAutoLocation !== undefined
+			) {
+				await setSetting(LOCATION_SETTINGS_KEY, {
+					geohash: preferences.geohash,
+					locationName: preferences.locationName ?? null,
+					useAutoLocation: preferences.useAutoLocation,
+				} satisfies StoredLocationPrefs);
+			}
+
+			// The Right Now session is per-profile too (see RIGHT_NOW_SETTINGS_KEY).
+			if (
+				newValues.activeRightNowId !== undefined ||
+				newValues.activeRightNowExpiresAt !== undefined ||
+				newValues.activeRightNowHidden !== undefined
+			) {
+				await setSetting(RIGHT_NOW_SETTINGS_KEY, {
+					activeRightNowId: preferences.activeRightNowId ?? null,
+					activeRightNowExpiresAt: preferences.activeRightNowExpiresAt ?? null,
+					activeRightNowHidden: preferences.activeRightNowHidden ?? false,
+				} satisfies StoredRightNowPrefs);
+			}
+
+			// Persist the rest to localStorage (geohash/locationName/useAutoLocation excluded, see above)
+			try {
+				localStorage.setItem(
+					PREFERENCES_STORAGE_KEY,
+					JSON.stringify({
+						colorScheme: preferences.colorScheme,
+						amoledMode: preferences.amoledMode,
+						accentColor: preferences.accentColor,
+						accentContrast: preferences.accentContrast,
+						mobileGridColumns: preferences.mobileGridColumns,
+						mobileViewsGridColumns: preferences.mobileViewsGridColumns,
+						unitsPreset: preferences.unitsPreset,
+						blurIncomingMedia: preferences.blurIncomingMedia,
+						blurGridProfilePictures: preferences.blurGridProfilePictures,
+						blurProfilePictures: preferences.blurProfilePictures,
+						hideProfilePictures: preferences.hideProfilePictures,
+						blurAlbumMedia: preferences.blurAlbumMedia,
+						blurRightNowMedia: preferences.blurRightNowMedia,
+						developerMode: preferences.developerMode,
+						showDebugInfo: preferences.showDebugInfo,
+						testReminderDisabled: preferences.testReminderDisabled,
+						rightNowTestMode: preferences.rightNowTestMode,
+						revealEffectEnabled: preferences.revealEffectEnabled,
+						revealEffectStrength: preferences.revealEffectStrength,
+						showAlbumSensitiveContentWarning: preferences.showAlbumSensitiveContentWarning,
+						openAlbumAsBottomSheet: preferences.openAlbumAsBottomSheet,
+						splitDrawerCategories: preferences.splitDrawerCategories,
+						compactComposer: preferences.compactComposer,
+						sortDrawerMediaByFrequency: preferences.sortDrawerMediaByFrequency,
+						keepScreenOn: preferences.keepScreenOn,
+						rightNowRemaining: preferences.rightNowRemaining,
+						autoFocusLocationSearch: preferences.autoFocusLocationSearch,
+						autoFocusRightNowText: preferences.autoFocusRightNowText,
+						chatRowSwipeActions: preferences.chatRowSwipeActions,
+						enterToSend: preferences.enterToSend,
+						savedPhraseSendGesture: preferences.savedPhraseSendGesture,
+						swipeToReplyDirection: preferences.swipeToReplyDirection,
+						startCallsWithCameraOn: preferences.startCallsWithCameraOn,
+						defaultCallCamera: preferences.defaultCallCamera,
+						doubleTapTapType: preferences.doubleTapTapType,
+						doubleTapAction: preferences.doubleTapAction,
+						showGridTapStatus: preferences.showGridTapStatus,
+						showCruisingSpots: preferences.showCruisingSpots,
+						showEstimatedDistance: preferences.showEstimatedDistance,
+						showOnlineTimeLeft: preferences.showOnlineTimeLeft,
+						showLastOnline: preferences.showLastOnline,
+						gridQuickFilters: preferences.gridQuickFilters,
+						inboxQuickFilters: preferences.inboxQuickFilters,
+						rightNowQuickFilters: preferences.rightNowQuickFilters,
+						defaultExpiringPhotos: preferences.defaultExpiringPhotos,
+						defaultAlbumExpirationType: preferences.defaultAlbumExpirationType,
+						notifyAlbumUpdates: preferences.notifyAlbumUpdates,
+					}),
+				);
+			} catch {
+				// Storage full or unavailable: the in-memory preferences still apply.
+			}
 		},
-		[
-			state.geohash,
-			state.colorScheme,
-			state.accentColor,
-			state.accentContrast,
-			state.mobileGridColumns,
-			state.unitsPreset,
-			state.blurIncomingMedia,
-			state.developerMode,
-			state.showDebugInfo,
-			state.useAutoLocation,
-		],
+		[dispatch],
 	);
 
 	const value: PreferencesContextType = {
 		geohash: state.geohash,
 		locationName: state.locationName,
 		colorScheme: state.colorScheme,
+		amoledMode: state.amoledMode,
 		accentColor: state.accentColor,
 		accentContrast: state.accentContrast,
 		mobileGridColumns: state.mobileGridColumns,
+		mobileViewsGridColumns: state.mobileViewsGridColumns,
 		unitsPreset: state.unitsPreset,
 		blurIncomingMedia: state.blurIncomingMedia,
+		blurGridProfilePictures: state.blurGridProfilePictures,
+		blurProfilePictures: state.blurProfilePictures,
+		hideProfilePictures: state.hideProfilePictures,
+		blurAlbumMedia: state.blurAlbumMedia,
+		blurRightNowMedia: state.blurRightNowMedia,
 		developerMode: state.developerMode,
 		showDebugInfo: state.showDebugInfo,
+		testReminderDisabled: state.testReminderDisabled,
 		useAutoLocation: state.useAutoLocation,
+		rightNowTestMode: state.rightNowTestMode,
+		activeRightNowId: state.activeRightNowId,
+		activeRightNowExpiresAt: state.activeRightNowExpiresAt,
+		activeRightNowHidden: state.activeRightNowHidden,
+		rightNowRemaining: state.rightNowRemaining,
+		revealEffectEnabled: state.revealEffectEnabled,
+		revealEffectStrength: state.revealEffectStrength,
+		showAlbumSensitiveContentWarning: state.showAlbumSensitiveContentWarning,
+		openAlbumAsBottomSheet: state.openAlbumAsBottomSheet,
+		splitDrawerCategories: state.splitDrawerCategories,
+		compactComposer: state.compactComposer,
+		sortDrawerMediaByFrequency: state.sortDrawerMediaByFrequency,
+		keepScreenOn: state.keepScreenOn,
+		autoFocusLocationSearch: state.autoFocusLocationSearch,
+		autoFocusRightNowText: state.autoFocusRightNowText,
+		chatRowSwipeActions: state.chatRowSwipeActions,
+		enterToSend: state.enterToSend,
+		savedPhraseSendGesture: state.savedPhraseSendGesture,
+		swipeToReplyDirection: state.swipeToReplyDirection,
+		startCallsWithCameraOn: state.startCallsWithCameraOn,
+		defaultCallCamera: state.defaultCallCamera,
+		doubleTapTapType: state.doubleTapTapType,
+		doubleTapAction: state.doubleTapAction,
+		showGridTapStatus: state.showGridTapStatus,
+		showCruisingSpots: state.showCruisingSpots,
+		showEstimatedDistance: state.showEstimatedDistance,
+		showOnlineTimeLeft: state.showOnlineTimeLeft,
+		showLastOnline: state.showLastOnline,
+		gridQuickFilters: state.gridQuickFilters,
+		inboxQuickFilters: state.inboxQuickFilters,
+		rightNowQuickFilters: state.rightNowQuickFilters,
+		defaultExpiringPhotos: state.defaultExpiringPhotos,
+		defaultAlbumExpirationType: state.defaultAlbumExpirationType,
+		notifyAlbumUpdates: state.notifyAlbumUpdates,
 		setPreferences,
-		isLoading: state.isLoading,
+		isLoading: state.isLoading || !isLocationLoaded,
 	};
 
 	return (

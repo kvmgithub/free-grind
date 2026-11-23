@@ -1,15 +1,33 @@
 import type { Message } from "./messages";
-import type { SearchProfileResult } from "./chat-service";
+import type { UploadPhase } from "../services/stagedVideoUpload";
 
 export type UiMessage = Message & {
 	clientState?: "pending" | "failed";
 	_localOnly?: boolean;
+	/** Content kept locally despite the server wiping it via unsend. */
+	localHistory?: boolean;
+	/** While a video uploads: a still of the part being sent (see editPoster). */
+	localPoster?: string;
+};
+
+/** Upload progress (0–100) of one optimistic local-upload: message. */
+export type LocalUploadProgress = {
+	messageId: string;
+	progress: number;
+	/** What a video upload is doing just now (see UploadProgress). */
+	phase?: UploadPhase;
 };
 
 export type AlbumListItem = {
 	albumId: number;
 	albumName: string | null;
 	isShareable: boolean;
+};
+
+/** Per-album media counts for the chat drawer's album tiles. */
+export type AlbumMediaCount = {
+	images: number;
+	videos: number;
 };
 
 export type AlbumContentItem = {
@@ -25,15 +43,18 @@ export type AlbumViewerState = {
 	albumId: number;
 	albumName: string | null;
 	content: AlbumContentItem[];
+	/** Whether the message that opened this album belongs to the current user — reacting/replying to your own album doesn't make sense, so callers use this to hide those controls. */
+	isOwn?: boolean;
 };
-
-export type SearchMode = "conversations" | "messages" | "profiles";
 
 export type InboxFilterKey =
 	| "unreadOnly"
 	| "favoritesOnly"
 	| "chemistryOnly"
 	| "rightNowOnly"
-	| "onlineNowOnly";
+	| "onlineNowOnly"
+	| "needsReplyOnly";
 
-export type ProfileSearchResult = SearchProfileResult;
+/** Three-way visibility filter for a conversation category (pinned/archived/hidden):
+ * "all" mixes it into the normal list, "hide" excludes it, "only" shows exclusively it. */
+export type InboxVisibilityFilter = "all" | "hide" | "only";

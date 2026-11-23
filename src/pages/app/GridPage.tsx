@@ -1,56 +1,147 @@
 import { useAuth } from "../../contexts/useAuth";
-import { MapPin, SlidersHorizontal, ListFilter, Star, Plane, Droplet } from "lucide-react";
+import { Navigation, ArrowUpDown, Search, RefreshCw, X, UserSearch, ChevronRight, Loader2, Settings2 } from "lucide-react";
+import { useIsBrowseMapEnabled } from "../../services/assignmentsStore";
+import { requestProfileShare, useCanShareProfiles } from "../../services/profileShare";
+import { MapVisibilityControls, useDistanceMode } from "./MapPrivacySettings";
+import { GridMap, hasCardPosition, type MapCard } from "./gridpage/components/GridMap";
+import { readGridViewMode, writeGridViewMode, type GridViewMode } from "./gridpage/gridViewMode";
+import { ownMapPositionKey } from "../../hooks/queries/useOwnMapPosition";
+import { useQueryClient } from "@tanstack/react-query";
+import { CruisingMapOverlay, useCruisingMapState, useOwnMapPresence } from "./gridpage/cruising/CruisingMapOverlay";
+import { CruisingAutoCheckInSection } from "./gridpage/cruising/CruisingAutoCheckInToggle";
+import { SlidersHorizontal as PhosphorSlidersHorizontal } from "@phosphor-icons/react";
+import { LayoutGridFilled, MapFilled, MapPinFilled, UserFilled, UserSearchFilled } from "../../components/icons/FilledIcons";
+import { IconTabs, type IconTabConfig } from "../../components/ui/icon-tabs";
 import { useLocation, useNavigate } from "react-router-dom";
 import toast from "react-hot-toast";
 import { useApiFunctions } from "../../hooks/useApiFunctions";
+import { useScrollRowFade } from "../../hooks/useScrollRowFade";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { decodeGeohash, encodeGeohash } from "../../utils/geohash";
-import { getThumbImageUrl, validateMediaHash } from "../../utils/media";
+import { reverseGeocodeGeohash } from "./gridpage/geocoding";
+import { extractMediaHashFromUrl, getThumbImageUrl, validateMediaHash } from "../../utils/media";
 import { usePreferences } from "../../contexts/PreferencesContext";
-import { type BrowseCard, type ManagedOption, type ProfileDetail } from "./GridPage.types";
+import { useExploreMode } from "../../contexts/ExploreModeContext";
+import { type BrowseCard, type ProfileDetail } from "./GridPage.types";
 import { BrowseGrid } from "./gridpage/components/BrowseGrid";
+import { GridTileContextMenu } from "./gridpage/components/GridTileContextMenu";
+import { useCanBlockProfile, useLocateProfile } from "../../grindr-workarounds";
+import { getDisplayName, mergeBrowseCardImages } from "./gridpage/utils";
+import { FeedScrollContainer } from "../../components/ui/FeedScrollContainer";
 import { ProfileDetailsModal } from "./gridpage/components/ProfileDetailsModal";
 import {
 	getCachedBrowseCards,
-	getCachedGenderOptions,
 	getCachedProfileDetail,
-	getCachedPronounOptions,
+	removeProfileFromBrowseCache,
 	setCachedBrowseCards,
-	setCachedGenderOptions,
 	setCachedProfileDetail,
-	setCachedPronounOptions,
+	invalidateFavoritesBrowseCache,
 } from "./gridpage/cache";
-import { isCurrentlyOnline } from "./gridpage/utils";
-import { Avatar } from "../../components/ui/avatar";
+import { setSavedAccountDisplayName, setSavedAccountPhotoHash } from "../../services/savedAccountProfiles";
+import { FAVORITES_CHANGED_EVENT, type FavoritesChangedDetail } from "../../services/api/favoritesMethods";
 import {
 	type BrowseSortOption,
+	getCachedBrowseFiltersDraft,
+	getDefaultBrowseFiltersDraft,
 	loadBrowseFiltersDraft,
 } from "./browse-filters-storage";
 import { PullToRefreshContainer } from "./components/PullToRefreshContainer";
+import { PageHeaderBackground } from "../../components/ui/PageHeaderBackground";
+import { FilterPill } from "../../components/ui/FilterPill";
+import { SelectSheet, SELECT_SHEET_SECTION_LABEL_CLASS } from "../../components/ui/select-sheet";
 import { useBrowseFilters } from "./gridpage/hooks/useBrowseFilters";
+import { sanitizeQuickFilters, useGridQuickFilterDefs } from "../../components/quick-filters/quickFilterDefs";
+import { GRID_QUICK_FILTER_KEYS } from "../../config/quick-filters";
 import { useTapProfile } from "./gridpage/hooks/useTapProfile";
+import { useGridTapStatus } from "./gridpage/hooks/useGridTapStatus";
+import { GridGesturesIntro, hasSeenGridGesturesIntro, markGridGesturesIntroSeen } from "./gridpage/components/GridGesturesIntro";
+import { isLocateEnabled } from "../../utils/optionalFeatures";
+import { useDesktopBreakpoint } from "../../hooks/useDesktopBreakpoint";
+import { useManagedGenders, useManagedPronouns, useBlockedProfileIds, useBlockProfile, useUnblockProfile, useMyOwnProfile } from "../../hooks/queries/useProfileQueries";
+import { getProfilePhotoHash } from "./profile-editor/profileEditorUtils";
 import {
 	getChatContactIndexForProfiles,
+	getLocalNicknamesForProfiles,
 	indexChatContactRecordsByProfileId,
+	setLocalNicknameForProfile,
 	upsertChatContactIndexFromGrid,
 } from "../../services/chatContactIndex";
 import type { ChatContactIndexRecord } from "../../types/chat-contact-index";
 import { appLog } from "../../utils/logger";
+import { getIncognitoMode, getUnreadBeyondLocalRead } from "../../utils/privacy";
+import { setGridPageActive } from "./gridpage/activeState";
+import { GRID_REFRESH_INTERVAL_MS } from "../../components/gridRefreshInterval";
 import { ConfirmDialog } from "../../components/ui/confirm-dialog";
-import { LoadingState } from "../../components/ui/states";
+import { PromptDialog } from "../../components/ui/prompt-dialog";
 import { cn } from "../../utils/cn";
 import { DEMO_CARDS, DEMO_CHAT_STATUS, SHOW_DEMO_DATA } from "./gridpage/demoData";
+import { BrowseFiltersOverlay } from "./BrowseFiltersOverlay";
+import { LocationOverlay, type ExploreLocation } from "./LocationOverlay";
+import { useIsRightNowLive } from "../../hooks/useIsRightNowLive";
+import type { BrowseFiltersDraft } from "./browse-filters-storage";
+import { SKIP_BLOCK_CONFIRM_KEY, isBlockConfirmSkipped } from "../../utils/blockConfirm";
+import * as chatDb from "../../services/chatDb";
+import { hideProfile, unhideProfile } from "../../services/profileHide";
+import { useHiddenProfileIds } from "../../hooks/useHiddenProfileIds";
+import { usePresence } from "../../hooks/usePresence";
+import {
+	acknowledgeNicknameRename,
+	getNicknameRename,
+	useSeenDisplayNames,
+	type NicknameRename,
+} from "../../hooks/useNicknameNameChange";
 
-const SKIP_BLOCK_CONFIRM_KEY = "profile_skip_block_confirm";
-const SKIP_UNBLOCK_CONFIRM_KEY = "profile_skip_unblock_confirm";
+const EXPLORE_LOCATION_STORAGE_KEY = "grid_explore_location_v1";
+
+// Explore is per profile (each has its own real location), so the stored
+// explore location is keyed by account.
+function exploreLocationStorageKey(userId: number | null | undefined): string {
+	return `${EXPLORE_LOCATION_STORAGE_KEY}:${userId ?? "anonymous"}`;
+}
+
+function readStoredExploreLocation(userId: number | null | undefined): ExploreLocation {
+	if (typeof window === "undefined") return null;
+	try {
+		// Pre-per-profile builds stored one app-wide entry; drop it so it can't
+		// show up for whichever profile happens to be active.
+		sessionStorage.removeItem(EXPLORE_LOCATION_STORAGE_KEY);
+		const raw = sessionStorage.getItem(exploreLocationStorageKey(userId));
+		return raw ? (JSON.parse(raw) as ExploreLocation) : null;
+	} catch {
+		return null;
+	}
+}
+// The local displayname filter ("Lokale Filter" > nicknameFilter) matches
+// only against already-loaded cards, so a narrow/rare name would otherwise
+// keep auto-pagination running indefinitely trying to find more matches.
+const NICKNAME_FILTER_MAX_PAGES = 7;
+
+
+// Overrides for the grid while a public Right Now session is live (see GridPage's root).
+const RIGHT_NOW_LIVE_VARS = {
+	"--accent": "var(--right-now)",
+	"--accent-contrast": "#fff",
+	"--accent-readable": "var(--right-now)",
+	"--explore": "var(--right-now)",
+} as React.CSSProperties;
+
+// Guards the initial auto-location refresh below to once per actual app
+// launch. This has to be a module-level variable, not sessionStorage — the
+// embedded webview (Tauri) persists Web Storage across full app restarts
+// just like localStorage, so a sessionStorage-backed flag would only ever
+// fire once per install instead of once per launch, silently disabling the
+// startup location/geocode refresh (though not later ones — the periodic
+// timer and pull-to-refresh call refreshLocation() unconditionally). A
+// plain module variable is reliably reset on every fresh process start.
+let hasRefreshedLocationThisAppLaunch = false;
 
 export function GridPage() {
 	const { t } = useTranslation();
 	const BROWSE_LOAD_TIMEOUT_MS = 15000;
 	const TAP_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-	const { userId } = useAuth();
+	const { userId, settingsReady } = useAuth();
 	const apiFunctions = useApiFunctions();
 	const {
 		geohash,
@@ -59,55 +150,221 @@ export function GridPage() {
 		setPreferences,
 		isLoading: isLoadingPreferences,
 		showDebugInfo,
+		showGridTapStatus,
+		gridQuickFilters,
 	} = usePreferences();
 	const navigate = useNavigate();
 	const location = useLocation();
-	const persistedBrowseFilters = useMemo(() => loadBrowseFiltersDraft(), []);
 	const [cards, setCards] = useState<BrowseCard[]>([]);
+	// loadBrowseCards intentionally doesn't depend on `cards` (see its useCallback
+	// deps), so it reads the current list through this ref instead of a stale
+	// closure — used to carry last-known photos across a refresh, see mergeBrowseCardImages.
+	const cardsRef = useRef<BrowseCard[]>([]);
+	// Lets refreshLocation's late reverse-geocode check whether the location
+	// moved on meanwhile, so it doesn't label a newer location with an old name.
+	const geohashRef = useRef(geohash);
+	geohashRef.current = geohash;
+	// GPS fixes in flight from refreshLocation, shown as a spinner in the location pill.
+	const [locatingCount, setLocatingCount] = useState(0);
+	useEffect(() => {
+		cardsRef.current = cards;
+	}, [cards]);
 	const [isLoadingCards, setIsLoadingCards] = useState(true);
 	const [isLoadingMoreCards, setIsLoadingMoreCards] = useState(false);
-	const [nextPage, setNextPage] = useState<number | null>(null);
+	const [isManualRefreshing, setIsManualRefreshing] = useState(false);
+	// Cascade encodes this as a page number, explore (/v7/search) as a
+	// (distance, profileId) cursor — see encodeSearchCursor/decodeSearchCursor.
+	const [nextPage, setNextPage] = useState<string | null>(null);
+	// Counts grid pages loaded since the last fresh load (reset to 1 by
+	// loadBrowseCards, incremented by handleLoadMoreCards) — used to cap
+	// auto-pagination while the local displayname filter is narrowing the
+	// grid down to little/nothing, which would otherwise keep fetching page
+	// after page indefinitely trying to find a match. See NICKNAME_FILTER_MAX_PAGES.
+	const [loadedPageCount, setLoadedPageCount] = useState(1);
 	const [cardsError, setCardsError] = useState<string | null>(null);
-	const [profileImageHash, setProfileImageHash] = useState<string | null>(null);
-	const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
+	// Explore mode: browse a different area via /v7/search's exploreGeoHash
+	// without touching the real geohash (preferences.geohash / nearbyGeoHash).
+	// Kept out of PreferencesContext and out of localStorage on purpose —
+	// this is meant to be temporary, so it only survives sessionStorage
+	// (same tab, until the app fully restarts), not a real preference. Stored
+	// per profile, and swapped when the active account changes.
+	const [exploreLocation, setExploreLocationRaw] = useState<ExploreLocation>(() => readStoredExploreLocation(userId));
+	const exploreUserIdRef = useRef(userId);
+	useEffect(() => {
+		if (exploreUserIdRef.current === userId) return;
+		exploreUserIdRef.current = userId;
+		setExploreLocationRaw(readStoredExploreLocation(userId));
+	}, [userId]);
+	const setExploreLocation = useCallback((next: ExploreLocation) => {
+		setExploreLocationRaw(next);
+		if (typeof window === "undefined") return;
+		try {
+			const key = exploreLocationStorageKey(exploreUserIdRef.current);
+			if (next) {
+				sessionStorage.setItem(key, JSON.stringify(next));
+			} else {
+				sessionStorage.removeItem(key);
+			}
+		} catch {
+			// ignore — worst case explore resets on next load
+		}
+	}, []);
+	// Mirror explore mode into the app-wide context so RootLayout/NavBar can
+	// swap the whole app's accent to EXPLORE_COLOR while it's active, the same
+	// way isRightNow does for --right-now. Reset on unmount so navigating away
+	// from Grid reverts the accent even though exploreLocation itself persists.
+	const { setIsExploreActive } = useExploreMode();
+	const isRightNowLive = useIsRightNowLive();
+	useEffect(() => {
+		setIsExploreActive(exploreLocation !== null);
+		return () => setIsExploreActive(false);
+	}, [exploreLocation, setIsExploreActive]);
+	// Lets GridAutoRefreshBridge (mounted for the whole app session) know it
+	// should stay out of the way while GridPage itself is visible and running
+	// its own auto-refresh — see gridpage/activeState.ts.
+	useEffect(() => {
+		setGridPageActive(true);
+		return () => setGridPageActive(false);
+	}, []);
+	const [isLocationMissing, setIsLocationMissing] = useState(false);
+	// The desktop profile modal is local state, not a route like the profile
+	// modal on Inbox, Interest and Right Now, so it gets a history entry of its
+	// own, holding the open profile's id: Back closes it instead of leaving the
+	// grid, closing it in the UI takes the entry back (so the next Back isn't a
+	// no-op), and coming back to the entry from a page opened out of the modal
+	// (e.g. Message) reopens that profile, like the routed modals do.
+	const [activeProfileId, setActiveProfileId] = useState<string | null>(() => {
+		const id = (window.history.state as { gridProfile?: unknown } | null)?.gridProfile;
+		return typeof id === "string" ? id : null;
+	});
+	const profileHistoryPushedRef = useRef(activeProfileId !== null);
+	useEffect(() => {
+		const state = window.history.state as Record<string, unknown> | null;
+		if (activeProfileId) {
+			if (!profileHistoryPushedRef.current) {
+				window.history.pushState({ ...state, gridProfile: activeProfileId }, "");
+				profileHistoryPushedRef.current = true;
+			} else if (state?.gridProfile !== undefined && state.gridProfile !== activeProfileId) {
+				// Swiped to another profile in the open modal: same entry, new id.
+				window.history.replaceState({ ...state, gridProfile: activeProfileId }, "");
+			}
+		} else if (profileHistoryPushedRef.current) {
+			// Cleared first so our own popstate handler ignores this pop. Popping
+			// back to the same URL only re-renders the grid route, it doesn't remount it.
+			profileHistoryPushedRef.current = false;
+			if (state?.gridProfile !== undefined) window.history.back();
+		}
+	}, [activeProfileId]);
+	useEffect(() => {
+		const onPopState = () => {
+			if (!profileHistoryPushedRef.current) return;
+			// Still on our entry (e.g. Back only closed the photo viewer on top).
+			if ((window.history.state as { gridProfile?: unknown } | null)?.gridProfile !== undefined) return;
+			profileHistoryPushedRef.current = false;
+			setActiveProfileId(null);
+		};
+		window.addEventListener("popstate", onPopState);
+		return () => window.removeEventListener("popstate", onPopState);
+	}, []);
 	const [activeProfile, setActiveProfile] = useState<ProfileDetail | null>(null);
+	const [isActiveProfileBlockedByOther, setIsActiveProfileBlockedByOther] = useState(false);
 	const [isLoadingActiveProfile, setIsLoadingActiveProfile] = useState(false);
 	const [activeProfileError, setActiveProfileError] = useState<string | null>(null);
-	const [genderOptions, setGenderOptions] = useState<ManagedOption[]>([]);
-	const [pronounOptions, setPronounOptions] = useState<ManagedOption[]>([]);
+
+	const { data: managedGenders } = useManagedGenders();
+	const { data: managedPronouns } = useManagedPronouns();
+	const { data: blockedProfileIdsData } = useBlockedProfileIds();
+	const { mutateAsync: blockProfileMutation, isPending: isBlockingProfile } = useBlockProfile();
+	const { mutateAsync: unblockProfileMutation, isPending: isUnblockingProfile } = useUnblockProfile();
+	const { data: myProfile } = useMyOwnProfile();
+
+	const profileImageHash = useMemo(() => getProfilePhotoHash(myProfile), [myProfile]);
+	const ownDisplayName = myProfile?.displayName ?? null;
+	const { distanceMode, selectDistanceMode, distanceOptions } = useDistanceMode();
+
+	const genderOptions = useMemo(() => {
+		return managedGenders?.map((item) => ({
+			value: item.genderId,
+			label: item.gender,
+		})) ?? [];
+	}, [managedGenders]);
+
+	const pronounOptions = useMemo(() => {
+		return managedPronouns?.map((item) => ({
+			value: item.pronounId,
+			label: item.pronoun,
+		})) ?? [];
+	}, [managedPronouns]);
+
 	const [chatContactIndexByProfileId, setChatContactIndexByProfileId] = useState<
 		Record<string, ChatContactIndexRecord>
 	>({});
-	const [blockedProfileIds, setBlockedProfileIds] = useState<Set<string>>(
-		() => new Set(),
-	);
-	const [mutatingBlockProfileId, setMutatingBlockProfileId] = useState<string | null>(
-		null,
-	);
+	const [localNicknamesByProfileId, setLocalNicknamesByProfileId] = useState<
+		Record<string, string>
+	>({});
+
+	const blockedProfileIds = useMemo(() => new Set(blockedProfileIdsData ?? []), [blockedProfileIdsData]);
+
+	const hiddenProfileIds = useHiddenProfileIds();
+
 	const [mutatingFavoriteProfileId, setMutatingFavoriteProfileId] = useState<string | null>(
 		null,
 	);
 	const [pendingProfileConfirm, setPendingProfileConfirm] = useState<{
-		action: "block" | "unblock";
+		action: "block";
 		profileId: string;
 	} | null>(null);
 	const [dontAskAgainChecked, setDontAskAgainChecked] = useState(false);
-	const [skipBlockConfirm, setSkipBlockConfirm] = useState(() => {
-		if (typeof window === "undefined") {
-			return false;
-		}
-		return localStorage.getItem(SKIP_BLOCK_CONFIRM_KEY) === "true";
-	});
-	const [skipUnblockConfirm, setSkipUnblockConfirm] = useState(() => {
-		if (typeof window === "undefined") {
-			return false;
-		}
-		return localStorage.getItem(SKIP_UNBLOCK_CONFIRM_KEY) === "true";
-	});
 	const isMountedRef = useRef(true);
+	const feedContainerRef = useRef<HTMLDivElement | null>(null);
+	const headerRef = useRef<HTMLElement | null>(null);
 	const [hasRestoredScroll, setHasRestoredScroll] = useState(false);
 	const [debugLoadSource, setDebugLoadSource] = useState<"cache" | "network" | null>(null);
 	const [initialLocationChecked, setInitialLocationChecked] = useState(false);
+	const [searchTerm, setSearchTerm] = useState("");
+	const [favoriteNotes, setFavoriteNotes] = useState<Array<{ notes: string; phoneNumber: string; counterpartyId: string }>>([]);
+	const [isFetchingNotes, setIsFetchingNotes] = useState(false);
+	const [hasAttemptedFetchNotes, setHasAttemptedFetchNotes] = useState(false);
+	const [isDistanceSheetOpen, setIsDistanceSheetOpen] = useState(false);
+
+	const isDesktop = useDesktopBreakpoint();
+	// Viewport y of the header's bottom edge: the full-bleed grid map runs up
+	// behind the header (like Right Now's map) and keeps its center below it.
+	const [headerBottom, setHeaderBottom] = useState(0);
+	useLayoutEffect(() => {
+		const header = headerRef.current;
+		if (!header) return;
+		const measure = () => setHeaderBottom(Math.round(header.getBoundingClientRect().bottom));
+		measure();
+		const observer = "ResizeObserver" in window ? new ResizeObserver(measure) : null;
+		observer?.observe(header);
+		window.addEventListener("resize", measure);
+		return () => {
+			observer?.disconnect();
+			window.removeEventListener("resize", measure);
+		};
+	}, []);
+	// The map runs on under the desktop nav rail.
+	const railWidth = isDesktop
+		? parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--nav-rail-width")) || 0
+		: 0;
+	const [hasSeenGesturesIntro, setHasSeenGesturesIntro] = useState(hasSeenGridGesturesIntro);
+
+	const handleFetchNotes = useCallback(async () => {
+		if (isFetchingNotes || hasAttemptedFetchNotes) return;
+		setIsFetchingNotes(true);
+		try {
+			const notes = await apiFunctions.getFavoriteNotes();
+			appLog.info("Fetched favorite notes:", notes);
+			setFavoriteNotes(notes);
+			setHasAttemptedFetchNotes(true);
+		} catch (error) {
+			appLog.error("Failed to fetch favorite notes:", error);
+			toast.error(t("favorites.get_notes_failed"));
+		} finally {
+			setIsFetchingNotes(false);
+		}
+	}, [apiFunctions, isFetchingNotes, hasAttemptedFetchNotes, t]);
 
 	const {
 		browseFilters,
@@ -118,7 +375,9 @@ export function GridPage() {
 		heightCmMax,
 		weightGramsMin,
 		weightGramsMax,
+		genders,
 		tribes,
+		tribesImInto,
 		lookingFor,
 		relationshipStatuses,
 		bodyTypes,
@@ -126,19 +385,157 @@ export function GridPage() {
 		meetAt,
 		nsfwPics,
 		tags,
+		setTags,
 		sortBy,
 		setSortBy,
 		browseRequestFilters,
 		activeFilterCount,
 		hasActiveBrowseFilters,
 		clearBrowseFilters,
-	} = useBrowseFilters(persistedBrowseFilters);
+		nicknameFilter,
+		setNicknameFilter,
+		applyDraft,
+	} = useBrowseFilters(getCachedBrowseFiltersDraft() ?? getDefaultBrowseFiltersDraft());
+
+	// The sort from before entering explore, restored on leaving it, since the
+	// effect below drops location-based sorts while exploring. Declared first so
+	// it still sees the sort from before that effect resets it. Entering explore
+	// straight from a reload leaves nothing to restore, so it falls back to the
+	// default (distance) sort.
+	const preExploreSortRef = useRef<BrowseSortOption | null>(null);
+	const wasExploringRef = useRef(exploreLocation !== null);
+	useEffect(() => {
+		const isExploring = exploreLocation !== null;
+		if (isExploring === wasExploringRef.current) return;
+		wasExploringRef.current = isExploring;
+		if (isExploring) {
+			preExploreSortRef.current = sortBy;
+		} else {
+			setSortBy(preExploreSortRef.current ?? "distance");
+			preExploreSortRef.current = null;
+		}
+	}, [exploreLocation, sortBy, setSortBy]);
+
+	// Favorites/Right Now filters and distance/age/popular sorts all rely on
+	// the real location (or real-time presence), neither of which apply to a
+	// browsed-away explore location — hide their pills/options (above) and
+	// clear the underlying state here so they don't keep silently filtering
+	// the grid once the toggle disappears.
+	useEffect(() => {
+		if (!exploreLocation) return;
+		setBrowseFilters((prev: typeof browseFilters) =>
+			prev.favorites || prev.rightNow ? { ...prev, favorites: false, rightNow: false } : prev,
+		);
+		setSortBy((prev) => (prev === "distance" || prev === "age-asc" || prev === "age-desc" || prev === "popular" ? "default" : prev));
+	}, [exploreLocation, setBrowseFilters, setSortBy]);
+
+	useEffect(() => {
+		if (browseFilters.favorites && !hasAttemptedFetchNotes) {
+			void handleFetchNotes();
+		}
+	}, [browseFilters.favorites, hasAttemptedFetchNotes, handleFetchNotes]);
+
+	// A favorite or note changed somewhere (grid, profile, chat): drop cached
+	// favorites pages, refetch notes, and reload now if the favorites filter is on.
+	const favoritesFilterOnRef = useRef(browseFilters.favorites);
+	favoritesFilterOnRef.current = browseFilters.favorites;
+	const loadBrowseCardsRef = useRef<((opts?: { preferCache?: boolean; showLoadingState?: boolean }) => Promise<void>) | null>(null);
+	useEffect(() => {
+		const onChanged = (event: Event) => {
+			const { profileId, favorite } = (event as CustomEvent<FavoritesChangedDetail>).detail;
+			// An unfavorited profile leaves the favorites grid at once, before the reload.
+			if (favoritesFilterOnRef.current && favorite === false) {
+				setCards((previous) => previous.filter((card) => card.profileId !== profileId));
+			}
+			invalidateFavoritesBrowseCache();
+			setHasAttemptedFetchNotes(false);
+			if (favoritesFilterOnRef.current) void loadBrowseCardsRef.current?.({ preferCache: false, showLoadingState: false });
+		};
+		window.addEventListener(FAVORITES_CHANGED_EVENT, onChanged);
+		return () => window.removeEventListener(FAVORITES_CHANGED_EVENT, onChanged);
+	}, []);
+
+	// Reload whenever the active account's chatDb is ready (settingsReady),
+	// so switching accounts from GridPage's own account switcher also
+	// switches filters instead of leaking the previous account's browse
+	// filters into the newly active one (mirrors the per-profile location
+	// reload in PreferencesContext.tsx).
+	useEffect(() => {
+		if (!settingsReady) {
+			return;
+		}
+		// Skip if we just navigated in with an explicit filter draft (e.g. tag-click
+		// from a profile) — otherwise this clobbers it with the stale persisted draft
+		// once the async load resolves, right after it was applied.
+		const hasPendingDraft = Boolean(
+			typeof location.state === "object" &&
+				location.state !== null &&
+				(location.state as { browseFiltersDraft?: unknown }).browseFiltersDraft,
+		);
+		if (hasPendingDraft) {
+			return;
+		}
+		void loadBrowseFiltersDraft().then(applyDraft);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [userId, settingsReady]);
+
+	const [isFiltersOpen, setIsFiltersOpen] = useState(false);
+	const [isLocationOpen, setIsLocationOpen] = useState(false);
+	const [isSortSheetOpen, setIsSortSheetOpen] = useState(false);
+	const quickFilterDefs = useGridQuickFilterDefs();
+	const visibleQuickFilters = useMemo(
+		() =>
+			sanitizeQuickFilters(gridQuickFilters, GRID_QUICK_FILTER_KEYS)
+				.map((key) => quickFilterDefs[key])
+				.filter((def) => !(exploreLocation && def.hiddenWhileExploring)),
+		[gridQuickFilters, quickFilterDefs, exploreLocation],
+	);
+	// Quick access to the local displayname filter (same state as the one in
+	// the filters overlay). Stays visible while a name is set so it's obvious
+	// why the grid is narrowed down.
+	const [isNameSearchOpen, setIsNameSearchOpen] = useState(false);
+	const showNameSearch = isNameSearchOpen || Boolean(nicknameFilter);
+	// The same field also opens a profile by ID: any purely numeric entry is
+	// taken as an ID (IDs come in every length, old ones are short), offered
+	// below the field, and doesn't filter the grid by name, which would only
+	// page through it for a match that can't exist.
+	const profileIdQuery = /^\d+$/.test(nicknameFilter.trim()) ? nicknameFilter.trim() : null;
+	const effectiveNicknameFilter = profileIdQuery ? "" : nicknameFilter;
+
+	// Fades the quick-filter row's right edge while more chips are off-screen.
+	const chipRowFade = useScrollRowFade();
+
+	// Distance/age/popularity sorts need the viewer's own position, so explore
+	// mode only offers the ones that still make sense (see the reset effect above).
+	const sortOptions = useMemo<{ value: BrowseSortOption; label: string }[]>(
+		() => [
+			// Distance is the default sort, so it carries the "Default" label;
+			// raw server order is offered as "Original".
+			...(exploreLocation
+				? []
+				: [{ value: "distance" as const, label: t("browse_filters.sort.default") }]),
+			{ value: "default", label: t("browse_filters.sort.original", { defaultValue: "Original" }) },
+			...(exploreLocation
+				? []
+				: [
+					{ value: "age-asc" as const, label: t("browse_filters.sort.youngest") },
+					{ value: "age-desc" as const, label: t("browse_filters.sort.oldest") },
+					{ value: "popular" as const, label: t("browse_filters.sort.popular") },
+				]),
+			{ value: "name", label: t("browse_filters.sort.name_az") },
+		],
+		[exploreLocation, t],
+	);
+	// Explore mode has no distance sort, so server order is its default there.
+	const isDefaultSort = sortBy === (exploreLocation ? "default" : "distance");
 
 	const {
 		tappingProfileId,
 		resolvedTapVisualState,
 		hasSentTapRecently,
+		canTapProfile,
 		handleTapProfile,
+		tapVisualStates,
 	} = useTapProfile({
 		activeProfile,
 		setActiveProfile,
@@ -146,6 +543,7 @@ export function GridPage() {
 		tap: apiFunctions.tap,
 		TAP_WINDOW_MS,
 	});
+	const tapStatusByProfileId = useGridTapStatus(TAP_WINDOW_MS, tapVisualStates);
 
 	useEffect(() => {
 		isMountedRef.current = true;
@@ -154,121 +552,24 @@ export function GridPage() {
 		};
 	}, []);
 
+	// Keeps the account switcher's per-account avatar/name in sync with
+	// whatever useMyOwnProfile currently holds — runs on every change (initial
+	// load, a photo edit elsewhere, or the optimistic update below), not just
+	// once on first fetch, so the switcher can't go stale after an edit.
 	useEffect(() => {
-		const loadManagedOptions = async () => {
-			const cachedGenders = getCachedGenderOptions();
-			const cachedPronouns = getCachedPronounOptions();
-
-			if (cachedGenders) {
-				setGenderOptions(cachedGenders);
-			}
-
-			if (cachedPronouns) {
-				setPronounOptions(cachedPronouns);
-			}
-
-			if (cachedGenders && cachedPronouns) {
-				return;
-			}
-
-			try {
-				const [genders, pronouns] = await Promise.all([
-					apiFunctions.getManagedGenders(),
-					apiFunctions.getManagedPronouns(),
-				]);
-
-				const nextGenderOptions = genders.map((item) => ({
-					value: item.genderId,
-					label: item.gender,
-				}));
-				setGenderOptions(nextGenderOptions);
-				setCachedGenderOptions(nextGenderOptions);
-
-				const nextPronounOptions = pronouns.map((item) => ({
-					value: item.pronounId,
-					label: item.pronoun,
-				}));
-				setPronounOptions(nextPronounOptions);
-				setCachedPronounOptions(nextPronounOptions);
-			} catch {
-				if (!cachedGenders) {
-					setGenderOptions([]);
-				}
-				if (!cachedPronouns) {
-					setPronounOptions([]);
-				}
-			}
-		};
-
-		void loadManagedOptions();
-	}, [apiFunctions]);
-
-	useEffect(() => {
-		let cancelled = false;
-		void apiFunctions
-			.getBlockedProfileIds()
-			.then((profileIds) => {
-				if (cancelled || !isMountedRef.current) {
-					return;
-				}
-				setBlockedProfileIds(new Set(profileIds));
-			})
-			.catch(() => {
-				if (!cancelled && isMountedRef.current) {
-					setBlockedProfileIds(new Set());
-				}
-			});
-
-		return () => {
-			cancelled = true;
-		};
-	}, [apiFunctions]);
-
-	useEffect(() => {
-		if (!userId) {
-			setProfileImageHash(null);
-			return;
-		}
-
-		let cancelled = false;
-
-		const loadProfilePhoto = async () => {
-			try {
-				const parsed = await apiFunctions.getBrowseProfileMedia(userId);
-				const mediaHashFromList = parsed.medias
-					?.map((item) => item.mediaHash ?? "")
-					.find((hash) => validateMediaHash(hash));
-				const mediaHashFromProfile = parsed.profileImageMediaHash;
-				const firstHash =
-					mediaHashFromList ??
-					(mediaHashFromProfile && validateMediaHash(mediaHashFromProfile)
-						? mediaHashFromProfile
-						: null);
-
-				if (!cancelled) {
-					setProfileImageHash(firstHash ?? null);
-				}
-			} catch {
-				if (!cancelled) {
-					setProfileImageHash(null);
-				}
-			}
-		};
-
-		void loadProfilePhoto();
-
-		return () => {
-			cancelled = true;
-		};
-	}, [apiFunctions, userId]);
+		if (!userId || !myProfile) return;
+		setSavedAccountPhotoHash(String(userId), profileImageHash);
+		setSavedAccountDisplayName(String(userId), ownDisplayName);
+	}, [userId, myProfile, profileImageHash, ownDisplayName]);
 
 	const browseCacheKey = useMemo(() => {
 		if (!geohash) {
 			return "";
 		}
 		const filtersKey = JSON.stringify(browseRequestFilters);
-		return `${geohash}:${filtersKey}`;
-	}, [browseRequestFilters, geohash]);
+		const modeKey = exploreLocation ? `explore:${exploreLocation.geohash}` : "set";
+		return `${geohash}:${modeKey}:${filtersKey}`;
+	}, [browseRequestFilters, geohash, exploreLocation]);
 
 	const hasSavedScroll = useMemo(() => {
 		if (!browseCacheKey || typeof window === "undefined") {
@@ -278,21 +579,14 @@ export function GridPage() {
 		return !!saved && parseInt(saved, 10) > 0;
 	}, [browseCacheKey]);
 
-	const getBrowseCardsWithTimeout = useCallback(
-		async (args: Parameters<typeof apiFunctions.getBrowseCards>[0]) => {
-			return await new Promise<
-				Awaited<ReturnType<typeof apiFunctions.getBrowseCards>>
-			>((resolve, reject) => {
+	const withLoadTimeout = useCallback(
+		async <T,>(run: () => Promise<T>): Promise<T> => {
+			return await new Promise<T>((resolve, reject) => {
 				const timeout = window.setTimeout(() => {
-					reject(
-						new Error(
-							t("browse_page.errors.load_timeout"),
-						),
-					);
+					reject(new Error(t("browse_page.errors.load_timeout")));
 				}, BROWSE_LOAD_TIMEOUT_MS);
 
-				void apiFunctions
-					.getBrowseCards(args)
+				void run()
 					.then((result) => {
 						window.clearTimeout(timeout);
 						resolve(result);
@@ -303,8 +597,134 @@ export function GridPage() {
 					});
 			});
 		},
-		[apiFunctions, BROWSE_LOAD_TIMEOUT_MS],
+		[BROWSE_LOAD_TIMEOUT_MS, t],
 	);
+
+	const getBrowseCardsWithTimeout = useCallback(
+		(args: Parameters<typeof apiFunctions.getBrowseCards>[0]) =>
+			withLoadTimeout(() => apiFunctions.getBrowseCards(args)),
+		[apiFunctions, withLoadTimeout],
+	);
+
+	// /v4/cascade accepts exploreGeoHash alongside nearbyGeoHash (it's the
+	// same field cascade's own "🌎 Explore" widget uses), so explore mode
+	// just adds that param — nearbyGeoHash stays the real, reported location.
+	// (/v7/search's exploreGeoHash looked equivalent per docs but 500s in
+	// practice — see chat history — so cascade is the only mode this uses.)
+	const fetchGridCards = useCallback(
+		async ({
+			activeGeohash,
+			cursor,
+			explore,
+		}: {
+			activeGeohash: string;
+			cursor?: string | null;
+			explore: ExploreLocation;
+		}): Promise<{ cards: BrowseCard[]; nextPage: string | null }> => {
+			const parsed = await getBrowseCardsWithTimeout({
+				geohash: activeGeohash,
+				exploreGeohash: explore?.geohash,
+				page: cursor ? Number(cursor) : undefined,
+				filters: browseRequestFilters,
+			});
+			return {
+				cards: parsed.cards,
+				nextPage: parsed.nextPage != null ? String(parsed.nextPage) : null,
+			};
+		},
+		[browseRequestFilters, getBrowseCardsWithTimeout],
+	);
+
+	// Grid map view (experiment "cascade-browse": treatment / treatment-2)
+	const isMapFlagOn = useIsBrowseMapEnabled();
+	const canShareProfiles = useCanShareProfiles();
+	const canBlockProfile = useCanBlockProfile();
+	const [gridViewMode, setGridViewMode] = useState<GridViewMode>(() => readGridViewMode(userId));
+	useEffect(() => {
+		setGridViewMode(readGridViewMode(userId));
+	}, [userId]);
+	const showGridMap = isMapFlagOn && gridViewMode === "map";
+	const changeGridViewMode = useCallback(
+		(mode: GridViewMode) => {
+			setGridViewMode(mode);
+			writeGridViewMode(userId, mode);
+		},
+		[userId],
+	);
+	const gridViewModeTabs: IconTabConfig<GridViewMode>[] = useMemo(
+		() => [
+			{ key: "list", label: t("browse_page.view_list", { defaultValue: "Grid" }), icon: LayoutGridFilled },
+			{ key: "map", label: t("browse_page.view_map", { defaultValue: "Map" }), icon: MapFilled },
+		],
+		[t],
+	);
+	const [mapCards, setMapCards] = useState<MapCard[]>([]);
+	const queryClient = useQueryClient();
+	// Free Grind server: where others see us on the map (and, with GPS, the anchor at the real position).
+	const { selfMapPosition, selfFuzzRadiusMeters } = useOwnMapPresence(showGridMap);
+	// Explore mode on the map: a tap anywhere drops the pin there and makes
+	// that spot the explore location, so the pill, the location picker and the
+	// grid all follow the pin. Outside explore mode the map shows the cascade
+	// around the user's own location.
+	const explorePin = useMemo<{ lat: number; lon: number } | null>(() => {
+		if (!exploreLocation) return null;
+		try {
+			const { lat, lon } = decodeGeohash(exploreLocation.geohash);
+			return { lat: (lat[0] + lat[1]) / 2, lon: (lon[0] + lon[1]) / 2 };
+		} catch {
+			return null;
+		}
+	}, [exploreLocation]);
+	const pinGeocodeRequestRef = useRef(0);
+	const handlePlaceExplorePin = useCallback(
+		(point: { lat: number; lon: number }) => {
+			const pinGeohash = encodeGeohash(point.lat, point.lon);
+			const request = ++pinGeocodeRequestRef.current;
+			setExploreLocation({
+				geohash: pinGeohash,
+				label: t("browse_location.lat_lon_label", { lat: point.lat.toFixed(4), lon: point.lon.toFixed(4) }),
+			});
+			void reverseGeocodeGeohash(pinGeohash)
+				.catch(() => null)
+				.then((label) => {
+					// A newer pin (or another explore pick) supersedes this lookup.
+					if (!label || request !== pinGeocodeRequestRef.current) return;
+					setExploreLocation({ geohash: pinGeohash, label });
+				});
+		},
+		[setExploreLocation, t],
+	);
+	useEffect(() => {
+		if (!showGridMap || !geohash) return;
+		let cancelled = false;
+		void (async () => {
+			try {
+				// The same cascade as the grid; the server adds positions only for
+				// profiles that share one, so cards without fuzzedLat/Lon stay off the map.
+				const parsed = await getBrowseCardsWithTimeout({
+					geohash,
+					exploreGeohash: exploreLocation?.geohash,
+					page: 1,
+					filters: browseRequestFilters,
+				});
+				if (cancelled) return;
+				setMapCards(parsed.cards.filter(hasCardPosition));
+				// The cascade moved us to `geohash`: the server re-derived our public point.
+				void queryClient.invalidateQueries({ queryKey: ownMapPositionKey });
+				// …and may have checked us in or out of a cruising spot.
+				void queryClient.invalidateQueries({ queryKey: ["cruising-spots"] });
+			} catch {
+				// The map stays up; a failed load just reads as nobody nearby.
+				if (!cancelled) setMapCards([]);
+			}
+		})();
+		return () => {
+			cancelled = true;
+		};
+	}, [showGridMap, geohash, exploreLocation, browseRequestFilters, getBrowseCardsWithTimeout, queryClient]);
+
+	// Cruising spots on the map (Free Grind server, flag `cruising-spots`).
+	const cruisingMap = useCruisingMapState(showGridMap, explorePin);
 
 	const refreshLocation = useCallback(async () => {
 		if (!useAutoLocation || !("geolocation" in navigator)) {
@@ -316,6 +736,28 @@ export function GridPage() {
 				navigator.geolocation.getCurrentPosition(resolve, reject, options);
 			});
 
+		const applyPosition = async (position: GeolocationPosition) => {
+			const nextGeohash = encodeGeohash(position.coords.latitude, position.coords.longitude);
+			await setPreferences({ geohash: nextGeohash });
+			// Ahead of the re-render, in case the geocode below resolves from cache first.
+			geohashRef.current = nextGeohash;
+			// Re-resolve the display name too, otherwise the header pill and the
+			// location overlay's title keep showing whatever place was last
+			// geocoded (e.g. where auto-location was first turned on) even
+			// though the grid/map have already moved on to the new geohash.
+			// Not awaited: it's a network round trip the grid doesn't need.
+			void reverseGeocodeGeohash(nextGeohash)
+				.catch(() => null)
+				.then((nextLocationName) => {
+					if (nextLocationName && geohashRef.current === nextGeohash) {
+						void setPreferences({ locationName: nextLocationName });
+					}
+				});
+			return nextGeohash;
+		};
+
+		// A counter, not a flag: the refresh timer and pull-to-refresh can overlap.
+		setLocatingCount((count) => count + 1);
 		try {
 			// First attempt with high accuracy
 			const position = await getPosition({
@@ -324,15 +766,11 @@ export function GridPage() {
 				maximumAge: 10000, // Allow 10s old cached data
 			});
 
-			const lat = position.coords.latitude;
-			const lon = position.coords.longitude;
-			const nextGeohash = encodeGeohash(lat, lon);
-
-			await setPreferences({
-				geohash: nextGeohash,
+			const nextGeohash = await applyPosition(position);
+			appLog.info("[grid] auto-location updated", {
+				lat: position.coords.latitude,
+				lon: position.coords.longitude,
 			});
-
-			appLog.info("[grid] auto-location updated", { lat, lon });
 			return nextGeohash;
 		} catch (error: any) {
 			// If HighAccuracy fails, try once without (often more stable in emulator/buildings)
@@ -343,11 +781,11 @@ export function GridPage() {
 						timeout: 10000,
 						maximumAge: 60000,
 					});
-					const lat = fallbackPosition.coords.latitude;
-					const lon = fallbackPosition.coords.longitude;
-					const nextGeohash = encodeGeohash(lat, lon);
-					await setPreferences({ geohash: nextGeohash });
-					appLog.info("[grid] auto-location updated (fallback)", { lat, lon });
+					const nextGeohash = await applyPosition(fallbackPosition);
+					appLog.info("[grid] auto-location updated (fallback)", {
+						lat: fallbackPosition.coords.latitude,
+						lon: fallbackPosition.coords.longitude,
+					});
 					return nextGeohash;
 				} catch (fallbackError: any) {
 					appLog.error("[grid] auto-location fallback failed", {
@@ -362,6 +800,8 @@ export function GridPage() {
 				});
 			}
 			return null;
+		} finally {
+			setLocatingCount((count) => count - 1);
 		}
 	}, [useAutoLocation, setPreferences]);
 
@@ -372,12 +812,23 @@ export function GridPage() {
 			showLoadingState = true,
 			overrideGeohash,
 		}: {
-			page?: number;
+			page?: string;
 			preferCache?: boolean;
 			showLoadingState?: boolean;
 			overrideGeohash?: string;
 		} = {}) => {
 			if (isLoadingPreferences) {
+				return;
+			}
+
+			if (getIncognitoMode()) {
+				if (!isMountedRef.current) {
+					return;
+				}
+				setCards([]);
+				setCardsError(null);
+				setIsLocationMissing(false);
+				setIsLoadingCards(false);
 				return;
 			}
 
@@ -392,13 +843,14 @@ export function GridPage() {
 				setCardsError(
 					t("browse_page.errors.set_location"),
 				);
+				setIsLocationMissing(true);
 				setIsLoadingCards(false);
 				return;
 			}
 
 			// Use the correct cache key for the active geohash
 			const activeCacheKey = overrideGeohash
-				? `${overrideGeohash}:${JSON.stringify(browseRequestFilters)}`
+				? `${overrideGeohash}:${exploreLocation ? `explore:${exploreLocation.geohash}` : "set"}:${JSON.stringify(browseRequestFilters)}`
 				: browseCacheKey;
 
 			const cached = preferCache ? getCachedBrowseCards(activeCacheKey) : null;
@@ -406,16 +858,18 @@ export function GridPage() {
 				return;
 			}
 
+			setIsLocationMissing(false);
 			setCardsError(null);
 
 			if (cached) {
 				setCards(cached.cards);
 				setNextPage(cached.nextPage);
+				setLoadedPageCount(1);
 				setIsLoadingCards(false);
 				setDebugLoadSource("cache");
 				// If we have cached cards and we're on the first page, don't re-fetch from API immediately.
 				// This ensures the grid remains stable for 5 minutes as requested.
-				if (!page || page === 1) {
+				if (!page) {
 					return;
 				}
 			} else if (showLoadingState) {
@@ -423,17 +877,17 @@ export function GridPage() {
 			}
 
 			try {
-				const parsed = await getBrowseCardsWithTimeout({
-					geohash: activeGeohash,
-					page,
-					filters: browseRequestFilters,
+				const parsed = await fetchGridCards({
+					activeGeohash,
+					cursor: page,
+					explore: exploreLocation,
 				});
 				setDebugLoadSource("network");
 
 				void upsertChatContactIndexFromGrid(
 					parsed.cards.map((card) => ({
 						profileId: card.profileId,
-						unreadCount: card.unreadCount ?? 0,
+						unreadCount: getUnreadBeyondLocalRead(card.profileId, card.unreadCount ?? 0),
 					})),
 				).catch((error) => {
 					appLog.warn("[chat-index] failed to persist grid metadata", error);
@@ -443,13 +897,15 @@ export function GridPage() {
 					return;
 				}
 
-				setCards(parsed.cards);
+				const mergedCards = mergeBrowseCardImages(cardsRef.current, parsed.cards);
+				setCards(mergedCards);
 				setCachedBrowseCards(
 					activeCacheKey,
-					parsed.cards,
+					mergedCards,
 					parsed.nextPage ?? null,
 				);
 				setNextPage(parsed.nextPage ?? null);
+				setLoadedPageCount(1);
 			} catch (error) {
 				if (!isMountedRef.current) {
 					return;
@@ -478,20 +934,20 @@ export function GridPage() {
 			isLoadingPreferences,
 			browseCacheKey,
 			browseRequestFilters,
-			getBrowseCardsWithTimeout,
+			exploreLocation,
+			fetchGridCards,
 		],
 	);
 
-	useEffect(() => {
-		const SESSION_REFRESH_KEY = "grid_initial_location_refreshed";
-		const hasRefreshedThisSession = sessionStorage.getItem(SESSION_REFRESH_KEY) === "true";
+	loadBrowseCardsRef.current = loadBrowseCards;
 
-		if (!isLoadingPreferences && useAutoLocation && !initialLocationChecked && !hasRefreshedThisSession) {
+	useEffect(() => {
+		if (!isLoadingPreferences && useAutoLocation && !initialLocationChecked && !hasRefreshedLocationThisAppLaunch) {
 			appLog.info("[grid] triggering initial session auto-location refresh");
 			void refreshLocation().finally(() => {
 				if (isMountedRef.current) {
 					setInitialLocationChecked(true);
-					sessionStorage.setItem(SESSION_REFRESH_KEY, "true");
+					hasRefreshedLocationThisAppLaunch = true;
 				}
 			});
 		} else if (!isLoadingPreferences && !initialLocationChecked) {
@@ -517,36 +973,57 @@ export function GridPage() {
 		setHasRestoredScroll(false);
 	}, [browseCacheKey]);
 
-	// Periodically save scroll position for the current grid view
+	// Jump back to the top whenever filters/sort/search change — the grid is
+	// reordered, so the old offset points at unrelated profiles. Also drop the
+	// saved offset for the new cache key so BrowseGrid doesn't restore it.
+	const gridOrderKey = useMemo(
+		() => JSON.stringify([browseRequestFilters, browseFilters, sortBy, effectiveNicknameFilter, searchTerm]),
+		[browseRequestFilters, browseFilters, sortBy, effectiveNicknameFilter, searchTerm],
+	);
+	const prevGridOrderKeyRef = useRef(gridOrderKey);
 	useEffect(() => {
-		const handleScroll = () => {
-			if (browseCacheKey && window.scrollY > 0) {
-				sessionStorage.setItem(`grid-scroll-${browseCacheKey}`, window.scrollY.toString());
-			}
-		};
+		if (prevGridOrderKeyRef.current === gridOrderKey) return;
+		prevGridOrderKeyRef.current = gridOrderKey;
+		if (browseCacheKey) {
+			sessionStorage.removeItem(`grid-scroll-${browseCacheKey}`);
+		}
+		feedContainerRef.current?.scrollTo({ top: 0 });
+	}, [gridOrderKey, browseCacheKey]);
 
-		window.addEventListener("scroll", handleScroll, { passive: true });
-		return () => window.removeEventListener("scroll", handleScroll);
+	// Same on an account switch while the grid stays mounted (the saved
+	// offsets themselves are dropped by clearAllCaches on account change).
+	const prevUserIdRef = useRef(userId);
+	useEffect(() => {
+		if (prevUserIdRef.current === userId) return;
+		prevUserIdRef.current = userId;
+		feedContainerRef.current?.scrollTo({ top: 0 });
+	}, [userId]);
+
+	// Scroll restore + header-snap now lives inside BrowseGrid (see its
+	// hasRestoredScroll/onRestoredScrollChange props) — with the grid
+	// virtualized, only BrowseGrid knows the real (measured) row size needed
+	// to do that math without querying the DOM for a tile that may not be
+	// mounted yet at the restored position.
+
+	useEffect(() => {
+		if (!browseCacheKey) return;
+		const container = feedContainerRef.current;
+		if (!container) return;
+		const key = `grid-scroll-${browseCacheKey}`;
+		const handleScroll = () => {
+			sessionStorage.setItem(key, container.scrollTop.toString());
+		};
+		container.addEventListener("scroll", handleScroll, { passive: true });
+		return () => container.removeEventListener("scroll", handleScroll);
 	}, [browseCacheKey]);
 
-	// Restore scroll position when cards are loaded and we haven't restored yet
-	useLayoutEffect(() => {
-		if (
-			cards.length > 0 &&
-			!hasRestoredScroll &&
-			!isLoadingCards &&
-			browseCacheKey
-		) {
-			const saved = sessionStorage.getItem(`grid-scroll-${browseCacheKey}`);
-			if (saved) {
-				const scrollY = parseInt(saved, 10);
-				if (scrollY > 0) {
-					window.scrollTo({ top: scrollY, behavior: "instant" });
-				}
-			}
-			setHasRestoredScroll(true);
-		}
-	}, [cards.length, hasRestoredScroll, isLoadingCards, browseCacheKey]);
+	useEffect(() => {
+		const handleScrollTop = () => {
+			feedContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+		};
+		window.addEventListener("browse-scroll-top", handleScrollTop);
+		return () => window.removeEventListener("browse-scroll-top", handleScrollTop);
+	}, []);
 
 	useEffect(() => {
 		const profileIds = cards.map((card) => card.profileId);
@@ -565,6 +1042,30 @@ export function GridPage() {
 			})
 			.catch((error) => {
 				appLog.warn("[chat-index] failed to hydrate grid contact index", error);
+			});
+
+		return () => {
+			cancelled = true;
+		};
+	}, [cards]);
+
+	useEffect(() => {
+		const profileIds = cards.map((card) => card.profileId);
+		if (profileIds.length === 0) {
+			setLocalNicknamesByProfileId({});
+			return;
+		}
+
+		let cancelled = false;
+		void getLocalNicknamesForProfiles(profileIds)
+			.then((nicknames) => {
+				if (cancelled || !isMountedRef.current) {
+					return;
+				}
+				setLocalNicknamesByProfileId(nicknames);
+			})
+			.catch((error) => {
+				appLog.warn("[chat-index] failed to hydrate grid local nicknames", error);
 			});
 
 		return () => {
@@ -592,21 +1093,68 @@ export function GridPage() {
 		};
 	}, [isLoadingCards, cardsError, isLoadingPreferences, BROWSE_LOAD_TIMEOUT_MS]);
 
+	const handleAutoRefresh = useCallback(async () => {
+		if (getIncognitoMode()) {
+			return;
+		}
+		appLog.info("[grid] auto-refresh triggered");
+		let activeGeohash = geohash;
+		if (browseCacheKey) {
+			sessionStorage.removeItem(`grid-scroll-${browseCacheKey}`);
+		}
+		if (useAutoLocation) {
+			const next = await refreshLocation();
+			if (next) {
+				activeGeohash = next;
+			}
+		}
+		return loadBrowseCards({
+			preferCache: false,
+			showLoadingState: false,
+			overrideGeohash: activeGeohash || undefined,
+		});
+	}, [browseCacheKey, geohash, loadBrowseCards, refreshLocation, useAutoLocation]);
+
+	// Desktop has no pull-to-refresh gesture (PullToRefreshContainer only
+	// listens for touch events), so this button is the desktop equivalent —
+	// same refresh logic as the mobile pull gesture, with its own loading
+	// flag since it runs with showLoadingState: false.
+	const handleManualRefresh = useCallback(async () => {
+		if (isManualRefreshing || isLoadingCards || isLoadingMoreCards) return;
+		setIsManualRefreshing(true);
+		try {
+			await handleAutoRefresh();
+		} finally {
+			setIsManualRefreshing(false);
+		}
+	}, [handleAutoRefresh, isManualRefreshing, isLoadingCards, isLoadingMoreCards]);
+
+	useEffect(() => {
+		if (typeof window === "undefined") return;
+
+		const timer = setInterval(() => {
+			void handleAutoRefresh();
+		}, GRID_REFRESH_INTERVAL_MS);
+
+		return () => clearInterval(timer);
+	}, [handleAutoRefresh]);
+
 	const handleLoadMoreCards = async () => {
 		if (!geohash || !nextPage || isLoadingMoreCards) return;
+		if (effectiveNicknameFilter && loadedPageCount >= NICKNAME_FILTER_MAX_PAGES) return;
 		setIsLoadingMoreCards(true);
 		let cancelled = false;
 		try {
-			const parsed = await getBrowseCardsWithTimeout({
-				geohash,
-				page: nextPage,
-				filters: browseRequestFilters,
+			const parsed = await fetchGridCards({
+				activeGeohash: geohash,
+				cursor: nextPage,
+				explore: exploreLocation,
 			});
 			setDebugLoadSource("network");
 			void upsertChatContactIndexFromGrid(
 				parsed.cards.map((card) => ({
 					profileId: card.profileId,
-					unreadCount: card.unreadCount ?? 0,
+					unreadCount: getUnreadBeyondLocalRead(card.profileId, card.unreadCount ?? 0),
 				})),
 			).catch((error) => {
 				appLog.warn(
@@ -621,6 +1169,7 @@ export function GridPage() {
 					return next;
 				});
 				setNextPage(parsed.nextPage ?? null);
+				setLoadedPageCount((prev) => prev + 1);
 			}
 		} catch {
 			// silently fail — existing cards remain
@@ -682,18 +1231,35 @@ export function GridPage() {
 		};
 	}, [activeProfileId, apiFunctions]);
 
-	const profilePhotoUrl = useMemo(() => {
-		if (!profileImageHash) {
-			return null;
+	useEffect(() => {
+		if (!activeProfileId) {
+			setIsActiveProfileBlockedByOther(false);
+			return;
 		}
+		let cancelled = false;
+		void chatDb.getBlockStatesByProfileIds([activeProfileId]).then((blockStates) => {
+			if (!cancelled) setIsActiveProfileBlockedByOther(blockStates.get(activeProfileId) === "blocked_by_other");
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, [activeProfileId]);
 
-		return getThumbImageUrl(profileImageHash, "75x75");
-	}, [profileImageHash]);
-
-	const onlineCount = useMemo(
-		() => cards.filter((card) => isCurrentlyOnline(card.onlineUntil)).length,
-		[cards],
+	const selfCardImageUrl = useMemo(
+		() => profileImageHash ? getThumbImageUrl(profileImageHash, "320x320") : null,
+		[profileImageHash],
 	);
+
+	const selfCard = useMemo((): BrowseCard | null => {
+		if (!userId) return null;
+		return {
+			profileId: String(userId),
+			displayName: ownDisplayName ?? undefined,
+			primaryImageUrl: selfCardImageUrl ?? undefined,
+			onlineUntil: Date.now() + 60 * 60 * 1000,
+			distanceMeters: 0,
+		};
+	}, [userId, ownDisplayName, selfCardImageUrl]);
 
 	const sortedCards = useMemo(() => {
 		const allCards = (SHOW_DEMO_DATA && showDebugInfo) ? [...DEMO_CARDS, ...cards] : cards;
@@ -701,30 +1267,49 @@ export function GridPage() {
 
 		if (sortBy === "default") {
 			results = allCards;
+		} else if (sortBy === "distance") {
+			// Profiles that hide their distance keep their original slot in the
+			// server order; only the slots of profiles with a distance get re-sorted.
+			const withDistance = allCards
+				.filter((card) => card.distanceMeters != null)
+				.sort((a, b) => a.distanceMeters! - b.distanceMeters!);
+			let nextWithDistance = 0;
+			results = allCards.map((card) => card.distanceMeters == null ? card : withDistance[nextWithDistance++]);
+			// The server orders by real distance even for hidden ones, so the
+			// nearest visible distances before and after bracket the hidden one.
+			// Estimate before filtering so the neighbours are the true ones.
+			results = results.map((card, index) => {
+				if (card.distanceMeters != null) return card;
+				let before: number | undefined;
+				for (let i = index - 1; i >= 0 && before === undefined; i--) {
+					before = results[i].distanceMeters ?? undefined;
+				}
+				let after: number | undefined;
+				for (let i = index + 1; i < results.length && after === undefined; i++) {
+					after = results[i].distanceMeters ?? undefined;
+				}
+				const estimate = before != null && after != null ? (before + after) / 2 : (before ?? after);
+				return estimate == null ? card : { ...card, estimatedDistanceMeters: estimate };
+			});
 		} else {
 			results = [...allCards].sort((a, b) => {
-				if (sortBy === "distance") {
-					const distA = a.distanceMeters ?? Infinity;
-					const distB = b.distanceMeters ?? Infinity;
-					return distA - distB;
-				}
-				if (sortBy === "age-asc") {
-					const ageA = a.age ?? Infinity;
-					const ageB = b.age ?? Infinity;
-					return ageA - ageB;
-				}
-				if (sortBy === "age-desc") {
-					const ageA = a.age ?? -Infinity;
-					const ageB = b.age ?? -Infinity;
-					return ageB - ageA;
+				if (sortBy === "age-asc" || sortBy === "age-desc") {
+					// Profiles without an age always go last. Never subtract
+					// Infinity from Infinity here: NaN breaks the comparator
+					// and leaves the whole list partially unsorted.
+					if (a.age == null || b.age == null) {
+						return (a.age == null ? 1 : 0) - (b.age == null ? 1 : 0);
+					}
+					return sortBy === "age-asc" ? a.age - b.age : b.age - a.age;
 				}
 				if (sortBy === "popular") {
 					const popA = a.isPopular ? 1 : 0;
 					const popB = b.isPopular ? 1 : 0;
 					if (popA !== popB) return popB - popA;
-					const distA = a.distanceMeters ?? Infinity;
-					const distB = b.distanceMeters ?? Infinity;
-					return distA - distB;
+					if (a.distanceMeters == null || b.distanceMeters == null) {
+						return (a.distanceMeters == null ? 1 : 0) - (b.distanceMeters == null ? 1 : 0);
+					}
+					return a.distanceMeters - b.distanceMeters;
 				}
 				if (sortBy === "name") {
 					const nameA = a.displayName ?? "";
@@ -735,20 +1320,56 @@ export function GridPage() {
 			});
 		}
 
+		if (hiddenProfileIds.size > 0) {
+			results = results.filter((card) => !hiddenProfileIds.has(card.profileId));
+		}
+
 		if (browseFilters.isVisiting) {
 			results = results.filter((card) => card.isVisiting === true);
 		}
 
+		if (effectiveNicknameFilter) {
+			const lower = effectiveNicknameFilter.toLowerCase();
+			results = results.filter((card) =>
+				card.displayName?.toLowerCase().includes(lower),
+			);
+		}
+
+		if (searchTerm) {
+			const lower = searchTerm.toLowerCase();
+			results = results.filter((card) => {
+				const matchesName = card.displayName?.toLowerCase().includes(lower) ||
+					card.profileId.toLowerCase().includes(lower);
+
+				if (matchesName) return true;
+
+				// Check favorite notes
+				const noteMatch = favoriteNotes.find(n => String(n.counterpartyId) === String(card.profileId));
+				if (noteMatch) {
+					return noteMatch.notes.toLowerCase().includes(lower) ||
+						noteMatch.phoneNumber.toLowerCase().includes(lower);
+				}
+
+				return false;
+			});
+		}
+
+		if (selfCard) {
+			results = [selfCard, ...results.filter((c) => c.profileId !== selfCard.profileId)];
+		}
+
 		return results;
-	}, [cards, sortBy, showDebugInfo, browseFilters.isVisiting]);
+	}, [cards, sortBy, showDebugInfo, hiddenProfileIds, browseFilters.isVisiting, effectiveNicknameFilter, searchTerm, favoriteNotes, selfCard]);
 
 	const selectedBrowseCard = useMemo(() => {
 		if (!activeProfileId) {
 			return null;
 		}
-
+		if (selfCard && activeProfileId === selfCard.profileId) {
+			return selfCard;
+		}
 		return cards.find((card) => card.profileId === activeProfileId) ?? null;
-	}, [activeProfileId, cards]);
+	}, [activeProfileId, cards, selfCard]);
 
 	const selectedProfileChatContact = useMemo(() => {
 		if (!activeProfileId) {
@@ -757,6 +1378,14 @@ export function GridPage() {
 
 		return chatContactIndexByProfileId[activeProfileId] ?? null;
 	}, [activeProfileId, chatContactIndexByProfileId]);
+
+	const selectedProfileLocalNickname = useMemo(() => {
+		if (!activeProfileId) {
+			return null;
+		}
+
+		return localNicknamesByProfileId[activeProfileId] ?? null;
+	}, [activeProfileId, localNicknamesByProfileId]);
 
 	const activeProfilePhotoHashes = useMemo(() => {
 		if (!activeProfile) {
@@ -780,6 +1409,26 @@ export function GridPage() {
 		return hashes;
 	}, [activeProfile]);
 
+	// Grid tile double tap sends the tap type chosen in Behavior settings.
+	// Returns whether the tap goes out so the tile only plays its burst
+	// animation when it actually does; a blocked tap still runs through
+	// handleTapProfile for the "already tapped" toast.
+	const handleDoubleTapProfile = (profileId: string, tapId: number) => {
+		// Your own tile: nothing to tap, so a double tap just opens it.
+		if (selfCard && profileId === selfCard.profileId) {
+			handleSelectProfile(profileId);
+			return false;
+		}
+		// The sent-taps list also knows about taps from earlier sessions/devices.
+		if (tapStatusByProfileId[profileId]?.sent != null) {
+			toast(t("browse_page.toasts.tap_limit"));
+			return false;
+		}
+		const willSend = canTapProfile(profileId);
+		void handleTapProfile(profileId, tapId);
+		return willSend;
+	};
+
 	const handleSelectProfile = (profileId: string) => {
 		if (window.matchMedia("(max-width: 639px)").matches) {
 			navigate(`/profile/${profileId}`, {
@@ -794,6 +1443,65 @@ export function GridPage() {
 		setActiveProfileId(profileId);
 	};
 
+	// From the map (markers, cruising spots): like Right Now's map — full screen
+	// on mobile with the map kept mounted underneath (backgroundLocation, see
+	// App.tsx), so closing returns to the same map view; the modal on desktop.
+	const openProfileFromMap = (profileId: string) => {
+		if (window.matchMedia("(max-width: 639px)").matches) {
+			navigate(`/profile/${profileId}`, {
+				state: { returnTo: `${location.pathname}${location.search}`, backgroundLocation: location },
+			});
+			return;
+		}
+		setActiveProfileId(profileId);
+	};
+
+	// Neighbours in grid order, so the open profile can step to the next one.
+	const activeCardIndex = activeProfileId ? sortedCards.findIndex((c) => c.profileId === activeProfileId) : -1;
+	const prevCardProfileId = activeCardIndex > 0 ? sortedCards[activeCardIndex - 1].profileId : null;
+	const nextCardProfileId =
+		activeCardIndex >= 0 && activeCardIndex < sortedCards.length - 1 ? sortedCards[activeCardIndex + 1].profileId : null;
+
+	// Same as Settings' profile row: the own profile, straight in edit mode.
+	const openOwnProfileEditor = () => {
+		if (userId == null) return;
+		navigate(`/profile/${userId}`, {
+			state: {
+				returnTo: `${location.pathname}${location.search}`,
+				editOwnProfile: true,
+				...(isDesktop ? { backgroundLocation: location } : {}),
+			},
+		});
+	};
+
+	const openProfileFromSearch = (profileId: string) => {
+		setNicknameFilter("");
+		setIsNameSearchOpen(false);
+		handleSelectProfile(profileId);
+	};
+
+	const handleSendQuickMessage = async (targetProfileId: string, text: string) => {
+		try {
+			await apiFunctions.sendText({ targetProfileId: Number(targetProfileId), text });
+			toast.success(t("chat.toasts.message_sent", { defaultValue: "Message sent" }));
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : t("chat.errors.send_failed"));
+		}
+	};
+
+	const handleSendProfilePhotoReply = async (targetProfileId: string, imageHash: string, text: string) => {
+		try {
+			await apiFunctions.sendMessage({
+				type: "ProfilePhotoReply",
+				target: { type: "Direct", targetId: Number(targetProfileId) },
+				body: { imageHash, photoContentReply: text },
+			});
+			toast.success(t("chat.toasts.photo_reply_sent", { defaultValue: "Reply sent" }));
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : t("chat.errors.send_failed"));
+		}
+	};
+
 	const handleMessageProfile = (profileId: string) => {
 		const nextParams = new URLSearchParams();
 		nextParams.set("targetProfileId", profileId);
@@ -802,57 +1510,22 @@ export function GridPage() {
 		navigate(`/chat?${nextParams.toString()}`);
 	};
 
-	const handleTriangleProfile = (targetProfileId: string) => {
-		if (!geohash) {
-			toast.error(t("browse_page.errors.location_required"));
-			return;
-		}
-
-		try {
-			const decoded = decodeGeohash(geohash);
-			const latitude = (decoded.lat[0] + decoded.lat[1]) / 2;
-			const longitude = (decoded.lon[0] + decoded.lon[1]) / 2;
-			const distanceMeters =
-				typeof activeProfile?.distance === "number" &&
-				Number.isFinite(activeProfile.distance)
-					? Math.round(activeProfile.distance)
-					: null;
-
-			if (distanceMeters !== null) {
-				toast.success(
-					t("browse_page.toasts.distance_info", {
-						lat: latitude.toFixed(5),
-						lon: longitude.toFixed(5),
-						id: targetProfileId,
-						distance: distanceMeters,
-					}),
-				);
-				return;
-			}
-
-			toast.success(
-				t("browse_page.toasts.distance_unavailable", {
-					lat: latitude.toFixed(5),
-					lon: longitude.toFixed(5),
-					id: targetProfileId,
-				}),
-			);
-		} catch {
-			toast.error(t("browse_page.errors.location_read_failed"));
-		}
+	const handleTagClick = (tag: string) => {
+		setTags([tag]);
+		setActiveProfileId(null);
+		toast.success(t("browse_page.toasts.tag_filter_applied", { tag }));
 	};
+
+	const { handleTriangleProfile, locateLabelFor } = useLocateProfile();
+	// Read on mount like ProfileDetailsModal does; toggled in Optional Features.
+	const [showLocate] = useState(isLocateEnabled);
 
 	const performBlockProfile = useCallback(
 		async (targetProfileId: string) => {
-			setMutatingBlockProfileId(targetProfileId);
 			try {
-				await apiFunctions.blockProfile(targetProfileId);
-				setBlockedProfileIds((prev) => {
-					const next = new Set(prev);
-					next.add(targetProfileId);
-					return next;
-				});
+				await blockProfileMutation(targetProfileId);
 				setCards((prev) => prev.filter((card) => card.profileId !== targetProfileId));
+				removeProfileFromBrowseCache(targetProfileId);
 				if (activeProfileId === targetProfileId) {
 					setActiveProfileId(null);
 				}
@@ -863,23 +1536,15 @@ export function GridPage() {
 						? error.message
 						: t("profile_details.block_failed"),
 				);
-			} finally {
-				setMutatingBlockProfileId(null);
 			}
 		},
-		[activeProfileId, apiFunctions, t],
+		[activeProfileId, blockProfileMutation, t],
 	);
 
 	const performUnblockProfile = useCallback(
 		async (targetProfileId: string) => {
-			setMutatingBlockProfileId(targetProfileId);
 			try {
-				await apiFunctions.unblockProfile(targetProfileId);
-				setBlockedProfileIds((prev) => {
-					const next = new Set(prev);
-					next.delete(targetProfileId);
-					return next;
-				});
+				await unblockProfileMutation(targetProfileId);
 				toast.success(t("profile_details.unblock_success"));
 			} catch (error) {
 				toast.error(
@@ -887,20 +1552,18 @@ export function GridPage() {
 						? error.message
 						: t("profile_details.unblock_failed"),
 				);
-			} finally {
-				setMutatingBlockProfileId(null);
 			}
 		},
-		[apiFunctions, t],
+		[unblockProfileMutation, t],
 	);
 
 	const handleBlockProfile = useCallback(
 		async (targetProfileId: string) => {
-			if (mutatingBlockProfileId) {
+			if (isBlockingProfile || isUnblockingProfile) {
 				return;
 			}
 
-			if (skipBlockConfirm) {
+			if (isBlockConfirmSkipped()) {
 				await performBlockProfile(targetProfileId);
 				return;
 			}
@@ -908,24 +1571,43 @@ export function GridPage() {
 			setDontAskAgainChecked(false);
 			setPendingProfileConfirm({ action: "block", profileId: targetProfileId });
 		},
-		[mutatingBlockProfileId, performBlockProfile, skipBlockConfirm],
+		[isBlockingProfile, isUnblockingProfile, performBlockProfile],
 	);
 
 	const handleUnblockProfile = useCallback(
 		async (targetProfileId: string) => {
-			if (mutatingBlockProfileId) {
+			if (isBlockingProfile || isUnblockingProfile) {
 				return;
 			}
 
-			if (skipUnblockConfirm) {
-				await performUnblockProfile(targetProfileId);
-				return;
-			}
-
-			setDontAskAgainChecked(false);
-			setPendingProfileConfirm({ action: "unblock", profileId: targetProfileId });
+			// Unblocking isn't destructive, so it never needs a confirmation prompt.
+			await performUnblockProfile(targetProfileId);
 		},
-		[mutatingBlockProfileId, performUnblockProfile, skipUnblockConfirm],
+		[isBlockingProfile, isUnblockingProfile, performUnblockProfile],
+	);
+
+	const handleHideProfile = useCallback(
+		(targetProfileId: string) => {
+			const card = cards.find((c) => c.profileId === targetProfileId);
+			const isActive = String(activeProfile?.profileId) === targetProfileId;
+			const displayName = (isActive ? activeProfile?.displayName : null) ?? card?.displayName ?? null;
+			const avatarMediaHash = (isActive ? activeProfile?.profileImageMediaHash : null) ?? null;
+			void hideProfile(apiFunctions, targetProfileId, displayName, avatarMediaHash).then((ok) => {
+				if (ok) toast.success(t("profile_details.hide_success"));
+				else toast.error(t("profile_details.hide_failed", { defaultValue: "Failed to hide profile." }));
+			});
+		},
+		[activeProfile, apiFunctions, cards, t],
+	);
+
+	const handleUnhideProfile = useCallback(
+		(targetProfileId: string) => {
+			void unhideProfile(apiFunctions, targetProfileId).then((ok) => {
+				if (ok) toast.success(t("profile_details.unhide_success"));
+				else toast.error(t("profile_details.unhide_failed", { defaultValue: "Failed to unhide profile." }));
+			});
+		},
+		[apiFunctions, t],
 	);
 
 	const handleToggleFavoriteProfile = useCallback(
@@ -949,7 +1631,7 @@ export function GridPage() {
 						}
 						return {
 							...card,
-							isFavorite: !currentlyFavorite,
+							favorite: !currentlyFavorite,
 						};
 					}),
 				);
@@ -982,49 +1664,108 @@ export function GridPage() {
 		[apiFunctions, mutatingFavoriteProfileId, t],
 	);
 
+	const seenDisplayNamesByProfileId = useSeenDisplayNames(
+		cards.map((card) => ({
+			profileId: card.profileId,
+			nickname: localNicknamesByProfileId[card.profileId],
+			displayName: card.displayName,
+		})),
+	);
+	// Read from the stable menu handler below without re-creating it (and
+	// re-rendering every tile) whenever a name map changes.
+	const nicknameMapsRef = useRef({ localNicknamesByProfileId, seenDisplayNamesByProfileId });
+	nicknameMapsRef.current = { localNicknamesByProfileId, seenDisplayNamesByProfileId };
+
+	const [tileContextMenu, setTileContextMenu] = useState<{ card: BrowseCard; x: number; y: number; rename: NicknameRename } | null>(null);
+	const tileMenuPresence = usePresence(tileContextMenu);
+	const renderedTileMenu = tileMenuPresence.rendered;
+	const handleOpenTileContextMenu = useCallback((card: BrowseCard, x: number, y: number) => {
+		const maps = nicknameMapsRef.current;
+		const rename = getNicknameRename(
+			maps.localNicknamesByProfileId[card.profileId],
+			card.displayName,
+			maps.seenDisplayNamesByProfileId[card.profileId],
+		);
+		// The menu shows the rename, so it counts as seen; the menu keeps the
+		// captured `rename` while it's open.
+		if (rename.previousName && rename.realName) {
+			acknowledgeNicknameRename(card.profileId, rename.realName);
+		}
+		setTileContextMenu({ card, x, y, rename });
+	}, []);
+	const handleCloseTileContextMenu = useCallback(() => setTileContextMenu(null), []);
+
+	const handleLocalNicknameChange = useCallback((profileId: string, nickname: string | null) => {
+		setLocalNicknamesByProfileId((previous) => {
+			const next = { ...previous };
+			if (nickname) next[profileId] = nickname;
+			else delete next[profileId];
+			return next;
+		});
+	}, []);
+
+	// The tile menu's "Set nickname" — same local nickname (and prompt) as the
+	// profile modal's actions menu; an empty value clears it.
+	const [nicknamePromptCard, setNicknamePromptCard] = useState<BrowseCard | null>(null);
+	const [isSavingNickname, setIsSavingNickname] = useState(false);
+
+	const handleSaveTileNickname = useCallback(
+		async (value: string) => {
+			if (!nicknamePromptCard) return;
+			const profileId = nicknamePromptCard.profileId;
+			const normalized = value.trim() || null;
+			setIsSavingNickname(true);
+			try {
+				await setLocalNicknameForProfile(profileId, normalized);
+				handleLocalNicknameChange(profileId, normalized);
+				toast.success(normalized ? t("chat.nicknames.saved") : t("chat.nicknames.cleared"));
+				setNicknamePromptCard(null);
+			} catch (error) {
+				toast.error(error instanceof Error ? error.message : t("chat.nicknames.save_failed"));
+			} finally {
+				setIsSavingNickname(false);
+			}
+		},
+		[handleLocalNicknameChange, nicknamePromptCard, t],
+	);
+
 	const handleCancelProfileConfirm = useCallback(() => {
-		if (mutatingBlockProfileId) {
+		if (isBlockingProfile || isUnblockingProfile) {
 			return;
 		}
 		setPendingProfileConfirm(null);
-	}, [mutatingBlockProfileId]);
+	}, [isBlockingProfile, isUnblockingProfile]);
 
 	const handleConfirmProfileAction = useCallback(async () => {
-		if (!pendingProfileConfirm || mutatingBlockProfileId) {
+		if (!pendingProfileConfirm || isBlockingProfile || isUnblockingProfile) {
 			return;
 		}
 
-		const { action, profileId } = pendingProfileConfirm;
+		const { profileId } = pendingProfileConfirm;
 		if (dontAskAgainChecked && typeof window !== "undefined") {
-			if (action === "block") {
-				localStorage.setItem(SKIP_BLOCK_CONFIRM_KEY, "true");
-				setSkipBlockConfirm(true);
-			} else {
-				localStorage.setItem(SKIP_UNBLOCK_CONFIRM_KEY, "true");
-				setSkipUnblockConfirm(true);
-			}
+			localStorage.setItem(SKIP_BLOCK_CONFIRM_KEY, "true");
 		}
 
 		setPendingProfileConfirm(null);
-		if (action === "block") {
-			await performBlockProfile(profileId);
-			return;
-		}
-		await performUnblockProfile(profileId);
+		await performBlockProfile(profileId);
 	}, [
 		dontAskAgainChecked,
-		mutatingBlockProfileId,
 		pendingProfileConfirm,
 		performBlockProfile,
-		performUnblockProfile,
+		isBlockingProfile,
+		isUnblockingProfile,
 	]);
 
+	const isIncognitoActive = getIncognitoMode();
+
 	return (
-		<>
+		// While a public Right Now session is live, the grid takes on Right Now
+		// colors over everything — the user's accent and explore's blue alike.
+		<div className="contents" style={isRightNowLive ? RIGHT_NOW_LIVE_VARS : undefined}>
 			{showDebugInfo && debugLoadSource && !SHOW_DEMO_DATA && (
 				<div
 					className={cn(
-						"fixed bottom-20 left-4 z-[9999] rounded-lg px-4 py-2 text-xs font-bold uppercase tracking-widest text-white shadow-2xl transition-all animate-in fade-in slide-in-from-bottom-4",
+						"fixed bottom-20 start-4 z-[9999] rounded-lg px-4 py-2 text-xs font-bold uppercase tracking-widest text-white shadow-2xl transition-all animate-in fade-in slide-in-from-bottom-4",
 						debugLoadSource === "cache" ? "bg-emerald-600" : "bg-blue-600",
 					)}
 					onClick={() => setDebugLoadSource(null)}
@@ -1034,9 +1775,14 @@ export function GridPage() {
 			)}
 			{/* !px-0 removes the default app-screen padding to allow the BrowseGrid to span edge-to-edge */}
 			<PullToRefreshContainer
-				className="app-screen overflow-x-hidden !px-0"
-				style={{ width: "100%" }}
+				className="app-screen flex h-dvh flex-col w-full !px-0 !pb-0 overflow-x-hidden"
+				contentClassName="flex flex-1 flex-col min-h-0"
+				style={{ overflow: "visible", overflowX: "hidden" }}
+				isAtTop={() => (feedContainerRef.current?.scrollTop ?? 0) <= 5}
 				onRefresh={async () => {
+					if (isIncognitoActive) {
+						return;
+					}
 					let activeGeohash = geohash;
 					if (browseCacheKey) {
 						sessionStorage.removeItem(`grid-scroll-${browseCacheKey}`);
@@ -1053,398 +1799,539 @@ export function GridPage() {
 						overrideGeohash: activeGeohash || undefined
 					});
 				}}
-				isDisabled={isLoadingCards || isLoadingMoreCards}
+				// Dragging the map must pan it, not pull to refresh.
+				isDisabled={isLoadingCards || isLoadingMoreCards || isIncognitoActive || showGridMap}
 				refreshingLabel={t("browse_page.refreshing_feed")}
 			>
-				<header className="mb-2 px-[var(--app-px)] sm:px-4">
-					<div className="sm:hidden">
-						<div>
-							<div className="mb-1 flex items-center gap-2">
-								<button
-									type="button"
-									onClick={() => navigate("/settings")}
-									className="shrink-0 rounded-full transition-all active:scale-95"
-									aria-label={t("browse_page.open_settings")}
-									title={t("browse_page.settings")}
+				<header ref={headerRef} className="relative z-20 flex shrink-0 flex-col pb-2 pointer-events-none">
+					<PageHeaderBackground color={exploreLocation ? "var(--explore)" : "var(--accent)"} />
+					<div className="pointer-events-auto px-[var(--app-px)] sm:px-4 rail:px-[var(--app-px)]">
+					<div>
+						{/* Desktop: title on its own line like Right Now / Interest, then the filter
+						    chips with location + name search at the right end of the same row.
+						    Mobile keeps the full-width location pill above the chips. */}
+						<div className="rail:grid rail:grid-cols-[minmax(0,1fr)_auto] rail:gap-x-3">
+							<h1 className="app-title hidden rail:col-span-2 rail:row-start-1 rail:mb-1 rail:block">
+								{exploreLocation ? t("browse_location.tab_explore") : t("nav.browse")}
+							</h1>
+							<div className="mb-1 flex items-center gap-2 rail:col-start-2 rail:row-start-2 rail:mb-0 rail:self-start rail:pt-2">
+								<div
+									className="glass-pill inline-flex h-12 w-full items-center rail:h-[38px] rail:w-auto rail:min-w-[260px] rail:max-w-sm overflow-hidden transition-colors duration-150 hover:bg-[color-mix(in_srgb,var(--pill-color,var(--accent))_26%,transparent)] has-[button:active]:bg-[color-mix(in_srgb,var(--pill-color,var(--accent))_38%,transparent)]"
+									style={{ "--pill-color": exploreLocation ? "var(--explore)" : "var(--accent)" } as React.CSSProperties}
 								>
-									<Avatar
-										src={profilePhotoUrl}
-										alt={t("browse_page.your_profile_photo")}
-										className="h-11 w-11"
-									/>
-								</button>
-
-								<button
-									type="button"
-									onClick={() => navigate("/browse/location")}
-									className="inline-flex min-h-12 w-full items-center justify-start gap-2 rounded-2xl bg-[color-mix(in_srgb,var(--surface-2)_84%,transparent)] px-4 text-left text-base font-medium text-[var(--text-muted)] transition active:scale-[0.99] overflow-hidden"
-								>
-									<MapPin className="h-4 w-4 shrink-0" />
-									<span className="truncate">
-										{locationName || t("browse_page.current_location")}
-									</span>
-								</button>
-							</div>
-
-							<div className="-mx-[var(--app-px)] overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-								<div className="flex min-w-max items-center gap-3 px-[var(--app-px)] ml-auto">
 									<button
 										type="button"
-										onClick={() =>
-											navigate("/browse/filters", {
-												state: {
-													browseFiltersDraft: {
-														sortBy,
-														browseFilters,
-														ageMin,
-														ageMax,
-														heightCmMin,
-														heightCmMax,
-														weightGramsMin,
-														weightGramsMax,
-														tribes,
-														lookingFor,
-														relationshipStatuses,
-														bodyTypes,
-														sexualPositions,
-														meetAt,
-														nsfwPics,
-														tags,
-													},
-												},
-											})
-										}
-										className="inline-flex min-h-12 items-center justify-center gap-2 rounded-full bg-[var(--surface-2)] px-5 text-sm font-semibold text-[var(--text)]"
+										onClick={() => setIsLocationOpen(true)}
+										// Desktop pill is only 38px tall: same inset left as above/below the icon.
+										className="flex h-full min-w-0 flex-1 items-center gap-2.5 ps-2 pe-3 text-start rail:ps-[2px]"
 									>
-										<span className="flex items-center gap-2">
-											<SlidersHorizontal className="h-4 w-4" />
-											{hasActiveBrowseFilters ? (
-												<span className="inline-flex min-w-5 items-center justify-center rounded-full bg-[var(--accent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--accent-contrast)]">
-													{activeFilterCount}
-												</span>
-											) : null}
-										</span>
-									</button>
-
-									<div className="relative inline-flex min-h-12 items-center justify-center rounded-full bg-[var(--surface-2)] pl-4 pr-2 text-sm font-semibold text-[var(--text)]">
-										<ListFilter className="mr-1.5 h-4 w-4 shrink-0 text-[var(--text-muted)]" />
-										<select
-											value={sortBy}
-											onChange={(e) => setSortBy(e.target.value as BrowseSortOption)}
-											className="appearance-none bg-transparent cursor-pointer outline-none w-full h-full pr-3 py-3"
+										<div
+											className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-white shadow-sm"
+											style={{
+												color: "var(--accent-contrast)",
+												backgroundColor: exploreLocation ? "var(--explore)" : "var(--accent)",
+												boxShadow: `0 1px 8px 0 color-mix(in srgb, ${exploreLocation ? "var(--explore)" : "var(--accent)"} 30%, transparent)`,
+											}}
 										>
-											<option value="default">{t("browse_filters.sort.default")}</option>
-											<option value="distance">{t("browse_filters.sort.distance")}</option>
-											<option value="age-asc">{t("browse_filters.sort.youngest")}</option>
-											<option value="age-desc">{t("browse_filters.sort.oldest")}</option>
-											<option value="popular">{t("browse_filters.sort.popular")}</option>
-											<option value="name">{t("browse_filters.sort.name_az")}</option>
-										</select>
-									</div>
-
-									<button
-										type="button"
-										onClick={() =>
-											setBrowseFilters((prev: typeof browseFilters) => ({
-												...prev,
-												onlineOnly: !prev.onlineOnly,
-											}))
-										}
-										className={`inline-flex min-h-12 items-center justify-center rounded-full px-5 text-sm font-semibold transition ${browseFilters.onlineOnly ? "bg-[var(--accent)] text-[var(--accent-contrast)]" : "bg-[var(--surface-2)] text-[var(--text)]"}`}
-									>
-										{t("browse_filters.options.online")}
+											{exploreLocation ? (
+												<Search className="h-3.5 w-3.5" />
+											) : isLoadingPreferences || locatingCount > 0 ? (
+												<Loader2 className="h-3.5 w-3.5 animate-spin" />
+											) : useAutoLocation ? (
+												<Navigation className="h-3.5 w-3.5 fill-current" />
+											) : (
+												<MapPinFilled className="h-3.5 w-3.5" />
+											)}
+										</div>
+										<div className="min-w-0 flex-1">
+											<p className="text-sm font-semibold leading-tight text-[var(--text)]">
+												{exploreLocation
+													? t("browse_location.exploring_badge")
+													: isLoadingPreferences
+														// The mode isn't known yet — showing the default "Manual"
+														// here would flip to GPS a moment later.
+														? t("browse_location.loading_location")
+														: useAutoLocation
+															? t("browse_location.mode_gps")
+															: t("browse_location.mode_manual")}
+											</p>
+											{!exploreLocation && isLoadingPreferences ? (
+												<span className="mt-1 block h-2 w-24 animate-pulse rounded-full bg-[var(--text-muted)] opacity-30" aria-hidden="true" />
+											) : (
+												<p className="truncate text-[10px] font-medium leading-tight text-[var(--text-muted)]">
+													{exploreLocation
+														? exploreLocation.label
+														: locatingCount > 0
+															? t("browse_location.locating")
+															: locationName || t("browse_page.current_location")}
+												</p>
+											)}
+										</div>
 									</button>
-
-									<button
-										type="button"
-										onClick={() =>
-											setBrowseFilters((prev: typeof browseFilters) => ({
-												...prev,
-												favorites: !prev.favorites,
-											}))
-										}
-										className={`inline-flex min-h-12 items-center justify-center rounded-full px-5 transition ${browseFilters.favorites ? "bg-[var(--accent)] text-[var(--accent-contrast)]" : "bg-[var(--surface-2)] text-[var(--text)]"}`}
-										aria-label={t("browse_filters.options.favorites")}
-										title={t("browse_filters.options.favorites")}
-									>
-										<Star
-											className={`h-4 w-4 ${browseFilters.favorites ? "fill-current" : ""}`}
-										/>
-									</button>
-
-									<button
-										type="button"
-										onClick={() =>
-											setBrowseFilters((prev: typeof browseFilters) => ({
-												...prev,
-												rightNow: !prev.rightNow,
-											}))
-										}
-										className={`inline-flex min-h-12 items-center justify-center rounded-full px-5 transition ${browseFilters.rightNow ? "bg-[var(--accent)] text-[var(--accent-contrast)]" : "bg-[var(--surface-2)] text-[var(--text)]"}`}
-										aria-label={t("browse_filters.options.right_now")}
-										title={t("browse_filters.options.right_now")}
-									>
-										<Droplet
-											className={`h-4 w-4 ${browseFilters.rightNow ? "fill-current" : ""}`}
-										/>
-									</button>
-
-									<button
-										type="button"
-										onClick={() =>
-											setBrowseFilters((prev: typeof browseFilters) => ({
-												...prev,
-												isVisiting: !prev.isVisiting,
-											}))
-										}
-										className={`inline-flex min-h-12 items-center justify-center rounded-full px-5 transition ${browseFilters.isVisiting ? "bg-[var(--accent)] text-[var(--accent-contrast)]" : "bg-[var(--surface-2)] text-[var(--text)]"}`}
-										aria-label={t("profile_details.visiting")}
-										title={t("profile_details.visiting")}
-									>
-										<Plane
-											className={`h-4 w-4 ${browseFilters.isVisiting ? "fill-current" : ""}`}
-										/>
-									</button>
-
-									{hasActiveBrowseFilters ? (
+									{exploreLocation && (
 										<button
 											type="button"
-											onClick={clearBrowseFilters}
-											className="inline-flex min-h-12 items-center justify-center rounded-full bg-[var(--surface-2)] px-5 text-sm font-semibold text-[var(--text-muted)]"
+											onClick={(e) => { e.stopPropagation(); setExploreLocation(null); }}
+											title={t("browse_location.stop_explore")}
+											className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[var(--text-muted)] transition hover:bg-[var(--surface-3)] hover:text-[var(--text)] active:scale-90"
+											aria-label={t("browse_location.stop_explore")}
 										>
-											{t("browse_filters.clear_all")}
+											<X className="h-3.5 w-3.5" />
 										</button>
-									) : null}
-								</div>
-							</div>
-						</div>
-					</div>
-
-					<div className="hidden sm:block">
-						<div className="mb-2 flex items-start justify-between gap-4">
-							<div>
-								<h1 className="app-title">{t("browse_page.title")}</h1>
-								<div className="mt-2 flex flex-wrap items-center gap-2">
-									<div className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-3 py-1 text-xs font-medium text-[var(--text-muted)]">
-										<span
-											className="h-2 w-2 rounded-full bg-zinc-400"
-											aria-hidden="true"
-										/>
-										<span>{cards.length}</span>
-									</div>
-									<div className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-3 py-1 text-xs font-medium text-[var(--text-muted)]">
-										<span
-											className="h-2 w-2 rounded-full bg-emerald-500"
-											aria-hidden="true"
-										/>
-										<span>{onlineCount}</span>
-									</div>
+									)}
+									<div className="mx-1 h-6 w-px bg-[var(--border)] opacity-40" />
 									<button
 										type="button"
-										onClick={() => navigate("/browse/location")}
-										className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-3 py-1 text-xs font-medium text-[var(--text-muted)] transition hover:border-[var(--accent)] hover:text-[var(--text)] max-w-[200px]"
+										onClick={(e) => { e.stopPropagation(); setIsDistanceSheetOpen(true); }}
+										title={isMapFlagOn ? t("browse_page.location_preferences", { defaultValue: "Location Preferences" }) : t("browse_page.share_distance.title", { defaultValue: "Share Distance" })}
+										aria-label={isMapFlagOn ? t("browse_page.location_preferences", { defaultValue: "Location Preferences" }) : t("browse_page.share_distance.title", { defaultValue: "Share Distance" })}
+										className="group flex h-full shrink-0 items-center justify-center ps-3 pe-4 transition active:scale-90"
 									>
-										<MapPin className="h-3.5 w-3.5 shrink-0" />
-										<span className="hidden lg:inline truncate">
-											{locationName || t("browse_page.location")}
-										</span>
+										<Settings2
+											className={cn(
+												"h-4 w-4 transition-colors",
+												exploreLocation ? "text-[var(--explore)]" : "text-[var(--accent)]",
+											)}
+										/>
 									</button>
+								</div>
+								<button
+									type="button"
+									// Don't steal focus from the name input: its onBlur would close
+									// the field and this click would immediately reopen it.
+									onMouseDown={(e) => e.preventDefault()}
+									onClick={() => {
+										if (showNameSearch && !nicknameFilter) {
+											setIsNameSearchOpen(false);
+										} else {
+											setIsNameSearchOpen(true);
+										}
+									}}
+									title={t("browse_filters.local_filters.name_title")}
+									aria-label={t("browse_filters.local_filters.name_title")}
+									className={cn(
+										"inline-flex h-12 w-12 shrink-0 items-center justify-center transition-all active:scale-95 rail:h-[38px] rail:w-[38px]",
+										effectiveNicknameFilter
+											? exploreLocation
+												? "rounded-full border border-[var(--explore)] bg-[var(--explore)] text-white shadow-lg shadow-[var(--explore)]/40"
+												: "rounded-full border border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-contrast)] shadow-lg shadow-[var(--accent)]/40"
+											: exploreLocation
+												? "glass-pill text-[var(--explore)] hover:border-[var(--explore)]/60 hover:bg-[var(--explore)]/20"
+												: "glass-pill text-[var(--accent)] hover:border-[var(--accent)]/60 hover:bg-[var(--accent)]/20",
+									)}
+									style={
+										!effectiveNicknameFilter
+											? ({ "--pill-color": exploreLocation ? "var(--explore)" : "var(--accent)" } as React.CSSProperties)
+											: undefined
+									}
+								>
+									<UserSearchFilled className="h-4 w-4" />
+								</button>
+							</div>
+
+							{showNameSearch && (
+								<div className="pt-2 rail:col-span-2">
+									<div
+										className="glass-pill relative flex h-10 items-center"
+										style={{ "--pill-color": exploreLocation ? "var(--explore)" : "var(--accent)" } as React.CSSProperties}
+									>
+										<UserSearch
+											className={cn(
+												"pointer-events-none absolute start-3 top-1/2 h-4 w-4 -translate-y-1/2",
+												exploreLocation ? "text-[var(--explore)]" : "text-[var(--accent)]",
+											)}
+										/>
+										<input
+											type="text"
+											autoFocus={isNameSearchOpen && !nicknameFilter}
+											value={nicknameFilter}
+											onChange={(e) => setNicknameFilter(e.target.value)}
+											onBlur={() => { if (!nicknameFilter) setIsNameSearchOpen(false); }}
+											placeholder={t("grid.name_or_id_placeholder")}
+											enterKeyHint={profileIdQuery ? "go" : "search"}
+											className="h-full w-full bg-transparent ps-9 pe-8 text-sm text-[var(--text)] outline-none placeholder:text-[var(--text-muted)]"
+											onKeyDown={(e) => {
+												if (e.key === "Enter" && profileIdQuery) {
+													openProfileFromSearch(profileIdQuery);
+													return;
+												}
+												if (e.key === "Escape" || e.key === "Enter") {
+													e.currentTarget.blur();
+												}
+											}}
+										/>
+										<button
+											type="button"
+											// Keep focus off the input so its onBlur doesn't close the
+											// field before this click lands.
+											onMouseDown={(e) => e.preventDefault()}
+											onClick={() => { setNicknameFilter(""); setIsNameSearchOpen(false); }}
+											aria-label={t("browse_filters.clear_all")}
+											className="absolute end-3 top-1/2 -translate-y-1/2 rounded-full p-0.5 text-[var(--text-muted)] hover:text-[var(--text)]"
+										>
+											<X className="h-3.5 w-3.5" />
+										</button>
+									</div>
+									{profileIdQuery && (
+										<button
+											type="button"
+											// Keep focus on the input (its onBlur would otherwise run first).
+											onMouseDown={(e) => e.preventDefault()}
+											onClick={() => openProfileFromSearch(profileIdQuery)}
+											className={cn(
+												"glass-pill mt-2 flex h-10 w-full items-center gap-2.5 px-3 text-start text-sm transition active:scale-[0.98]",
+												exploreLocation ? "text-[var(--explore)]" : "text-[var(--accent)]",
+											)}
+											style={{ "--pill-color": exploreLocation ? "var(--explore)" : "var(--accent)" } as React.CSSProperties}
+										>
+											<UserFilled className="h-4 w-4 shrink-0" />
+											<span className="min-w-0 flex-1 truncate font-semibold">
+												{t("grid.open_profile_id", { id: profileIdQuery })}
+											</span>
+											<ChevronRight className="h-4 w-4 shrink-0 opacity-70" />
+										</button>
+									)}
+								</div>
+							)}
+
+							<div
+								ref={chipRowFade.ref}
+								onScroll={chipRowFade.onScroll}
+								// Extra bottom room (cancelled by -mb) so the scroller doesn't clip the pills' shadow.
+								className="pointer-events-none -mx-[var(--app-px)] -mb-15 overflow-x-auto pb-16 pt-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden rail:col-start-1 rail:row-start-2 rail:me-0"
+							>
+								<div className="pointer-events-auto flex min-w-max items-center gap-2 px-[var(--app-px)] ms-auto rail:pe-0">
+									{isMapFlagOn && (
+										// Leading, like Right Now's list/map toggle.
+										<IconTabs
+											activeTab={showGridMap ? "map" : "list"}
+											tabs={gridViewModeTabs}
+											onTabClick={changeGridViewMode}
+											color={exploreLocation ? "var(--explore)" : undefined}
+											contrastColor={exploreLocation ? "#fff" : undefined}
+										/>
+									)}
+									{/* Order only matters in the grid; the map shows everyone at once. */}
+									{!showGridMap && (
 									<button
 										type="button"
-										onClick={() =>
-											navigate("/browse/filters", {
-												state: {
-													browseFiltersDraft: {
-														sortBy,
-														browseFilters,
-														ageMin,
-														ageMax,
-														heightCmMin,
-														heightCmMax,
-														weightGramsMin,
-														weightGramsMax,
-														tribes,
-														lookingFor,
-														relationshipStatuses,
-														bodyTypes,
-														sexualPositions,
-														meetAt,
-														nsfwPics,
-														tags,
-													},
-												},
-											})
-										}
-										className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-3 py-1 text-xs font-medium text-[var(--text-muted)] transition hover:border-[var(--accent)] hover:text-[var(--text)]"
+										onClick={() => setIsSortSheetOpen(true)}
+										title={t("browse_page.sort")}
+										aria-label={t("browse_page.sort")}
+										className={cn(
+											"glass-pill inline-flex shrink-0 items-center gap-1.5 text-sm font-bold transition-all active:scale-95",
+											// Icon-only keeps the text line height so it matches the label pills.
+											isDefaultSort ? "justify-center px-[11px] py-2" : "px-4 py-2",
+											exploreLocation
+												? "text-[var(--explore)] hover:border-[var(--explore)]/60 hover:bg-[var(--explore)]/20"
+												: "text-[var(--accent)] hover:border-[var(--accent)]/60 hover:bg-[var(--accent)]/20",
+										)}
+										style={{ "--pill-color": exploreLocation ? "var(--explore)" : "var(--accent)" } as React.CSSProperties}
 									>
-										<SlidersHorizontal className="h-3.5 w-3.5" />
-										<span className="hidden lg:inline">
-											{t("browse_page.filter")}
+										<span className="flex h-5 items-center">
+											<ArrowUpDown className="h-3.5 w-3.5 shrink-0" />
+										</span>
+										{!isDefaultSort && (sortOptions.find((option) => option.value === sortBy)?.label ?? sortOptions[0].label)}
+									</button>
+									)}
+
+									<button
+										type="button"
+										onClick={() => setIsFiltersOpen(true)}
+										title={t("right_now.filters")}
+										aria-label={t("right_now.filters")}
+										className={cn(
+											"inline-flex shrink-0 items-center justify-center gap-1.5 py-2 text-sm font-bold transition-all active:scale-95",
+											// Icon-only keeps the text line height so it matches the label pills.
+											hasActiveBrowseFilters ? "px-3" : "px-[11px]",
+											hasActiveBrowseFilters
+												? exploreLocation
+													? "rounded-full border border-[var(--explore)] bg-[var(--explore)] text-white shadow-lg shadow-[var(--explore)]/40"
+													: "rounded-full border border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-contrast)] shadow-lg shadow-[var(--accent)]/40"
+												: exploreLocation
+													? "glass-pill text-[var(--explore)] hover:border-[var(--explore)]/60 hover:bg-[var(--explore)]/20"
+													: "glass-pill text-[var(--accent)] hover:border-[var(--accent)]/60 hover:bg-[var(--accent)]/20",
+										)}
+										style={
+											!hasActiveBrowseFilters
+												? ({ "--pill-color": exploreLocation ? "var(--explore)" : "var(--accent)" } as React.CSSProperties)
+												: undefined
+										}
+									>
+										<span className="flex h-5 items-center">
+											<PhosphorSlidersHorizontal weight="fill" className="h-3.5 w-3.5" />
 										</span>
 										{hasActiveBrowseFilters ? (
-											<span className="inline-flex min-w-5 items-center justify-center rounded-full bg-[var(--accent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--accent-contrast)]">
+											<span
+												className={cn(
+													"ms-0.5 flex h-4 min-w-[16px] items-center justify-center rounded-full px-1 text-[9px] font-bold",
+													exploreLocation ? "bg-white text-[var(--explore)]" : "bg-[var(--accent-contrast)] text-[var(--accent)]",
+												)}
+											>
 												{activeFilterCount}
 											</span>
 										) : null}
 									</button>
 
-									<div className="relative inline-flex items-center rounded-full border border-[var(--border)] bg-[var(--surface-2)] pl-2.5 pr-1.5 py-1 text-xs font-medium text-[var(--text-muted)] transition hover:border-[var(--accent)] hover:text-[var(--text)] focus-within:border-[var(--accent)] focus-within:text-[var(--text)]">
-										<ListFilter className="mr-1 h-3.5 w-3.5 shrink-0" />
-										<select
-											value={sortBy}
-											onChange={(e) => setSortBy(e.target.value as BrowseSortOption)}
-											className="appearance-none bg-transparent cursor-pointer outline-none pr-3"
-										>
-											<option value="default">{t("browse_page.sort")}</option>
-											<option value="distance">{t("browse_filters.sort.distance")}</option>
-											<option value="age-asc">{t("browse_filters.sort.youngest")}</option>
-											<option value="age-desc">{t("browse_filters.sort.oldest")}</option>
-											<option value="popular">{t("browse_filters.sort.popular")}</option>
-											<option value="name">{t("browse_filters.sort.name_az")}</option>
-										</select>
-									</div>
-
-									<button
-										type="button"
-										onClick={() =>
-											setBrowseFilters((prev: typeof browseFilters) => ({
-												...prev,
-												favorites: !prev.favorites,
-											}))
-										}
-										className={`inline-flex items-center gap-2 rounded-full border border-[var(--border)] px-3 py-1 text-xs font-medium transition ${
-											browseFilters.favorites
-												? "bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-contrast)]"
-												: "bg-[var(--surface-2)] text-[var(--text-muted)] hover:border-[var(--accent)] hover:text-[var(--text)]"
-										}`}
-									>
-										<Star
-											className={`h-3.5 w-3.5 ${browseFilters.favorites ? "fill-current" : ""}`}
+									{visibleQuickFilters.map((def) => (
+										<FilterPill
+											key={def.key}
+											icon={def.renderIcon("h-3.5 w-3.5")}
+											label={def.label}
+											active={Boolean(browseFilters[def.key])}
+											onClick={() =>
+												setBrowseFilters((prev: typeof browseFilters) => ({
+													...prev,
+													[def.key]: !prev[def.key],
+												}))
+											}
+											color={def.color === "right-now" ? "right-now" : exploreLocation ? "explore" : "accent"}
 										/>
-										<span className="hidden lg:inline">
-											{t("browse_filters.options.favorites")}
-										</span>
-									</button>
-
-									<button
-										type="button"
-										onClick={() =>
-											setBrowseFilters((prev: typeof browseFilters) => ({
-												...prev,
-												rightNow: !prev.rightNow,
-											}))
-										}
-										className={`inline-flex items-center gap-2 rounded-full border border-[var(--border)] px-3 py-1 text-xs font-medium transition ${
-											browseFilters.rightNow
-												? "bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-contrast)]"
-												: "bg-[var(--surface-2)] text-[var(--text-muted)] hover:border-[var(--accent)] hover:text-[var(--text)]"
-										}`}
-									>
-										<Droplet
-											className={`h-3.5 w-3.5 ${browseFilters.rightNow ? "fill-current" : ""}`}
-										/>
-										<span className="hidden lg:inline">
-											{t("browse_filters.options.right_now")}
-										</span>
-									</button>
-
-									<button
-										type="button"
-										onClick={() =>
-											setBrowseFilters((prev: typeof browseFilters) => ({
-												...prev,
-												isVisiting: !prev.isVisiting,
-											}))
-										}
-										className={`inline-flex items-center gap-2 rounded-full border border-[var(--border)] px-3 py-1 text-xs font-medium transition ${
-											browseFilters.isVisiting
-												? "bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-contrast)]"
-												: "bg-[var(--surface-2)] text-[var(--text-muted)] hover:border-[var(--accent)] hover:text-[var(--text)]"
-										}`}
-									>
-										<Plane
-											className={`h-3.5 w-3.5 ${browseFilters.isVisiting ? "fill-current" : ""}`}
-										/>
-										<span className="hidden lg:inline">
-											{t("profile_details.visiting")}
-										</span>
-									</button>
+									))}
 
 									{hasActiveBrowseFilters ? (
 										<button
 											type="button"
 											onClick={clearBrowseFilters}
-											className="inline-flex items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-3 py-1 text-xs font-medium text-[var(--text-muted)] transition hover:border-[var(--accent)] hover:text-[var(--text)]"
+											className={cn(
+												"glass-pill inline-flex shrink-0 items-center gap-1.5 px-4 py-2 text-sm font-bold transition-all active:scale-95",
+												exploreLocation ? "text-[var(--explore)]" : "text-[var(--accent)]",
+											)}
+											style={{ "--pill-color": exploreLocation ? "var(--explore)" : "var(--accent)" } as React.CSSProperties}
 										>
 											{t("browse_filters.clear_all")}
 										</button>
 									) : null}
+
+									{isDesktop && (
+										<FilterPill
+											variant="icon"
+											icon={
+												<RefreshCw
+													className={cn("h-3.5 w-3.5", isManualRefreshing && "animate-spin")}
+												/>
+											}
+											label={t("grid.refresh", { defaultValue: "Refresh grid" })}
+											active={false}
+											onClick={() => void handleManualRefresh()}
+											color={exploreLocation ? "explore" : "accent"}
+										/>
+									)}
 								</div>
 							</div>
-							<div className="flex flex-col items-end gap-2">
-								<button
-									type="button"
-									onClick={() => navigate("/settings")}
-									className="rounded-full transition-all hover:scale-[1.03]"
-									aria-label={t("browse_page.open_settings")}
-									title={t("browse_page.settings")}
-								>
-									<Avatar
-										src={profilePhotoUrl}
-										alt={t("browse_page.your_profile_photo")}
-										className="h-11 w-11"
-									/>
-								</button>
-							</div>
+
+							{!exploreLocation && browseFilters.favorites && (
+								<div className="pt-2 rail:col-span-2">
+									<div
+										className="glass-pill relative flex h-10 items-center"
+										style={{ "--pill-color": "var(--accent)" } as React.CSSProperties}
+									>
+										{isFetchingNotes ? (
+											<div className="pointer-events-none absolute start-3 top-1/2 flex h-4 w-4 -translate-y-1/2 items-center justify-center">
+												<div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-[var(--border)] border-t-[var(--accent)]" />
+											</div>
+										) : (
+											<Search className="pointer-events-none absolute start-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-muted)]" />
+										)}
+										<input
+											type="text"
+											value={searchTerm}
+											onChange={(e) => setSearchTerm(e.target.value)}
+											placeholder={isFetchingNotes ? t("favorites.loading_notes") : t("favorites.search_placeholder")}
+											className="h-full w-full bg-transparent ps-9 pe-8 text-sm text-[var(--text)] outline-none placeholder:text-[var(--text-muted)]"
+											onKeyDown={(e) => {
+												if (e.key === "Escape" || e.key === "Enter") {
+													e.currentTarget.blur();
+												}
+											}}
+										/>
+										{searchTerm && (
+											<button
+												type="button"
+												onClick={() => setSearchTerm("")}
+												className="absolute end-3 top-1/2 -translate-y-1/2 rounded-full p-0.5 text-[var(--text-muted)] hover:text-[var(--text)]"
+											>
+												<X className="h-3.5 w-3.5" />
+											</button>
+										)}
+									</div>
+								</div>
+							)}
 						</div>
-						<p className="app-subtitle">{t("browse_page.subtitle")}</p>
+					</div>
 					</div>
 				</header>
 
-				<div
-					className={cn(
-						"transition-opacity duration-0",
-						hasSavedScroll && !hasRestoredScroll && cards.length > 0 && !isLoadingCards
-							? "opacity-0"
-							: "opacity-100",
-					)}
-				>
-					<BrowseGrid
-						isLoadingCards={isLoadingCards}
-						cardsError={cardsError}
-						cards={sortedCards}
-						chatContactIndexByProfileId={
-							(SHOW_DEMO_DATA && showDebugInfo)
-								? { ...DEMO_CHAT_STATUS, ...chatContactIndexByProfileId }
-								: chatContactIndexByProfileId
-						}
-						onSelectProfile={handleSelectProfile}
-						onMessageProfile={handleMessageProfile}
-						hasMore={nextPage !== null}
-						isLoadingMore={isLoadingMoreCards}
-						onLoadMore={() => {
-							void handleLoadMoreCards();
-						}}
-					/>
-				</div>
+				{showGridMap ? (
+					<div
+						// Full bleed like Right Now's map: up behind the header and, on
+						// desktop, on under the nav rail.
+						// Placed absolutely (not after the header in the flow) so a
+						// growing header (favorites/name search) can't push it down
+						// for a frame before headerBottom catches up. The content layer
+						// (transformed, so the containing block) starts at --header-top.
+						className="absolute inset-x-0 bottom-0 top-[calc(-1*var(--header-top))] rail:-start-[var(--nav-rail-width)]"
+					>
+						<GridMap
+							cards={mapCards}
+							selectedProfileId={activeProfileId}
+							onSelectProfile={(profileId) => {
+								if (profileId) openProfileFromMap(profileId);
+							}}
+							explorePin={exploreLocation ? explorePin : null}
+							onPlacePin={exploreLocation ? handlePlaceExplorePin : undefined}
+							topInset={headerBottom}
+							leftInset={railWidth}
+							selfCard={selfCard}
+							spots={cruisingMap.spots}
+							selectedSpotId={cruisingMap.selectedSpotId}
+							checkedInSpotId={cruisingMap.checkIn?.spotId ?? null}
+							onSelectSpot={cruisingMap.setSelectedSpotId}
+							onCenterChange={cruisingMap.handleCenterChange}
+							selfMapPosition={selfMapPosition}
+							selfFuzzRadiusMeters={selfFuzzRadiusMeters}
+						/>
+						{/* Keeps the rail's tabs readable over the map. */}
+						<div
+							aria-hidden="true"
+							className="pointer-events-none absolute inset-y-0 start-0 z-10 hidden w-[calc(var(--nav-rail-width)+4rem)] rail:block"
+							style={{ background: "linear-gradient(to right, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0.75) 55%, transparent 100%)" }}
+						/>
+						{mapCards.length === 0 && cruisingMap.spots.length === 0 ? (
+							<div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-8">
+								<p className="rounded-2xl border border-[var(--border)] bg-[var(--surface)]/90 px-4 py-3 text-center text-sm text-[var(--text-muted)] shadow-lg backdrop-blur">
+									{t("browse_page.map_empty", { defaultValue: "Nobody nearby shares their location on the map." })}
+								</p>
+							</div>
+						) : null}
+					</div>
+				) : (
+				<FeedScrollContainer ref={feedContainerRef}>
+					<div
+						className={cn(
+							"transition-opacity duration-0 pb-[calc(var(--safe-area-bottom)+120px)] rail:pb-[var(--page-bottom)]",
+							hasSavedScroll && !hasRestoredScroll && cards.length > 0 && !isLoadingCards
+								? "opacity-0"
+								: "opacity-100",
+						)}
+					>
+						<BrowseGrid
+							isLoadingCards={isLoadingCards}
+							cardsError={cardsError}
+							isLocationMissing={isLocationMissing}
+							isIncognitoActive={isIncognitoActive}
+							onOpenLocation={() => setIsLocationOpen(true)}
+							onManagePrivacy={() => navigate("/settings/privacy")}
+							onRetry={() => void loadBrowseCards({ preferCache: false, showLoadingState: true })}
+							cards={sortedCards}
+							chatContactIndexByProfileId={
+								(SHOW_DEMO_DATA && showDebugInfo)
+									? { ...DEMO_CHAT_STATUS, ...chatContactIndexByProfileId }
+									: chatContactIndexByProfileId
+							}
+							localNicknamesByProfileId={localNicknamesByProfileId}
+							seenDisplayNamesByProfileId={seenDisplayNamesByProfileId}
+							tapStatusByProfileId={showGridTapStatus ? tapStatusByProfileId : undefined}
+							onSelectProfile={handleSelectProfile}
+							onDoubleTapProfile={handleDoubleTapProfile}
+							// Double tap set to "open chat": there's no chat with yourself, so
+							// your own tile opens instead.
+							onMessageProfile={(profileId) =>
+								selfCard && profileId === selfCard.profileId ? handleSelectProfile(profileId) : handleMessageProfile(profileId)
+							}
+							onOpenContextMenu={handleOpenTileContextMenu}
+							hidePopular={sortBy === "distance"}
+							hasMore={nextPage !== null && !(effectiveNicknameFilter && loadedPageCount >= NICKNAME_FILTER_MAX_PAGES)}
+							isLoadingMore={isLoadingMoreCards}
+							onLoadMore={() => {
+								void handleLoadMoreCards();
+							}}
+							scrollContainerRef={feedContainerRef}
+							headerRef={headerRef}
+							browseCacheKey={browseCacheKey}
+							hasRestoredScroll={hasRestoredScroll}
+							onRestoredScrollChange={setHasRestoredScroll}
+						/>
+					</div>
+				</FeedScrollContainer>
+				)}
 			</PullToRefreshContainer>
+
+			{/* First run: introduce the tile gestures once a location is set and
+				there are real profiles on screen to try them on. */}
+			{!hasSeenGesturesIntro && geohash && !isLocationMissing && !isLoadingCards && cards.length > 0 && (
+				<GridGesturesIntro
+					isDesktop={isDesktop}
+					onConfirm={() => {
+						markGridGesturesIntroSeen();
+						setHasSeenGesturesIntro(true);
+					}}
+				/>
+			)}
+
+			<CruisingMapOverlay state={cruisingMap} onOpenProfile={openProfileFromMap} onBeforeSuggest={() => setActiveProfileId(null)} />
+
+			{renderedTileMenu && (
+				<GridTileContextMenu
+					visible={tileMenuPresence.visible}
+					x={renderedTileMenu.x}
+					y={renderedTileMenu.y}
+					isDesktop={isDesktop}
+					title={
+						localNicknamesByProfileId[renderedTileMenu.card.profileId]?.trim() ||
+						getDisplayName(renderedTileMenu.card) ||
+						t("common.unknown_display_name")
+					}
+					isFavorite={renderedTileMenu.card.favorite === true}
+					hasNickname={Boolean(localNicknamesByProfileId[renderedTileMenu.card.profileId])}
+					nicknameRename={renderedTileMenu.rename}
+					onClose={handleCloseTileContextMenu}
+					onMessage={() => handleMessageProfile(renderedTileMenu.card.profileId)}
+					onToggleFavorite={() =>
+						void handleToggleFavoriteProfile(
+							renderedTileMenu.card.profileId,
+							renderedTileMenu.card.favorite === true,
+						)
+					}
+					onEditNickname={() => setNicknamePromptCard(renderedTileMenu.card)}
+					onHide={() => handleHideProfile(renderedTileMenu.card.profileId)}
+					onBlock={canBlockProfile(renderedTileMenu.card.isBlockable) ? () => void handleBlockProfile(renderedTileMenu.card.profileId) : undefined}
+					onShare={canShareProfiles ? () => requestProfileShare({
+						profileId: Number(renderedTileMenu.card.profileId),
+						name: getDisplayName(renderedTileMenu.card) || null,
+						mediaHash: renderedTileMenu.card.primaryImageUrl ? extractMediaHashFromUrl(renderedTileMenu.card.primaryImageUrl) : null,
+					}) : undefined}
+					onLocate={showLocate && renderedTileMenu.card.distanceMeters != null ? () => handleTriangleProfile(String(renderedTileMenu.card.profileId)) : undefined}
+					locateLabel={locateLabelFor(renderedTileMenu.card.profileId)}
+					// Your own tile: editing is the only thing to do with it.
+					onEditProfile={selfCard && renderedTileMenu.card.profileId === selfCard.profileId ? openOwnProfileEditor : undefined}
+				/>
+			)}
 
 			<ProfileDetailsModal
 				isOpen={Boolean(activeProfileId)}
 				onClose={() => setActiveProfileId(null)}
+				onPrevProfile={prevCardProfileId ? () => setActiveProfileId(prevCardProfileId) : undefined}
+				onNextProfile={nextCardProfileId ? () => setActiveProfileId(nextCardProfileId) : undefined}
 				onMessageProfile={handleMessageProfile}
+				onSendQuickMessage={handleSendQuickMessage}
+				onSendProfilePhotoReply={handleSendProfilePhotoReply}
+				onTagClick={handleTagClick}
 				onTriangleProfile={handleTriangleProfile}
 				onBlockProfile={handleBlockProfile}
 				onUnblockProfile={handleUnblockProfile}
+				onHideProfile={handleHideProfile}
+				onUnhideProfile={handleUnhideProfile}
+				isHidden={activeProfileId ? hiddenProfileIds.has(activeProfileId) : false}
 				onToggleFavoriteProfile={handleToggleFavoriteProfile}
 				isFavorite={Boolean(activeProfile?.isFavorite)}
 				isTogglingFavorite={Boolean(
 					activeProfileId && mutatingFavoriteProfileId === activeProfileId,
 				)}
 				isBlocked={activeProfileId ? blockedProfileIds.has(activeProfileId) : false}
-				isBlockingProfile={Boolean(
-					activeProfileId && mutatingBlockProfileId === activeProfileId,
-				)}
+				isBlockedByOther={isActiveProfileBlockedByOther}
+				isBlockingProfile={isBlockingProfile || isUnblockingProfile}
+				locateLabel={locateLabelFor(activeProfileId)}
 				onTapProfile={handleTapProfile}
 				isTappingProfile={Boolean(tappingProfileId && tappingProfileId === activeProfileId)}
 				isTapBlocked={hasSentTapRecently}
@@ -1455,38 +2342,131 @@ export function GridPage() {
 				activeProfileError={activeProfileError}
 				activeProfilePhotoHashes={activeProfilePhotoHashes}
 				chatContactStatus={selectedProfileChatContact}
+				localNickname={selectedProfileLocalNickname}
+				onLocalNicknameChange={handleLocalNicknameChange}
 				genderOptions={genderOptions}
 				pronounOptions={pronounOptions}
 			/>
 
+			{(() => {
+				const nicknameCardProfileId = nicknamePromptCard?.profileId;
+				const existingNickname = nicknameCardProfileId ? localNicknamesByProfileId[nicknameCardProfileId] : undefined;
+				const actualName = nicknamePromptCard ? getDisplayName(nicknamePromptCard) : "";
+				return (
+					<PromptDialog
+						isOpen={nicknamePromptCard !== null}
+						title={existingNickname ? t("chat.nicknames.edit") : t("chat.nicknames.set")}
+						message={t("chat.nicknames.prompt")}
+						defaultValue={existingNickname || actualName}
+						placeholder={actualName || undefined}
+						confirmLabel={t("common.save", { defaultValue: "Save" })}
+						cancelLabel={t("chat.actions.cancel")}
+						onConfirm={handleSaveTileNickname}
+						onCancel={() => setNicknamePromptCard(null)}
+						isProcessing={isSavingNickname}
+						allowEmpty
+						rows={1}
+					/>
+				);
+			})()}
+
 			<ConfirmDialog
 				isOpen={pendingProfileConfirm !== null}
-				title={
-					pendingProfileConfirm?.action === "unblock"
-						? t("profile_details.unblock")
-						: t("profile_details.block")
-				}
-				message={
-					pendingProfileConfirm?.action === "unblock"
-						? t("profile_details.unblock_confirm")
-						: t("profile_details.block_confirm")
-				}
-				confirmLabel={
-					pendingProfileConfirm?.action === "unblock"
-						? t("profile_details.unblock")
-						: t("profile_details.block")
-				}
+				title={t("profile_details.block")}
+				message={t("profile_details.block_confirm")}
+				confirmLabel={t("profile_details.block")}
 				cancelLabel={t("chat.actions.cancel")}
 				onConfirm={handleConfirmProfileAction}
 				onCancel={handleCancelProfileConfirm}
-				isProcessing={Boolean(mutatingBlockProfileId)}
-				confirmTone={
-					pendingProfileConfirm?.action === "unblock" ? "default" : "danger"
-				}
+				isProcessing={isBlockingProfile || isUnblockingProfile}
+				confirmTone="danger"
 				dontAskAgainLabel={t("profile_details.dont_ask_again")}
 				dontAskAgainChecked={dontAskAgainChecked}
 				onDontAskAgainChange={setDontAskAgainChecked}
 			/>
-		</>
+
+			{isLocationOpen && (
+				<LocationOverlay
+					onClose={() => setIsLocationOpen(false)}
+					exploreLocation={exploreLocation}
+					onSetExploreLocation={setExploreLocation}
+					isDesktop={isDesktop}
+				/>
+			)}
+
+			{isSortSheetOpen && (
+				<SelectSheet
+					title={t("browse_page.sort")}
+					value={sortBy}
+					options={sortOptions}
+					onSelect={setSortBy}
+					onClose={() => setIsSortSheetOpen(false)}
+					isDesktop={isDesktop}
+					accentColor={exploreLocation ? "var(--explore)" : undefined}
+					accentContrast={exploreLocation ? "#fff" : undefined}
+				/>
+			)}
+
+			{isDistanceSheetOpen && (
+				<SelectSheet
+					title={isMapFlagOn
+						? t("browse_page.location_preferences", { defaultValue: "Location Preferences" })
+						: t("browse_page.share_distance.title", { defaultValue: "Share Distance" })}
+					optionsLabel={isMapFlagOn ? t("browse_page.share_distance.title", { defaultValue: "Share Distance" }) : undefined}
+					description={isMapFlagOn ? undefined : t("browse_page.share_distance.description", { defaultValue: "Choose how your distance appears to others." })}
+					value={distanceMode}
+					options={distanceOptions}
+					onSelect={selectDistanceMode}
+					onClose={() => setIsDistanceSheetOpen(false)}
+					isDesktop={isDesktop}
+					disabled={!myProfile}
+					footer={isMapFlagOn ? (
+						// Second section, headed and aligned like the distance options above.
+						<div className="-mx-1 pb-2 pt-2">
+							<p className={SELECT_SHEET_SECTION_LABEL_CLASS}>
+								{t("privacy.map", { defaultValue: "Map" })}
+							</p>
+							<MapVisibilityControls variant="sheet" />
+							{/* Free Grind, flag cruising-spots: automatic check-in at spots. */}
+							<CruisingAutoCheckInSection />
+						</div>
+					) : undefined}
+					accentColor={exploreLocation ? "var(--explore)" : undefined}
+					accentContrast={exploreLocation ? "#fff" : undefined}
+				/>
+			)}
+
+			{isFiltersOpen && (
+				<BrowseFiltersOverlay
+					initialDraft={{
+						sortBy,
+						browseFilters,
+						ageMin,
+						ageMax,
+						heightCmMin,
+						heightCmMax,
+						weightGramsMin,
+						weightGramsMax,
+						genders,
+						tribes,
+						tribesImInto,
+						lookingFor,
+						relationshipStatuses,
+						bodyTypes,
+						sexualPositions,
+						meetAt,
+						nsfwPics,
+						tags,
+						nicknameFilter,
+					} satisfies BrowseFiltersDraft}
+					onClose={() => setIsFiltersOpen(false)}
+					// The sheet closes itself (animated, popping its history entry) after applying.
+					onApply={applyDraft}
+					isExploreActive={Boolean(exploreLocation)}
+					isDesktop={isDesktop}
+				/>
+			)}
+
+		</div>
 	);
 }

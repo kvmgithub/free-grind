@@ -1,10 +1,20 @@
 import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
+import { listen } from "@tauri-apps/api/event";
+import { appLog } from "../utils/logger";
 
 type NativePushNotificationDetail = {
 	event?: string;
 	action?: string | null;
 	conversationId?: string | null;
+	senderId?: string | null;
+	// Set by a notification action button ("profile" = Open profile);
+	// absent for a plain tap on the notification.
+	openTarget?: string | null;
+	// Non-chat pushes (favorite online, views, …) — see the native
+	// FreeGrindFirebaseMessagingService.buildSystemPushPayload.
+	isSystem?: boolean;
+	growthType?: string | null;
 };
 
 declare global {
@@ -22,7 +32,9 @@ function detailKey(detail: NativePushNotificationDetail): string {
 	const action = typeof detail.action === "string" ? detail.action : "";
 	const conversationId =
 		typeof detail.conversationId === "string" ? detail.conversationId : "";
-	return `${event}|${action}|${conversationId}`;
+	const senderId = typeof detail.senderId === "string" ? detail.senderId : "";
+	const openTarget = typeof detail.openTarget === "string" ? detail.openTarget : "";
+	return `${event}|${action}|${conversationId}|${senderId}|${openTarget}`;
 }
 
 function removeQueuedPushNotification(detail: NativePushNotificationDetail) {
@@ -74,13 +86,90 @@ function getConversationId(detail: NativePushNotificationDetail): string | null 
 	return null;
 }
 
+// Grindr's own deeplinks on non-chat pushes (26.21 GeneralDeepLinks), mapped
+// onto our routes. growth-notification's `type` is one of the app's
+// favorite_online/tapped_online/recommended_online/media_recipient_online
+// (profile-targeted), multiple_favorites_online, unread_chats, viewed_profile.
+const PROFILE_GROWTH_TYPES = new Set([
+	"favorite_online",
+	"tapped_online",
+	"recommended_online",
+	"media_recipient_online",
+]);
+
+function parseSystemAction(
+	detail: NativePushNotificationDetail,
+): { url: URL; host: string } | null {
+	if (typeof detail.action !== "string" || !detail.action.startsWith("grindr://")) {
+		return null;
+	}
+	let url: URL;
+	try {
+		url = new URL(detail.action);
+	} catch {
+		return null;
+	}
+	return { url, host: url.hostname || url.pathname.replace(/^\/+/, "").split("/")[0] };
+}
+
+// fresh-albums (a favorite updated their album) opens the profile with the
+// album on top of it — see ProfileDetailsModal's `openAlbumId` handling.
+function getSystemAlbumId(detail: NativePushNotificationDetail): string | null {
+	if (!detail.isSystem) return null;
+	const parsed = parseSystemAction(detail);
+	if (!parsed || parsed.host !== "fresh-albums") return null;
+	return parsed.url.searchParams.get("albumIds")?.split(",")[0]?.trim() || null;
+}
+
+function getSystemRoute(detail: NativePushNotificationDetail): string | null {
+	const parsed = parseSystemAction(detail);
+	if (!parsed) return null;
+	const { url, host } = parsed;
+	const type = detail.growthType ?? url.searchParams.get("type");
+	const profileId =
+		(typeof detail.senderId === "string" && detail.senderId.trim()) ||
+		url.searchParams.get("profileId") ||
+		url.searchParams.get("profileID") ||
+		url.searchParams.get("albumProfileId");
+
+	if (
+		host === "favorite-profile" ||
+		host === "fresh-albums" ||
+		(type && PROFILE_GROWTH_TYPES.has(type))
+	) {
+		if (profileId) return `/profile/${encodeURIComponent(profileId)}`;
+	}
+	if (host === "inbox" || type === "unread_chats") return "/chat";
+	if (host === "viewed-me" || type === "viewed_profile") return "/interest?tab=views";
+	if (host === "taps-inbox" || host === "interest-taps") return "/interest?tab=taps";
+	if (host === "favorites" || type === "multiple_favorites_online") return "/";
+	return null;
+}
+
 function getNotificationRoute(detail: NativePushNotificationDetail): string | null {
+	if (detail.isSystem) {
+		return getSystemRoute(detail);
+	}
+
+	if (
+		detail.openTarget === "profile" &&
+		typeof detail.senderId === "string" &&
+		detail.senderId.trim()
+	) {
+		return `/profile/${encodeURIComponent(detail.senderId.trim())}`;
+	}
+
 	const conversationId = getConversationId(detail);
 	if (conversationId) {
 		return `/chat/${encodeURIComponent(conversationId)}`;
 	}
 
 	if (detail.action === "taps") {
+		// A tap notification is about a specific person — open their profile
+		// directly when we know who it was, instead of the generic taps list.
+		if (typeof detail.senderId === "string" && detail.senderId.trim()) {
+			return `/profile/${encodeURIComponent(detail.senderId.trim())}`;
+		}
 		return "/interest";
 	}
 
@@ -113,19 +202,33 @@ export function PushNotificationBridge() {
 
 		const handleDetail = (detail: NativePushNotificationDetail) => {
 			if (!markHandled(detail)) {
-				console.info("[PUSH_EVENT] Skipping duplicate push payload", detail);
+				appLog.info("[PUSH_EVENT] Skipping duplicate push payload", detail);
 				return;
 			}
 
-			console.info("[PUSH_EVENT] Received native push payload", detail);
+			appLog.info("[PUSH_EVENT] Received native push payload", detail);
 
 			if (detail.event === "opened") {
 				const route = getNotificationRoute(detail);
 				if (route) {
 					try {
-						navigate(route);
+						// A notification for the conversation already reflected
+						// in the URL (e.g. a repeat click, or the user manually
+						// switched to a different conversation in-page without
+						// the URL changing — desktop selection never touches
+						// it) navigates to a path react-router treats as
+						// unchanged, so `useParams()` doesn't update and
+						// nothing reacts. The state nonce forces a fresh
+						// location on every click regardless of path equality.
+						const openAlbumId = getSystemAlbumId(detail);
+						navigate(route, {
+							state: {
+								notificationClickedAt: Date.now(),
+								...(openAlbumId ? { openAlbumId } : {}),
+							},
+						});
 					} catch (error) {
-						console.error(
+						appLog.error(
 							"[PUSH_EVENT] Failed to navigate to notification route",
 							error,
 						);
@@ -138,7 +241,7 @@ export function PushNotificationBridge() {
 		const onPushNotification = (event: Event) => {
 			const detail = (event as CustomEvent).detail;
 			if (!isPushNotificationDetail(detail)) {
-				console.warn("[PUSH_EVENT] Ignoring malformed native push payload", detail);
+				appLog.warn("[PUSH_EVENT] Ignoring malformed native push payload", detail);
 				return;
 			}
 
@@ -152,11 +255,28 @@ export function PushNotificationBridge() {
 		);
 		consumePendingPushNotifications(handleDetail);
 
+		// Desktop (Windows for now): the Rust notification plugin emits this
+		// when the user clicks a native toast, carrying the same `group`
+		// (conversationId, or "taps") it was posted with — see
+		// notification-patched/src/desktop.rs's `show_windows`.
+		let unlistenClicked: (() => void) | undefined;
+		void listen<string>("fg:notification-clicked", (event) => {
+			const group = event.payload;
+			const detail: NativePushNotificationDetail =
+				group === "taps"
+					? { event: "opened", action: "taps", conversationId: null, senderId: null }
+					: { event: "opened", action: `chat:${group}`, conversationId: group, senderId: null };
+			handleDetail(detail);
+		}).then((unlisten) => {
+			unlistenClicked = unlisten;
+		});
+
 		return () => {
 			window.removeEventListener(
 				"fg:push-notification",
 				onPushNotification as EventListener,
 			);
+			unlistenClicked?.();
 		};
 	}, [navigate]);
 

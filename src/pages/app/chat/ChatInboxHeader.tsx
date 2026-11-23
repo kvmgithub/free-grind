@@ -1,0 +1,304 @@
+import { Loader2, Search, X } from "lucide-react";
+import { SlidersHorizontal as PhosphorSlidersHorizontal } from "@phosphor-icons/react";
+import { ImagesFilled, PillFilled, UsersPlusFilled, VideosFilled } from "../../../components/icons/FilledIcons";
+import { type CSSProperties, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { useNavigate } from "react-router-dom";
+import { PageHeaderBackground } from "../../../components/ui/PageHeaderBackground";
+import { FilterPill } from "../../../components/ui/FilterPill";
+import { sanitizeQuickFilters, useInboxQuickFilterDefs } from "../../../components/quick-filters/quickFilterDefs";
+import { INBOX_QUICK_FILTER_KEYS, type InboxQuickFilterKey } from "../../../config/quick-filters";
+import { usePreferences } from "../../../contexts/PreferencesContext";
+import { buildChatFiltersDraft, type ChatFiltersDraft } from "./chatUtils";
+import { cn } from "../../../utils/cn";
+import type { InboxFilters } from "../../../types/messages";
+import type { InboxVisibilityFilter } from "../../../types/chat-page";
+import { useInboxSyncStatus } from "../../../hooks/useInboxSyncStatus";
+import { isSexualHealthEnabled, isVideoGalleryEnabled } from "../../../utils/optionalFeatures";
+
+type RealtimeStatusMeta = { className: string; symbol: string; label: string };
+
+export type ChatInboxHeaderProps = {
+	isDesktop: boolean;
+	userId: number | null;
+	realtimeStatusMeta: RealtimeStatusMeta;
+	inboxFilters: InboxFilters;
+	// Pinned/Archived/Hidden are edited in the general filter overlay now
+	// (ChatFiltersPanel), not as separate header pills — these read-only
+	// values are only needed here to seed that overlay's draft when it opens.
+	pinnedFilter: InboxVisibilityFilter;
+	archivedFilter: InboxVisibilityFilter;
+	hiddenFilter: InboxVisibilityFilter;
+	needsReplyOnly: boolean;
+	hasActiveInboxFilters: boolean;
+	activeFilterCount: number;
+	isSearchOpen: boolean;
+	searchQuery: string;
+	onSetIsSearchOpen: (v: boolean) => void;
+	onSetSearchQuery: (v: string) => void;
+	onSetIsFiltersOpen: (v: boolean) => void;
+	onSetFiltersDraft: (v: ChatFiltersDraft) => void;
+	onToggleQuickFilter: (key: InboxQuickFilterKey) => void;
+	onClearInboxFilters: () => void;
+	/** Group chats (flag group-chats): set only while they're available. */
+	onCreateGroup?: () => void;
+	/** Open group invites, shown as a badge on the group button. */
+	groupInviteCount?: number;
+};
+
+/** Small "Inbox · Syncing 42%" caption under the title — the mobile-only,
+ * minimal home for background sync status. Desktop instead gets a proper
+ * footer row under the list (ChatSyncFooterRow in ChatInboxPanel); mobile's
+ * fixed bottom nav bar leaves no clean spot for a footer, so this reuses
+ * space the header already owns instead of adding a new floating element. */
+function ChatSyncHeaderCaption({ userId }: { userId: number | null }) {
+	const { t } = useTranslation();
+	const status = useInboxSyncStatus(userId);
+
+	if (status.phase !== "syncing_list" && status.phase !== "syncing_messages") {
+		return null;
+	}
+
+	const label =
+		status.phase === "syncing_list"
+			? t("chat.sync_progress.syncing_list", {
+					defaultValue: "Syncing chats… {{count}} checked",
+					count: status.conversationsSoFar,
+				})
+			: t("chat.sync_progress.syncing_messages_percent", {
+					defaultValue: "Syncing messages… {{percent}}%",
+					percent: status.total > 0 ? Math.round((status.completed / status.total) * 100) : 0,
+				});
+
+	return (
+		<p className="mt-0.5 flex items-center gap-1 text-[11px] font-medium text-[var(--text-muted)]">
+			<Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin text-[var(--accent)]" />
+			<span className="truncate">{label}</span>
+		</p>
+	);
+}
+
+export function ChatInboxHeader({
+	isDesktop,
+	userId,
+	realtimeStatusMeta,
+	inboxFilters,
+	pinnedFilter,
+	archivedFilter,
+	hiddenFilter,
+	needsReplyOnly,
+	hasActiveInboxFilters,
+	activeFilterCount,
+	isSearchOpen,
+	searchQuery,
+	onSetIsSearchOpen,
+	onSetSearchQuery,
+	onSetIsFiltersOpen,
+	onSetFiltersDraft,
+	onToggleQuickFilter,
+	onClearInboxFilters,
+	onCreateGroup,
+	groupInviteCount = 0,
+}: ChatInboxHeaderProps) {
+	const { t } = useTranslation();
+	const { inboxQuickFilters } = usePreferences();
+	const quickFilterDefs = useInboxQuickFilterDefs();
+	const isQuickFilterActive = (key: InboxQuickFilterKey) =>
+		key === "needsReplyOnly" ? needsReplyOnly : Boolean(inboxFilters[key]);
+	const navigate = useNavigate();
+	const [showVideoGallery] = useState(isVideoGalleryEnabled);
+	const [showSexualHealth] = useState(isSexualHealthEnabled);
+
+	return (
+		<header className="relative z-20 shrink-0 pointer-events-none">
+				<PageHeaderBackground color="var(--accent)" />
+
+				<div className={`pointer-events-auto flex flex-col gap-3 mx-auto w-full px-[var(--app-px)]`}>
+
+					{/* Row 1: title + icon buttons */}
+					<div className="flex items-center justify-between gap-2">
+						<div className="min-w-0">
+							<h1 className="app-title relative w-fit">
+								{t("nav.inbox")}
+								<span
+									className="absolute -top-0.5 -end-2.5 h-2 w-2 rounded-full transition-colors duration-500"
+									style={{
+										backgroundColor:
+											realtimeStatusMeta.symbol === "✓"
+												? "oklch(0.72 0.18 142)"
+												: realtimeStatusMeta.className.includes("red")
+													? "oklch(0.65 0.22 25)"
+													: "oklch(0.75 0.17 75)",
+									}}
+								/>
+							</h1>
+							{!isDesktop && !isSearchOpen && <ChatSyncHeaderCaption userId={userId} />}
+						</div>
+
+						<div className="-my-2 flex shrink-0 items-center gap-0.5">
+							{!isSearchOpen && onCreateGroup && (
+								<button
+									type="button"
+									onClick={onCreateGroup}
+									className="header-icon-btn relative rounded-xl p-2 text-[var(--text-muted)] transition hover:text-[var(--text)]"
+									aria-label={t("group_chat.create_title", { defaultValue: "New group" })}
+								>
+									<UsersPlusFilled className="h-5 w-5" />
+									{groupInviteCount > 0 && (
+										<span className="absolute end-1 top-1 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[var(--accent)] px-1 text-[9px] font-bold text-[var(--accent-contrast)]">
+											{groupInviteCount}
+										</span>
+									)}
+								</button>
+							)}
+							{!isSearchOpen && showSexualHealth && (
+								<button
+									type="button"
+									onClick={() => navigate("/settings/sexual-health", { state: { from: "inbox" } })}
+									className="header-icon-btn rounded-xl p-2 text-[var(--text-muted)] transition hover:text-[var(--text)]"
+									aria-label={t("sexualHealth.title", { defaultValue: "Sexual Health" })}
+								>
+									<PillFilled className="h-5 w-5" />
+								</button>
+							)}
+							{!isSearchOpen && showVideoGallery && (
+								<button
+									type="button"
+									onClick={() => navigate("/chat/videos")}
+									className="header-icon-btn rounded-xl p-2 text-[var(--text-muted)] transition hover:text-[var(--text)]"
+									aria-label={t("video_gallery.open", { defaultValue: "Videos" })}
+								>
+									<VideosFilled className="h-5 w-5" />
+								</button>
+							)}
+							{!isSearchOpen && (
+								<button
+									type="button"
+									onClick={() => navigate("/chat/albums")}
+									className="header-icon-btn rounded-xl p-2 text-[var(--text-muted)] transition hover:text-[var(--text)]"
+									aria-label={t("chat.tabs.albums")}
+								>
+									<ImagesFilled className="h-5 w-5" />
+								</button>
+							)}
+							<button
+								type="button"
+								onClick={() => {
+									if (isSearchOpen) { onSetIsSearchOpen(false); onSetSearchQuery(""); }
+									else onSetIsSearchOpen(true);
+								}}
+								className="header-icon-btn rounded-xl p-2 text-[var(--text-muted)] transition hover:text-[var(--text)]"
+								aria-label={isSearchOpen ? t("common.close") : t("chat.open_search")}
+							>
+								{isSearchOpen ? <X className="h-5 w-5" /> : <Search className="h-5 w-5" />}
+							</button>
+						</div>
+					</div>
+
+					{/* Row 2: filter pills. The scroller clips the pills' shadow-2xl; pb-16/-mb-12
+					    (and pt-1/-mt-1 above) give it room without changing layout, so the pills
+					    sit exactly where Right Now's / Interest's do. pointer-events stay on the
+					    row so the extra strip doesn't swallow taps on the list below. */}
+					{!isSearchOpen && (
+						<div className="pointer-events-none -mx-[var(--app-px)] -mt-1 -mb-12 overflow-x-auto pb-16 pt-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+							<div className="pointer-events-auto flex min-w-max items-center gap-2 px-[var(--app-px)]">
+								<button
+									type="button"
+									onClick={() => {
+										onSetFiltersDraft(buildChatFiltersDraft(inboxFilters, { pinnedFilter, archivedFilter, hiddenFilter }, needsReplyOnly));
+										onSetIsFiltersOpen(true);
+									}}
+									title={t("right_now.filters")}
+									aria-label={t("right_now.filters")}
+									className={cn(
+										"inline-flex shrink-0 items-center justify-center gap-1.5 py-2 text-sm font-bold transition-all active:scale-95",
+										// Icon-only keeps the text line height so it matches the label pills.
+										hasActiveInboxFilters && activeFilterCount > 0 ? "px-3" : "px-[11px]",
+										hasActiveInboxFilters
+											? "rounded-full border border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-contrast)] shadow-lg shadow-[var(--accent)]/40"
+											: "glass-pill text-[var(--accent)] hover:border-[var(--accent)]/60 hover:bg-[var(--accent)]/20",
+									)}
+									style={!hasActiveInboxFilters ? { "--pill-color": "var(--accent)" } as CSSProperties : undefined}
+								>
+									<span className="flex h-5 items-center">
+										<PhosphorSlidersHorizontal weight="fill" className="h-3.5 w-3.5" />
+									</span>
+									{hasActiveInboxFilters && activeFilterCount > 0 && (
+										<span className="ms-0.5 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[var(--accent-contrast)] px-1 text-[9px] font-bold text-[var(--accent)]">
+											{activeFilterCount}
+										</span>
+									)}
+								</button>
+
+								{sanitizeQuickFilters(inboxQuickFilters, INBOX_QUICK_FILTER_KEYS).map((key) => {
+									const def = quickFilterDefs[key];
+									return (
+										<FilterPill
+											key={key}
+											icon={def.renderIcon("h-3.5 w-3.5")}
+											label={def.label}
+											active={isQuickFilterActive(key)}
+											onClick={() => onToggleQuickFilter(key)}
+											color={def.color}
+										/>
+									);
+								})}
+
+								{hasActiveInboxFilters && (
+									<button
+										type="button"
+										onClick={onClearInboxFilters}
+										className="glass-pill inline-flex shrink-0 items-center gap-1.5 px-4 py-2 text-sm font-bold text-[var(--accent)] transition-all active:scale-95"
+										style={{ "--pill-color": "var(--accent)" } as CSSProperties}
+									>
+										{t("browse_filters.clear_all")}
+									</button>
+								)}
+							</div>
+						</div>
+					)}
+
+					{/* Row 2: search input. Same box as the pill row it replaces (a 38px pill,
+					    16px net below), so opening search doesn't shift the list. */}
+					{isSearchOpen && (
+						<div className="flex flex-col gap-2 pb-4">
+							<div
+								className="glass-pill relative flex h-[38px] items-center"
+								style={{ "--pill-color": "var(--accent)" } as CSSProperties}
+							>
+								<Search className="pointer-events-none absolute start-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-muted)]" />
+								<input
+									autoFocus
+									value={searchQuery}
+									onChange={(e) => onSetSearchQuery(e.target.value)}
+									placeholder={t("chat_search.placeholder")}
+									className="h-full w-full bg-transparent ps-9 pe-8 text-sm text-[var(--text)] outline-none placeholder:text-[var(--text-muted)]"
+									onKeyDown={(e) => {
+										// Escape cancels the search, like the header's search toggle;
+										// kept from reaching window-level Escape handlers.
+										if (e.key === "Escape") {
+											e.preventDefault();
+											e.stopPropagation();
+											onSetIsSearchOpen(false);
+											onSetSearchQuery("");
+										}
+									}}
+								/>
+								{searchQuery && (
+									<button
+										type="button"
+										onClick={() => onSetSearchQuery("")}
+										className="absolute end-3 top-1/2 -translate-y-1/2 rounded-full p-0.5 text-[var(--text-muted)] hover:text-[var(--text)]"
+									>
+										<X className="h-3.5 w-3.5" />
+									</button>
+								)}
+							</div>
+						</div>
+					)}
+
+
+				</div>
+		</header>
+	);
+}

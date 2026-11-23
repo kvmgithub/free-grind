@@ -1,38 +1,213 @@
 import {
+	useCallback,
 	useReducer,
 	useEffect,
+	useRef,
+	useState,
 	ReactNode,
 } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { listen } from "@tauri-apps/api/event";
 import { useApi } from "../hooks/useApi";
 import { useApiFunctions } from "../hooks/useApiFunctions";
+import type { AppError, Restriction } from "../types/api";
+import { banInfoSchema, restrictionSchema } from "../types/api";
 import toast from "react-hot-toast";
 import {
 	AuthContext,
+	type AccountStatus,
 	type AuthContextType,
+	type AuthError,
 	type AuthState,
+	type SavedAccountMeta,
+	type LoginOptions,
+	type SignUpData,
+	SmsVerificationRequiredError,
 } from "./auth-context";
 import { appLog } from "../utils/logger";
+import { setActiveChatDbUser } from "../services/chatDb";
+import { setActiveChatContactIndexAccount } from "../services/chatContactIndex";
+import { beforeSignOut, setActiveUser as setWorkaroundsUser } from "../grindr-workarounds";
+import { clearAllCaches } from "../pages/app/gridpage/cache";
+import { loadAutomationCache } from "../utils/autoblock";
+import { loadAutomationRulesCache } from "../utils/automationRules";
+import { loadPrivacyCache } from "../utils/privacy";
+import { loadAutoTranslateCache } from "../utils/autoTranslate";
+import { loadSeenCache } from "../services/seenStore";
+import { runInboxSync } from "../services/inboxSync";
+import { runRestoredDrawerUpload } from "../services/restoredDrawerMedia";
+import { runRestoredOwnAlbums, startOwnAlbumsSync } from "../services/ownAlbums";
+import { syncOwnProfile } from "../services/ownProfilePhotos";
+import { runRestoredBlocklist, syncOwnBlocklist } from "../services/ownBlocklist";
+import { runRestoredFavorites } from "../services/restoredFavorites";
+import { runTapsAutomationSync } from "../services/tapsSync";
+import { syncSavedPhrasesFromServer } from "../services/savedPhrases";
+import { mintRecaptchaToken, recaptchaFailureMessage, RecaptchaError } from "../services/recaptcha";
+import i18n from "../i18n";
 
 const AUTH_USER_ID_STORAGE_KEY = "fg-user-id";
 const PUSH_TOKEN_STORAGE_KEY = "fg-fcm-token";
 const PUSH_TOKEN_SYNCED_STORAGE_KEY = "fg-fcm-token-synced";
 
+// A hard ban clears the session (grindr.rs drops it on the ban response), so
+// without this a restart lands on the sign-in page as if the user had signed
+// out. Kept until the ban screen is left via sign-out or another sign-in.
+const BAN_STATUS_STORAGE_KEY = "fg-ban-status";
+
+type BanStatus = Extract<AccountStatus, { kind: "banned" }>;
+
+function readStoredBan(): BanStatus | null {
+	try {
+		const raw = window.localStorage.getItem(BAN_STATUS_STORAGE_KEY);
+		if (!raw) return null;
+		const stored = JSON.parse(raw) as { info?: unknown; profileId?: unknown };
+		const info = banInfoSchema.safeParse(stored.info);
+		if (!info.success) return null;
+		const profileId = typeof stored.profileId === "number" && Number.isSafeInteger(stored.profileId) ? stored.profileId : null;
+		return { kind: "banned", info: info.data, profileId };
+	} catch {
+		return null;
+	}
+}
+
+function writeStoredBan(status: AccountStatus) {
+	try {
+		if (status?.kind === "banned") {
+			window.localStorage.setItem(BAN_STATUS_STORAGE_KEY, JSON.stringify({ info: status.info, profileId: status.profileId }));
+		} else {
+			window.localStorage.removeItem(BAN_STATUS_STORAGE_KEY);
+		}
+	} catch {
+		// Storage unavailable: the ban screen just won't survive a restart.
+	}
+}
+
+/** The FCM token Android handed over, cached or still waiting on window. */
+function cachedPushToken(): string | null {
+	const fallback = (window as Window & { __FG_FCM_TOKEN?: unknown }).__FG_FCM_TOKEN;
+	return window.localStorage.getItem(PUSH_TOKEN_STORAGE_KEY) || (typeof fallback === "string" ? fallback : null) || null;
+}
+
+// Grindr's API returns this generic validation error for several rejected-login
+// cases (wrong credentials, malformed/expired token) rather than a specific one,
+// so its raw "Error 4: invalid input parameters" text is meaningless to users.
+const INVALID_INPUT_PARAMETERS_CODE = 4;
+// Sign-in refused until the account verifies a phone number by SMS (Grindr
+// code 30): the profile id and whole body the error carries, null for
+// anything else.
+function verificationRequired(appError: AppError | null): { profileId: string; body: string } | null {
+	if (appError?.kind !== "VerificationRequired") return null;
+	const message = appError.message;
+	if (typeof message !== "object") return null;
+	const profileId = "profileId" in message && typeof message.profileId === "string" ? message.profileId : null;
+	if (!profileId) return null;
+	return { profileId, body: ("body" in message && message.body) || "" };
+}
+
+// Error markers from api/facebook_oauth and api/google_oauth (Rust), matched verbatim.
+const GOOGLE_CANCELED = "google-canceled";
+const FACEBOOK_CANCELED = "facebook-canceled";
+const FACEBOOK_DIALOG_ERROR = "facebook-dialog-error";
+const FACEBOOK_HANDOFF_REFUSED = "facebook-handoff-refused";
+// Error markers from sign_in_with_transfer_code (api/auth.rs), matched verbatim.
+const TRANSFER_CODE_MESSAGES: Record<string, string> = {
+	"transfer-code-invalid": `This isn't a ${__APP_NAME__} sign-in code.`,
+	"transfer-code-expired": "This sign-in code has expired. Show a new one on the other device.",
+	"transfer-code-revoked": "The other device's session is no longer valid. Sign in there again, then show a new code.",
+};
+
+function describeLoginError(
+	appError: AppError | null,
+	fallback: string,
+	invalidCredentialsMessage: string,
+): AuthError {
+	if (
+		appError?.kind === "Api" &&
+		typeof appError.message === "object" &&
+		appError.message.code === INVALID_INPUT_PARAMETERS_CODE
+	) {
+		return { message: invalidCredentialsMessage };
+	}
+	// Plumbing failures ("failed to open sign-in window: ..."): the raw text
+	// means nothing to the user, so it only goes under "Details".
+	if (appError?.kind === "Connect") {
+		return {
+			message: "Couldn't connect. Check your internet connection and try again.",
+			detail: appError.prettyMessage,
+		};
+	}
+	if (appError?.kind === "Http") {
+		return { message: fallback, detail: appError.prettyMessage };
+	}
+	return { message: appError?.prettyMessage || fallback };
+}
+
+// Account creation refusals (POST /v8/users) that have a known meaning, shown
+// without the raw "Error <code>: ..." text.
+const SIGN_UP_ERROR_MESSAGES: Record<number, { key: string; defaultValue: string }> = {
+	[INVALID_INPUT_PARAMETERS_CODE]: {
+		key: "auth.sign_up.errors.invalid_input",
+		defaultValue: "Please check your email address and date of birth. You must be at least 18 years old.",
+	},
+	6: { key: "auth.sign_up.errors.email_taken", defaultValue: "An account with this email address already exists." },
+	17: {
+		key: "auth.sign_up.errors.password_complexity",
+		defaultValue: "This password isn't strong enough. Choose a longer one with a mix of letters, numbers and symbols.",
+	},
+	// Free Grind server extension (registration invites).
+	901: { key: "auth.sign_up.errors.invite_required", defaultValue: "This server only accepts new accounts with an invite code." },
+	902: {
+		key: "auth.sign_up.errors.invite_invalid",
+		defaultValue: "This invite code is invalid, expired or already used.",
+	},
+};
+
+function describeSignUpError(appError: AppError | null): AuthError {
+	const code = appError?.kind === "Api" && typeof appError.message === "object" ? appError.message.code : null;
+	const known = code != null ? SIGN_UP_ERROR_MESSAGES[code] : undefined;
+	if (known) return { message: i18n.t(known.key, { defaultValue: known.defaultValue }) };
+	const fallback = i18n.t("auth.sign_up.errors.failed", { defaultValue: "Sign-up failed. Please try again." });
+	return describeLoginError(appError, fallback, fallback);
+}
+
+function isInvalidCredentials(appError: AppError | null): boolean {
+	if (appError?.kind === "Unauthorized") return true;
+	return (
+		appError?.kind === "Api" &&
+		typeof appError.message === "object" &&
+		appError.message.code === INVALID_INPUT_PARAMETERS_CODE
+	);
+}
+
+
 type AuthAction =
 	| { type: "SET_USER"; payload: number }
 	| { type: "CLEAR_USER" }
 	| { type: "SET_LOADING"; payload: boolean }
-	| { type: "SET_ERROR"; payload: string | null };
+	| { type: "SET_ERROR"; payload: AuthError | null }
+	| { type: "SET_SETTINGS_READY"; payload: boolean }
+	| { type: "SET_TOKEN_EXPIRED"; payload: boolean }
+	| { type: "SET_ACCOUNT_STATUS"; payload: AccountStatus };
 
 function authReducer(state: AuthState, action: AuthAction): AuthState {
 	switch (action.type) {
 		case "SET_USER":
-			return { ...state, userId: action.payload, error: null };
+			// Login/switch results carry the profile id as a string at runtime
+			// (callMethod doesn't run the response schemas' coercion), which then
+			// broke every i64 command argument, e.g. the backup's ownerUserId.
+			return { ...state, userId: Number(action.payload), error: null, tokenExpired: false, accountStatus: null };
 		case "CLEAR_USER":
-			return { ...state, userId: null };
+			return { ...state, userId: null, tokenExpired: false, accountStatus: null };
 		case "SET_LOADING":
 			return { ...state, isLoading: action.payload };
 		case "SET_ERROR":
 			return { ...state, error: action.payload };
+		case "SET_SETTINGS_READY":
+			return { ...state, settingsReady: action.payload };
+		case "SET_TOKEN_EXPIRED":
+			return { ...state, tokenExpired: action.payload };
+		case "SET_ACCOUNT_STATUS":
+			return { ...state, accountStatus: action.payload };
 		default:
 			return state;
 	}
@@ -43,22 +218,113 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		userId: null,
 		isLoading: true,
 		error: null,
+		settingsReady: false,
+		tokenExpired: false,
+		accountStatus: null,
 	});
 
-	const { callMethod, asAppError } = useApi();
+	const { callMethod, asAppError, asBanned } = useApi();
 	const apiFunctions = useApiFunctions();
+	const queryClient = useQueryClient();
+	const [savedAccounts, setSavedAccounts] = useState<SavedAccountMeta[]>([]);
+	// undefined = not yet resolved once; distinguishes "app boot" (nothing to
+	// clear, just point the chat db at whatever account is already logged
+	// in) from an actual account change (switch/logout) afterwards.
+	const previousUserIdRef = useRef<number | null | undefined>(undefined);
+	// Live mirror of state.userId for the background inbox sync's staleness
+	// check below — a plain closure over state.userId would only ever see
+	// the value from the render that kicked the sync off.
+	const currentUserIdRef = useRef<number | null>(state.userId);
+	useEffect(() => {
+		currentUserIdRef.current = state.userId;
+	}, [state.userId]);
+
+	// Read once before the persist effect below can clear it: checkAuth only
+	// resolves after that effect's first run.
+	const bootBanRef = useRef<BanStatus | null | undefined>(undefined);
+	if (bootBanRef.current === undefined) {
+		bootBanRef.current = readStoredBan();
+	}
+	const bootDoneRef = useRef(false);
+	useEffect(() => {
+		// Don't wipe the stored ban while the launch auth check is still running.
+		if (!bootDoneRef.current) return;
+		writeStoredBan(state.accountStatus);
+	}, [state.accountStatus]);
+
+	const refreshSavedAccounts = async () => {
+		try {
+			const accounts = await callMethod("list_saved_accounts");
+			setSavedAccounts(accounts);
+		} catch (error) {
+			appLog.warn("[Auth] refreshSavedAccounts failed", asAppError(error) ?? error);
+		}
+	};
+
+	// Session still valid, but the account needs the user to resolve
+	// something (age verification, a timed ban, ...) before it can be used —
+	// gates the app behind AccountStatusPrompt the same way tokenExpired
+	// gates it behind TokenExpiredGate. Returns whether one was shown, so
+	// callers can skip their normal "login succeeded" follow-up.
+	const showRestriction = (restriction: Restriction | null | undefined): boolean => {
+		if (!restriction) return false;
+		dispatch({ type: "SET_ACCOUNT_STATUS", payload: { kind: "restriction", restriction } });
+		return true;
+	};
+
+	// A hard login/refresh rejection — the account is banned outright (no
+	// session was established) or Grindr is rate-limiting attempts. Returns
+	// whether the error was one of these, so callers can skip their normal
+	// generic-error toast. `profileId` is the account signed into, when known;
+	// otherwise the one the ban response names. The ban screen needs it to
+	// offer a backup of that profile's local data.
+	const handleAccountBlock = (error: unknown, profileId: number | null = null): boolean => {
+		const ban = asBanned(error);
+		if (ban) {
+			const fromResponse = ban.profileId ? Number(ban.profileId) : NaN;
+			const banned = profileId ?? (Number.isSafeInteger(fromResponse) && fromResponse > 0 ? fromResponse : null);
+			dispatch({ type: "SET_ACCOUNT_STATUS", payload: { kind: "banned", info: ban, profileId: banned } });
+			return true;
+		}
+		if (asAppError(error)?.kind === "RateLimited") {
+			toast.error(i18n.t("auth.toasts.rate_limited"));
+			return true;
+		}
+		return false;
+	};
 
 	const checkAuth = async () => {
 		try {
 			appLog.debug("[Auth] checkAuth: starting");
 			dispatch({ type: "SET_LOADING", payload: true });
 			const result = await callMethod("auth_state");
+			// From here on accountStatus changes are persisted again.
+			const bootBan = bootBanRef.current;
+			bootBanRef.current = null;
+			bootDoneRef.current = true;
 			if (result !== null) {
 				appLog.info("[Auth] checkAuth: active session found");
+				// A live session means no hard ban (anymore): drop a stored one.
+				writeStoredBan(null);
 				dispatch({ type: "SET_USER", payload: result });
+				void refreshSavedAccounts();
+				// Resumed from a persisted session (not a fresh login result), so
+				// the restriction has to be fetched separately.
+				void callMethod("account_restriction")
+					.then((restriction) => {
+						showRestriction(restriction);
+					})
+					.catch((error) => {
+						appLog.warn("[Auth] account_restriction check failed", asAppError(error) ?? error);
+					});
 			} else {
 				appLog.info("[Auth] checkAuth: no active session");
 				dispatch({ type: "CLEAR_USER" });
+				// The session was dropped by a ban, not a sign-out: show the ban screen again.
+				if (bootBan) {
+					appLog.info("[Auth] checkAuth: restoring ban screen from last run");
+					dispatch({ type: "SET_ACCOUNT_STATUS", payload: bootBan });
+				}
 			}
 		} catch (error) {
 			const appError = asAppError(error);
@@ -69,64 +335,306 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 				appLog.error("[Auth] checkAuth failed", appError ?? error);
 				dispatch({
 					type: "SET_ERROR",
-					payload: appError?.prettyMessage || "Failed to check auth status",
+					payload: { message: appError?.prettyMessage || "Failed to check auth status" },
 				});
 			}
 		} finally {
+			bootDoneRef.current = true;
 			dispatch({ type: "SET_LOADING", payload: false });
 		}
 	};
 
-	const login = async (email: string, password: string) => {
+	/** The saved account signed into with this email before, if any: the fallback
+	 * for a ban response that doesn't name the profile. */
+	const savedProfileIdForEmail = (email: string): number | null => {
+		const normalized = email.trim().toLowerCase();
+		const account = savedAccounts.find((saved) => saved.email.trim().toLowerCase() === normalized);
+		const id = account ? Number(account.profileId) : NaN;
+		return Number.isSafeInteger(id) && id > 0 ? id : null;
+	};
+
+	const login = async (email: string, password: string, { keepDevice }: LoginOptions = {}) => {
+		// The sign-in endpoint the last attempt went to, for the SMS page's report.
+		let endpoint = "/v8/sessions";
 		try {
 			appLog.info("[Auth] login: attempting email/password login");
 			dispatch({ type: "SET_LOADING", payload: true });
 			dispatch({ type: "SET_ERROR", payload: null });
 
-			const result = await callMethod("login", { email, password });
+			let result;
+			try {
+				result = await callMethod("login", { email, password, keepDevice });
+			} catch (error) {
+				// Accounts with Grindr's first-party reCAPTCHA fail the plain
+				// /v8 sign-in as invalid credentials. Open Grind retries those
+				// with a reCAPTCHA token via /v9 once the assignment says so.
+				const firstError = asAppError(error);
+				if (firstError?.kind === "VerificationRequired" || !isInvalidCredentials(firstError)) throw error;
+				const required = await callMethod("recaptcha_first_party_enabled").catch((checkError) => {
+					appLog.warn("[Auth] recaptcha_first_party check failed", asAppError(checkError) ?? checkError);
+					return false;
+				});
+				if (!required) throw error;
+				appLog.info("[Auth] login: retrying with a reCAPTCHA token");
+				endpoint = "/v9/sessions (reCAPTCHA)";
+				const captchaToken = await mintRecaptchaToken("login");
+				result = await callMethod("login", { email, password, captchaToken, keepDevice });
+			}
 			appLog.info("[Auth] login: succeeded");
 			dispatch({ type: "SET_USER", payload: result.profileId });
-			toast.success("Login successful");
+			void refreshSavedAccounts();
+			if (!showRestriction(result.restriction)) {
+				toast.success(i18n.t("auth.toasts.login_success"));
+			}
 		} catch (error) {
+			// Not a failure to report: the page switches to SMS verification.
+			// Without a profile id there's nothing to verify against, so that
+			// falls through to the generic error below.
+			const verification = verificationRequired(asAppError(error));
+			if (verification) {
+				appLog.info("[Auth] login: SMS verification required");
+				throw new SmsVerificationRequiredError(verification.profileId, { endpoint, body: verification.body });
+			}
+			if (handleAccountBlock(error, savedProfileIdForEmail(email))) {
+				throw error;
+			}
+			if (error instanceof RecaptchaError) {
+				appLog.warn("[Auth] login: reCAPTCHA token unavailable", { reason: error.reason, detail: error.detail });
+				if (error.reason !== "cancelled") {
+					const message = recaptchaFailureMessage(error.reason);
+					dispatch({ type: "SET_ERROR", payload: { message } });
+				}
+				throw error;
+			}
 			const appError = asAppError(error);
-			const message = appError?.prettyMessage || "Login failed";
+			const message = describeLoginError(
+				appError,
+				"Sign-in failed. Please try again.",
+				"Invalid email or password. Please check your credentials and try again.",
+			);
 			appLog.error("[Auth] login failed", { kind: appError?.kind, message });
 			dispatch({ type: "SET_ERROR", payload: message });
-			toast.error(message);
 			throw error;
 		} finally {
 			dispatch({ type: "SET_LOADING", payload: false });
 		}
 	};
 
-	const loginWithJwt = async (token: string) => {
+	const loginWithGoogle = async (token: string) => {
 		try {
-			appLog.info("[Auth] loginWithJwt: attempting token login");
+			appLog.info("[Auth] loginWithGoogle: attempting Google third-party login");
 			dispatch({ type: "SET_LOADING", payload: true });
 			dispatch({ type: "SET_ERROR", payload: null });
 
-			const result = await callMethod("login_with_jwt", { token });
-			appLog.info("[Auth] loginWithJwt: succeeded");
+			const result = await callMethod("login_with_google", { token });
+			appLog.info("[Auth] loginWithGoogle: succeeded");
 			dispatch({ type: "SET_USER", payload: result.profileId });
-			toast.success("Token login successful");
+			void refreshSavedAccounts();
+			if (!showRestriction(result.restriction)) {
+				toast.success(i18n.t("auth.toasts.google_login_success"));
+			}
 		} catch (error) {
+			if (handleAccountBlock(error)) {
+				throw error;
+			}
 			const appError = asAppError(error);
-			const message = appError?.prettyMessage || "Token login failed";
-			appLog.error("[Auth] loginWithJwt failed", { kind: appError?.kind, message });
+			const message = describeLoginError(
+				appError,
+				"Google sign-in failed. Please try again.",
+				"This Google token is invalid or has expired. Please get a new one and try again.",
+			);
+			appLog.error("[Auth] loginWithGoogle failed", { kind: appError?.kind, message });
 			dispatch({ type: "SET_ERROR", payload: message });
-			toast.error(message);
 			throw error;
 		} finally {
 			dispatch({ type: "SET_LOADING", payload: false });
+		}
+	};
+
+	const loginWithGoogleWindow = async () => {
+		try {
+			appLog.info("[Auth] loginWithGoogleWindow: opening Google sign-in window");
+			dispatch({ type: "SET_LOADING", payload: true });
+			dispatch({ type: "SET_ERROR", payload: null });
+
+			const result = await callMethod("login_with_google_window");
+			appLog.info("[Auth] loginWithGoogleWindow: succeeded");
+			dispatch({ type: "SET_USER", payload: result.profileId });
+			void refreshSavedAccounts();
+			if (!showRestriction(result.restriction)) {
+				toast.success(i18n.t("auth.toasts.google_login_success"));
+			}
+		} catch (error) {
+			if (handleAccountBlock(error)) {
+				throw error;
+			}
+			const appError = asAppError(error);
+			if (appError?.kind === "Auth" && appError.message === GOOGLE_CANCELED) {
+				// The user closed the window.
+				appLog.info("[Auth] loginWithGoogleWindow: canceled");
+				throw error;
+			}
+			const message = describeLoginError(appError, "Google sign-in failed. Please try again.", "Google sign-in failed. Please try again.");
+			appLog.error("[Auth] loginWithGoogleWindow failed", { kind: appError?.kind, message });
+			dispatch({ type: "SET_ERROR", payload: message });
+			throw error;
+		} finally {
+			dispatch({ type: "SET_LOADING", payload: false });
+		}
+	};
+
+	// Signs in with a code shown on another device (create_transfer_code
+	// there), scanned as a QR code or pasted as text.
+	const loginWithTransferCode = async (code: string) => {
+		try {
+			appLog.info("[Auth] loginWithTransferCode: attempting");
+			dispatch({ type: "SET_LOADING", payload: true });
+			dispatch({ type: "SET_ERROR", payload: null });
+
+			const result = await callMethod("sign_in_with_transfer_code", { code });
+			appLog.info("[Auth] loginWithTransferCode: succeeded");
+			dispatch({ type: "SET_USER", payload: result.profileId });
+			void refreshSavedAccounts();
+			if (!showRestriction(result.restriction)) {
+				toast.success(i18n.t("auth.toasts.login_success"));
+			}
+		} catch (error) {
+			if (handleAccountBlock(error)) {
+				throw error;
+			}
+			const appError = asAppError(error);
+			const transferMessage =
+				appError?.kind === "Auth" && typeof appError.message === "string"
+					? TRANSFER_CODE_MESSAGES[appError.message]
+					: undefined;
+			const message: AuthError = transferMessage
+				? { message: transferMessage }
+				: describeLoginError(appError, "Sign-in failed. Please try again.", "Sign-in failed. Please try again.");
+			appLog.error("[Auth] loginWithTransferCode failed", { kind: appError?.kind, message });
+			dispatch({ type: "SET_ERROR", payload: message });
+			throw error;
+		} finally {
+			dispatch({ type: "SET_LOADING", payload: false });
+		}
+	};
+
+	const loginWithFacebook = async () => {
+		try {
+			appLog.info("[Auth] loginWithFacebook: opening Facebook sign-in window");
+			dispatch({ type: "SET_LOADING", payload: true });
+			dispatch({ type: "SET_ERROR", payload: null });
+
+			const result = await callMethod("login_with_facebook");
+			appLog.info("[Auth] loginWithFacebook: succeeded");
+			dispatch({ type: "SET_USER", payload: result.profileId });
+			void refreshSavedAccounts();
+			if (!showRestriction(result.restriction)) {
+				toast.success(i18n.t("auth.toasts.facebook_login_success"));
+			}
+		} catch (error) {
+			if (handleAccountBlock(error)) {
+				throw error;
+			}
+			const appError = asAppError(error);
+			if (appError?.kind === "Auth" && appError.message === FACEBOOK_CANCELED) {
+				// The user closed the window or declined the consent screen.
+				appLog.info("[Auth] loginWithFacebook: canceled");
+				throw error;
+			}
+			const message: AuthError =
+				appError?.kind === "Auth" && appError.message === FACEBOOK_HANDOFF_REFUSED
+					? { message: "Facebook tried to continue in another app. Please sign in on the Facebook page instead." }
+					: appError?.kind === "Auth" && appError.message === FACEBOOK_DIALOG_ERROR
+						? { message: "Facebook refused the sign-in. Please try again later." }
+						: describeLoginError(appError, "Facebook sign-in failed. Please try again.", "Facebook sign-in failed. Please try again.");
+			appLog.error("[Auth] loginWithFacebook failed", { kind: appError?.kind, message });
+			dispatch({ type: "SET_ERROR", payload: message });
+			throw error;
+		} finally {
+			dispatch({ type: "SET_LOADING", payload: false });
+		}
+	};
+
+	const signUp = async ({ email, password, birthday }: SignUpData) => {
+		try {
+			appLog.info("[Auth] signUp: creating email account");
+			dispatch({ type: "SET_LOADING", payload: true });
+			dispatch({ type: "SET_ERROR", payload: null });
+
+			// Sign-up is Android-only (rejects with a RecaptchaError elsewhere).
+			const captchaToken = await mintRecaptchaToken("sign_up");
+			const profileId = await callMethod("create_account", {
+				email,
+				password,
+				birthday,
+				captchaToken,
+				pushToken: cachedPushToken(),
+			});
+			appLog.info("[Auth] signUp: account created", { profileId });
+			toast.success(i18n.t("auth.toasts.account_created"));
+		} catch (error) {
+			if (error instanceof RecaptchaError) {
+				appLog.warn("[Auth] signUp: reCAPTCHA token unavailable", { reason: error.reason, detail: error.detail });
+				if (error.reason !== "cancelled") {
+					const message = recaptchaFailureMessage(error.reason);
+					dispatch({ type: "SET_ERROR", payload: { message } });
+				}
+				throw error;
+			}
+			const appError = asAppError(error);
+			const message = describeSignUpError(appError);
+			appLog.error("[Auth] signUp failed", { kind: appError?.kind, message });
+			dispatch({ type: "SET_ERROR", payload: message });
+			throw error;
+		} finally {
+			dispatch({ type: "SET_LOADING", payload: false });
+		}
+
+		// The response carries no session: sign in on the device the account
+		// was just created on.
+		await login(email, password, { keepDevice: true });
+	};
+
+	// Once a timed ban has run out, Grindr wants its ban agreement accepted
+	// before the account can be used again. The backend refreshes the session
+	// right after, so the result's restriction is the account's new state.
+	// Throws on failure so the prompt can show it.
+	const acceptBanAgreement = async () => {
+		try {
+			const result = await callMethod("accept_ban_agreement");
+			if (!showRestriction(result.restriction)) {
+				appLog.info("[Auth] ban agreement accepted, restriction lifted");
+				dispatch({ type: "SET_ACCOUNT_STATUS", payload: null });
+			}
+		} catch (error) {
+			// The session is gone; let TokenExpiredGate (behind this gate) take over.
+			if (asAppError(error)?.kind === "TokenExpired") {
+				dispatch({ type: "SET_ACCOUNT_STATUS", payload: null });
+			}
+			throw error;
 		}
 	};
 
 	const logout = async () => {
 		try {
 			dispatch({ type: "SET_LOADING", payload: true });
+			// Lets Grindr workarounds clean up while the session still exists
+			// (e.g. a location left elsewhere).
+			await beforeSignOut();
+			// Unregister this device's push token while the session still
+			// exists, so the signed-out account stops notifying here. Best
+			// effort: a failure must not block the logout.
+			const pushToken = cachedPushToken();
+			if (pushToken) {
+				await callMethod("revoke_push_token", { token: pushToken }).catch((error) =>
+					appLog.warn("[PUSH_SYNC] Failed to revoke push token on logout", asAppError(error)?.prettyMessage || error),
+				);
+			}
+			// Forget the sync marker so a later sign-in registers the token again.
+			window.localStorage.removeItem(PUSH_TOKEN_SYNCED_STORAGE_KEY);
 			await callMethod("logout");
 			dispatch({ type: "CLEAR_USER" });
-			toast.success("Logged out");
+			toast.success(i18n.t("auth.toasts.logged_out"));
 		} catch (error) {
 			const appError = asAppError(error);
 			const message = appError?.prettyMessage || "Logout failed";
@@ -137,21 +645,246 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		}
 	};
 
+	// Makes a previously saved account active without re-entering a
+	// password — the account-change effect above (watching state.userId)
+	// handles pointing the chat db and clearing caches once this resolves.
+	const switchAccount = async (profileId: string) => {
+		try {
+			appLog.info("[Auth] switchAccount: attempting", { profileId });
+			dispatch({ type: "SET_LOADING", payload: true });
+			dispatch({ type: "SET_ERROR", payload: null });
+
+			const result = await callMethod("switch_account", { profileId });
+			appLog.info("[Auth] switchAccount: succeeded");
+			dispatch({ type: "SET_USER", payload: result.profileId });
+			void refreshSavedAccounts();
+			if (!showRestriction(result.restriction)) {
+				toast.success(i18n.t("auth.toasts.switched_account"));
+			}
+		} catch (error) {
+			if (handleAccountBlock(error, Number(profileId))) {
+				throw error;
+			}
+			const appError = asAppError(error);
+			const message = appError?.prettyMessage || "Failed to switch account";
+			appLog.error("[Auth] switchAccount failed", { kind: appError?.kind, message });
+			dispatch({ type: "SET_ERROR", payload: { message } });
+			toast.error(message);
+			throw error;
+		} finally {
+			dispatch({ type: "SET_LOADING", payload: false });
+		}
+	};
+
+	const removeSavedAccount = async (profileId: string) => {
+		try {
+			await callMethod("remove_saved_account", { profileId });
+			setSavedAccounts((accounts) => accounts.filter((account) => account.profileId !== profileId));
+		} catch (error) {
+			const appError = asAppError(error);
+			const message = appError?.prettyMessage || "Failed to remove saved account";
+			appLog.error("[Auth] removeSavedAccount failed", { kind: appError?.kind, message });
+			toast.error(message);
+			throw error;
+		}
+	};
+
 	// Check auth on mount
 	useEffect(() => {
 		checkAuth();
 	}, []);
 
-	// Register presence with Free Grind backend when a logged-in session is active.
-	// This must not depend only on `state.userId`, because consent/discovery settings can
-	// change after login while the user id stays the same.
+	// Points the chat db at the active account's own file, and on an actual
+	// account change (not the initial boot resolution) clears every other
+	// account-scoped cache — otherwise the previous account's chats/profile
+	// data/blocked list would still show through until something happened
+	// to overwrite them.
 	useEffect(() => {
-		if (state.isLoading || !state.userId) {
+		if (state.isLoading) {
 			return;
 		}
 
-		void apiFunctions.registerPresence(state.userId);
-	});
+		const previousUserId = previousUserIdRef.current;
+		previousUserIdRef.current = state.userId;
+
+		if (previousUserId === state.userId) {
+			return;
+		}
+
+		const isActualAccountChange = previousUserId !== undefined && previousUserId != null;
+		if (isActualAccountChange) {
+			clearAllCaches();
+			queryClient.clear();
+		}
+
+		dispatch({ type: "SET_SETTINGS_READY", payload: false });
+		setWorkaroundsUser(state.userId);
+		setActiveChatContactIndexAccount(state.userId);
+
+		void (async () => {
+			const startedAt = performance.now();
+			await setActiveChatDbUser(state.userId);
+			const chatDbMs = performance.now() - startedAt;
+
+			// Fire-and-forget: throttled background sync of the chat list and
+			// each changed conversation's latest messages, run on every profile
+			// load. Deliberately started only *after* setActiveChatDbUser has
+			// fully resolved above — that call both migrates the legacy db file
+			// (a rename) and opens the actual per-profile connection, so kicking
+			// the sync off any earlier races it against that migration/open and
+			// can leave it stuck waiting on a half-migrated db. Kicked off here
+			// rather than after the cache loads below on purpose: it has no
+			// dependency on automation/media/privacy/seen settings, and
+			// chaining it behind them would mean any slowness (or a stuck
+			// chatDb connection) in loading those silently delays the sync
+			// starting too, even though the two are otherwise unrelated. Not
+			// awaited itself, so it never gates the UI. Only the first-ever
+			// run per profile walks the whole inbox — every run after that
+			// stops as soon as it hits unchanged conversations (see
+			// inboxSync.ts).
+			if (state.userId != null) {
+				const userId = state.userId;
+				void runInboxSync(apiFunctions, userId, () => currentUserIdRef.current === userId);
+				// Fire-and-forget: pulls this account's saved phrases from Grindr and
+				// unions them into the local list, but only the very first time this
+				// runs for this profile (see syncSavedPhrasesFromServer) — otherwise a
+				// phrase deleted locally would just get re-added from the server on the
+				// next load. Guarded by the same "still the active profile" check as the
+				// inbox sync above, since chatDb (and so where the merged list gets
+				// written) already points at whichever profile is active by the time
+				// this resolves.
+				void syncSavedPhrasesFromServer(
+					apiFunctions.getSavedPhrases,
+					() => currentUserIdRef.current === userId,
+				);
+				// Fire-and-forget: reconciles taps received while the app was closed
+				// against the "tap_received" automation trigger — guarded the same
+				// way, and safe to start before the automation cache below finishes
+				// loading (runAutomationRulesForSender no-ops until it has).
+				void runTapsAutomationSync(apiFunctions, () => currentUserIdRef.current === userId);
+				// Fire-and-forget: slowly re-uploads drawer media restored from
+				// another profile's backup (see restoredDrawerMedia.ts) — guarded the
+				// same way, since the api uploads into whichever profile is active.
+				// Restored own albums follow (ownAlbums.ts), after the drawer so the
+				// two never upload at the same time.
+				void (async () => {
+					const isCurrent = () => currentUserIdRef.current === userId;
+					await runRestoredDrawerUpload(apiFunctions, isCurrent);
+					await runRestoredOwnAlbums(apiFunctions, isCurrent);
+				})();
+				// Fire-and-forget: records the own albums, content included, so a
+				// backup still has them once a ban locks the account out — every few
+				// hours on start and shortly after each change to them (ownAlbums.ts).
+				startOwnAlbumsSync(apiFunctions, userId, () => currentUserIdRef.current === userId);
+				// Fire-and-forget: records this profile's own details and photos
+				// locally so a backup still has them once the account can't read its
+				// profile anymore, e.g. after a ban (see ownProfilePhotos.ts).
+				void syncOwnProfile(apiFunctions, userId, () => currentUserIdRef.current === userId);
+				// Fire-and-forget, same idea for the block list: recorded for later
+				// backups, and a restored one blocked again bit by bit (ownBlocklist.ts).
+				// Restored favorites follow the same way (restoredFavorites.ts), after the
+				// blocks so the two never hit the server at the same time.
+				void (async () => {
+					const isCurrent = () => currentUserIdRef.current === userId;
+					await runRestoredBlocklist(apiFunctions, userId, isCurrent);
+					await syncOwnBlocklist(apiFunctions, isCurrent);
+					await runRestoredFavorites(apiFunctions, userId, isCurrent);
+				})();
+			}
+
+			const cacheMs: Record<string, number> = {};
+			const timed = async (name: string, load: () => Promise<void>) => {
+				const loadStartedAt = performance.now();
+				await load();
+				cacheMs[name] = Math.round(performance.now() - loadStartedAt);
+			};
+			await Promise.all([
+				timed("automation", loadAutomationCache),
+				timed("automationRules", loadAutomationRulesCache),
+				timed("privacy", loadPrivacyCache),
+				timed("autoTranslate", loadAutoTranslateCache),
+				timed("seen", loadSeenCache),
+			]);
+			// Location, filters and so the whole grid wait on settingsReady — a
+			// slow start shows up as a long skeleton. Logged as a warning so it
+			// lands in issue reports (release keeps warn/error only).
+			// On the launch run, also catch a fast open that only started late
+			// (auth check slow), not just a slow one.
+			const totalMs = performance.now() - startedAt;
+			const isLaunchRun = previousUserId === undefined;
+			if (totalMs > 3_000 || (isLaunchRun && performance.now() > 5_000)) {
+				appLog.warn("[Auth] slow settings ready", {
+					sinceLaunchMs: Math.round(performance.now()),
+					startedSinceLaunchMs: Math.round(startedAt),
+					totalMs: Math.round(totalMs),
+					chatDbMs: Math.round(chatDbMs),
+					cacheMs,
+				});
+			}
+			dispatch({ type: "SET_SETTINGS_READY", payload: true });
+		})();
+	}, [state.userId, state.isLoading, queryClient, apiFunctions]);
+
+	// A third-party (JWT) login's token has no real refresh mechanism, so once it
+	// expires any authenticated API call anywhere in the app can be the one that
+	// first surfaces it (see useApi.ts's asAppError). Listen globally rather than
+	// only reacting to calls made from within this context.
+	useEffect(() => {
+		const onTokenExpired = () => {
+			dispatch({ type: "SET_TOKEN_EXPIRED", payload: true });
+		};
+
+		window.addEventListener("fg:token-expired", onTokenExpired);
+		return () => {
+			window.removeEventListener("fg:token-expired", onTokenExpired);
+		};
+	}, []);
+
+	// Account-status changes the Rust side detects on its own, outside any
+	// call made from here (see api/websocket.rs and api/auth.rs):
+	// - auth:banned — a background token refresh found the account banned.
+	// - auth:restriction — a restriction arrived with a later session token
+	//   (a resumed session only gets its token on the first refresh, so
+	//   checkAuth's account_restriction check can come back empty).
+	// - auth:session-error with unauthorized — a refresh was answered 401 and
+	//   the session is gone; same "sign in again" prompt as an expired JWT.
+	useEffect(() => {
+		const unlisteners = [
+			listen<unknown>("auth:banned", (event) => {
+				const parsed = banInfoSchema.safeParse(event.payload);
+				if (!parsed.success) {
+					appLog.warn("[Auth] auth:banned event with unexpected payload", event.payload);
+					return;
+				}
+				dispatch({
+					type: "SET_ACCOUNT_STATUS",
+					payload: { kind: "banned", info: parsed.data, profileId: currentUserIdRef.current },
+				});
+			}),
+			listen<unknown>("auth:restriction", (event) => {
+				const parsed = restrictionSchema.safeParse(event.payload);
+				if (!parsed.success) {
+					appLog.warn("[Auth] auth:restriction event with unexpected payload", event.payload);
+					return;
+				}
+				dispatch({
+					type: "SET_ACCOUNT_STATUS",
+					payload: { kind: "restriction", restriction: parsed.data },
+				});
+			}),
+			listen<{ unauthorized?: boolean }>("auth:session-error", (event) => {
+				if (event.payload?.unauthorized) {
+					dispatch({ type: "SET_TOKEN_EXPIRED", payload: true });
+				}
+			}),
+		];
+
+		return () => {
+			for (const unlisten of unlisteners) {
+				void unlisten.then((fn) => fn());
+			}
+		};
+	}, []);
 
 	// Receive Android native FCM token and sync it to Grindr once authenticated.
 	useEffect(() => {
@@ -176,15 +909,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			}
 
 			appLog.debug("[PUSH_SYNC] Syncing FCM token to Grindr");
-			void callMethod("sync_push_token", { token }).catch((error) => {
-				const appError = asAppError(error);
-				appLog.warn(
-					"[PUSH_SYNC] Failed to sync push token",
-					appError?.prettyMessage || error,
-				);
-			}).then(() => {
-				appLog.debug("[PUSH_SYNC] Push token sync succeeded");
-			});
+			void callMethod("sync_push_token", { token })
+				.then(() => {
+					window.localStorage.setItem(
+						PUSH_TOKEN_SYNCED_STORAGE_KEY,
+						`${token}::${state.userId}`,
+					);
+					appLog.debug("[PUSH_SYNC] Push token sync succeeded");
+				})
+				.catch((error) => {
+					const appError = asAppError(error);
+					appLog.warn(
+						"[PUSH_SYNC] Failed to sync push token",
+						appError?.prettyMessage || error,
+					);
+				});
 		};
 
 		window.addEventListener("fg:fcm-token", onFcmToken as EventListener);
@@ -223,15 +962,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 				window.localStorage.setItem(PUSH_TOKEN_STORAGE_KEY, fallbackToken);
 			}
 
-			const lastSyncedToken = window.localStorage.getItem(PUSH_TOKEN_SYNCED_STORAGE_KEY);
-			if (lastSyncedToken === effectiveToken) {
+			// Keyed by token *and* account: the device's FCM token doesn't change
+			// when switching between saved accounts, but the backend association
+			// is per-account, so a stale "already synced" marker from the
+			// previous account would otherwise skip re-syncing for the new one.
+			const syncMarker = `${effectiveToken}::${state.userId}`;
+			const lastSyncedMarker = window.localStorage.getItem(PUSH_TOKEN_SYNCED_STORAGE_KEY);
+			if (lastSyncedMarker === syncMarker) {
 				return;
 			}
 
 			appLog.debug("[PUSH_SYNC] Syncing cached push token (retry loop)");
 			void callMethod("sync_push_token", { token: effectiveToken })
 				.then(() => {
-					window.localStorage.setItem(PUSH_TOKEN_SYNCED_STORAGE_KEY, effectiveToken);
+					window.localStorage.setItem(PUSH_TOKEN_SYNCED_STORAGE_KEY, syncMarker);
 					appLog.debug("[PUSH_SYNC] Cached push token sync succeeded");
 				})
 				.catch((error) => {
@@ -264,12 +1008,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		}
 	}, [state.userId, state.isLoading]);
 
+	const clearError = useCallback(() => dispatch({ type: "SET_ERROR", payload: null }), []);
+
 	const value: AuthContextType = {
 		...state,
 		login,
-		loginWithJwt,
+		loginWithGoogle,
+		loginWithGoogleWindow,
+		loginWithFacebook,
+		loginWithTransferCode,
+		signUp,
 		logout,
 		checkAuth,
+		acceptBanAgreement,
+		savedAccounts,
+		switchAccount,
+		removeSavedAccount,
+		clearError,
 	};
 
 	return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

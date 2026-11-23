@@ -14,7 +14,11 @@ export const inboxFiltersSchema = z.object({
 
 export const participantSchema = z.object({
 	profileId: z.coerce.number().int(),
+	/** Group entries only (Free Grind server): the member's name. */
+	displayName: z.string().nullable().optional(),
 	primaryMediaHash: z.string().nullable().optional(),
+	age: z.number().nullable().optional(),
+	aboutMe: z.string().nullable().optional(),
 	lastOnline: z.coerce.number().nullable().optional(),
 	onlineUntil: z.coerce.number().nullable().optional(),
 	distanceMetres: z.coerce.number().nullable().optional(),
@@ -44,6 +48,41 @@ export const messagePreviewSchema = z.object({
 	duration: z.unknown().nullable().optional(),
 	imageHash: z.string().nullable().optional(),
 	photoContentReply: z.unknown().nullable().optional(),
+	/** Group chats (Free Grind server): the GroupEvent line's body, so the inbox can say what happened. */
+	groupEvent: z.record(z.string(), z.unknown()).nullable().optional(),
+});
+
+/** Group chats (Free Grind server extension, flag group-chats). */
+export const groupRoleSchema = z.enum(["OWNER", "ADMIN", "MEMBER"]);
+export const groupMemberSchema = z.object({
+	profileId: z.coerce.number().int(),
+	role: groupRoleSchema,
+	status: z.enum(["ACTIVE", "INVITED"]),
+	invitedBy: z.coerce.number().int().nullable().optional(),
+	invitedAt: z.coerce.number().nullable().optional(),
+	joinedAt: z.coerce.number().nullable().optional(),
+	displayName: z.string().nullable().optional(),
+	primaryMediaHash: z.string().nullable().optional(),
+	blocked: z.boolean().optional().default(false),
+});
+export const chatGroupSchema = z.object({
+	groupId: z.coerce.number().int(),
+	conversationId: z.string(),
+	name: z.string(),
+	createdAt: z.coerce.number().optional(),
+	updatedAt: z.coerce.number().optional(),
+	myRole: groupRoleSchema.nullable().optional(),
+	myStatus: z.enum(["ACTIVE", "INVITED"]).nullable().optional(),
+	maxMembers: z.coerce.number().int().nullable().optional(),
+	members: z.array(groupMemberSchema).default([]),
+});
+/** Group summary on an inbox entry. */
+export const conversationGroupSchema = z.object({
+	groupId: z.coerce.number().int(),
+	memberCount: z.coerce.number().int().optional().default(0),
+	myRole: groupRoleSchema.optional().default("MEMBER"),
+	/** Client-only: an open invite shown as an inbox row (not a joined group yet). */
+	invited: z.boolean().optional(),
 });
 
 export const conversationEntrySchema = z.object({
@@ -62,6 +101,7 @@ export const conversationEntrySchema = z.object({
 		translatable: z.boolean().optional(),
 		rightNow: z.string().nullable().optional(),
 		hasUnreadThrob: z.boolean().optional(),
+		group: conversationGroupSchema.nullable().optional(),
 	}),
 });
 
@@ -92,6 +132,8 @@ export const messageSchema = z.object({
 	replyToMessage: z.unknown().nullable().optional(),
 	replyPreview: z.unknown().nullable().optional(),
 	dynamic: z.boolean().optional(),
+	/** Free Grind server (flag chat-message-edit): when the sender last edited it; absent if never. */
+	editedAt: z.coerce.number().nullable().optional(),
 });
 
 export const messagesResponseSchema = z.object({
@@ -102,9 +144,11 @@ export const messagesResponseSchema = z.object({
 			translate: z.boolean().optional(),
 			hasSharedAlbums: z.boolean().optional(),
 			isInAList: z.boolean().optional(),
+			readBy: z.array(z.object({ profileId: z.coerce.number().int(), timestamp: z.coerce.number() })).optional(),
 		})
 		.nullable()
 		.optional(),
+	group: chatGroupSchema.nullable().optional(),
 	profile: z
 		.object({
 			profileId: z.coerce.number().int(),
@@ -125,11 +169,13 @@ export const sendMessagePayloadSchema = z.object({
 		targetId: z.coerce.number().int(),
 	}),
 	body: z.record(z.string(), z.unknown()).nullable(),
+	replyToMessageId: z.string().nullable().optional(),
 });
 
 export const sendTextPayloadSchema = z.object({
 	targetProfileId: z.coerce.number().int(),
 	text: z.string().trim().min(1).max(1000),
+	replyToMessageId: z.string().nullable().optional(),
 });
 
 export const chatMessageMutationSchema = z.object({
@@ -179,3 +225,7 @@ export type ChatMessageMutation = z.infer<typeof chatMessageMutationSchema>;
 export type ChatReactionPayload = z.infer<typeof chatReactionPayloadSchema>;
 export type ShareAlbumPayload = z.infer<typeof shareAlbumPayloadSchema>;
 export type WebsocketEnvelope = z.infer<typeof websocketEnvelopeSchema>;
+export type ChatGroup = z.infer<typeof chatGroupSchema>;
+export type ChatGroupMember = z.infer<typeof groupMemberSchema>;
+export type ChatGroupRole = z.infer<typeof groupRoleSchema>;
+export type ConversationGroup = z.infer<typeof conversationGroupSchema>;

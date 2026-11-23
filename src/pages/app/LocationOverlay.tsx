@@ -1,0 +1,710 @@
+import { Bookmark, Check, Compass, Home, Loader2, MapPin, Navigation, Search, Trash2, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { cn } from "../../utils/cn";
+import { createPortal } from "react-dom";
+import { useTranslation } from "react-i18next";
+import toast from "react-hot-toast";
+import { BottomSheet, useBottomSheetClose, SheetCloseButton, SHEET_ICON_BUTTON_CLASS, sheetButtonClass } from "../../components/ui/bottom-sheet";
+import { SlidingTabs } from "../../components/ui/sliding-tabs";
+import { SelectSheet } from "../../components/ui/select-sheet";
+import { HomeFilled, LocateFixedFilled } from "../../components/icons/FilledIcons";
+import { usePreferences } from "../../contexts/PreferencesContext";
+import { appLog } from "../../utils/logger";
+import { getCurrentLocation, getLocationErrorMessageKey } from "../../services/currentLocation";
+import { decodeGeohash, encodeGeohash } from "../../utils/geohash";
+import { type GeocodeResult, type SelectedLocation } from "./GridPage.types";
+import { LocationChip, SavedLocationChip } from "./gridpage/components/LocationChips";
+import { MAP_SHEET_HINT_CLASS, MAP_SHEET_ICON_BUTTON_CLASS, MapSheetLayout, MapSheetQuickPicks, MapSheetSearch, mapSheetProps } from "./gridpage/components/MapSheetLayout";
+import { MapLocationPicker, type MapViewport } from "./gridpage/components/MapLocationPicker";
+import type { MapPlace } from "./gridpage/components/mapOverlays";
+import { useExploreHeatmap, useExploreLocations } from "../../hooks/queries/useExploreHeatmapQueries";
+import type { ExploreLocation as ExplorePlace } from "../../services/api/exploreHeatmapMethods";
+import { useLocationSearch } from "./gridpage/hooks/useLocationSearch";
+import {
+	getCityFromAddress,
+	reverseGeocodeCityForGeohash,
+	reverseGeocodeGeohash,
+} from "./gridpage/geocoding";
+import {
+	addSavedLocation,
+	deleteSavedLocation,
+	loadSavedLocations,
+	type SavedLocation,
+} from "../../services/savedLocations";
+import {
+	useHomeLocation,
+	useUpdateHomeLocation,
+	useUpdateVisitingMode,
+	useVisitingMode,
+} from "../../hooks/queries/useProfileQueries";
+import { VISITING_MODES, getVisitingModeTranslationKey, type VisitingMode } from "../../types/visiting";
+import { confirmAgeVerificationRegion } from "../../services/ageVerificationGuard";
+
+export type ExploreLocation = { geohash: string; label: string } | null;
+
+// Explore gets its own accent (distinct from the app's --accent, used for the
+// real/"set" location) so the two modes are never visually ambiguous — same
+// color everywhere it shows up: this sheet's tab/chips/buttons and
+// GridPage's header pill.
+export const EXPLORE_COLOR = "#3b82f6";
+
+interface LocationOverlayProps {
+	onClose: () => void;
+	exploreLocation: ExploreLocation;
+	onSetExploreLocation: (next: ExploreLocation) => void;
+	isDesktop: boolean;
+}
+
+// The map pin. isAuto marks a pick that came from GPS, so confirming it turns
+// on auto-location instead of saving a fixed spot.
+type PinnedLocation = SelectedLocation & { isAuto?: boolean };
+
+function geohashCenter(geohash: string): { lat: number; lon: number } | null {
+	try {
+		const decoded = decodeGeohash(geohash);
+		return { lat: (decoded.lat[0] + decoded.lat[1]) / 2, lon: (decoded.lon[0] + decoded.lon[1]) / 2 };
+	} catch {
+		return null;
+	}
+}
+
+type LocationTab = "set" | "explore";
+
+/** Zoomed out further than this, cities are shown instead of their neighbourhoods. */
+const NEIGHBOURHOOD_MIN_ZOOM = 10;
+
+/**
+ * Turns the curated explore locations into map markers: cities while zoomed
+ * out, their neighbourhoods once zoomed in. A city without any neighbourhood
+ * stays visible at every zoom, so there's always something to tap.
+ */
+function toMapPlaces(locations: ExplorePlace[]): MapPlace[] {
+	const citiesWithNeighbourhoods = new Set(
+		locations.filter((location) => location.type !== "City" && location.parentId != null).map((location) => location.parentId),
+	);
+	return locations.map((location) => {
+		const isCity = location.type === "City";
+		return {
+			id: location.id,
+			lat: location.lat,
+			lon: location.lon,
+			label: location.name,
+			icon: isCity ? location.nameDecoration ?? "📍" : "🏳️‍🌈",
+			highlight: !isCity,
+			...(isCity
+				? citiesWithNeighbourhoods.has(location.id)
+					? { maxZoom: NEIGHBOURHOOD_MIN_ZOOM }
+					: {}
+				: { minZoom: NEIGHBOURHOOD_MIN_ZOOM }),
+		};
+	});
+}
+
+export function LocationOverlay({ onClose, isDesktop, ...props }: LocationOverlayProps) {
+	// Which of the two ways to pick a location is active: "set" changes the
+	// real geohash (visible to others, persisted). "explore" browses a
+	// different area via /v7/search's exploreGeoHash without touching it —
+	// see GridPage's exploreLocation state for why this stays out of
+	// preferences. Defaults to whichever is already in effect. Lives here so
+	// the whole sheet, not just its content, takes the explore accent.
+	const [activeTab, setActiveTab] = useState<LocationTab>(props.exploreLocation ? "explore" : "set");
+	return (
+		<BottomSheet
+			onClose={onClose}
+			isDesktop={isDesktop}
+			bg="bg-[color-mix(in_srgb,var(--surface)_92%,black_8%)]"
+			accentColor={activeTab === "explore" ? EXPLORE_COLOR : undefined}
+			{...mapSheetProps(isDesktop)}
+		>
+			<LocationSheetContent isDesktop={isDesktop} activeTab={activeTab} setActiveTab={setActiveTab} {...props} />
+		</BottomSheet>
+	);
+}
+
+function LocationSheetContent({
+	exploreLocation,
+	onSetExploreLocation,
+	isDesktop,
+	activeTab,
+	setActiveTab,
+}: Omit<LocationOverlayProps, "onClose"> & { activeTab: LocationTab; setActiveTab: (tab: LocationTab) => void }) {
+	const { t } = useTranslation();
+	const close = useBottomSheetClose();
+	const { setPreferences, geohash, locationName, useAutoLocation, autoFocusLocationSearch } = usePreferences();
+
+	const isExploreTab = activeTab === "explore";
+	const tabColor = isExploreTab ? EXPLORE_COLOR : "var(--accent)";
+	const tabContrast = isExploreTab ? "#fff" : "var(--accent-contrast)";
+
+	const [isDetectingLocation, setIsDetectingLocation] = useState(false);
+	const search = useLocationSearch();
+	const [mapPickerError, setMapPickerError] = useState<string | null>(null);
+	const [selectedLocation, setSelectedLocation] = useState<PinnedLocation | null>(null);
+	const [locationError, setLocationError] = useState<string | null>(null);
+	const [currentLocationError, setCurrentLocationError] = useState<string | null>(null);
+	const [isSaving, setIsSaving] = useState(false);
+	const [savedLocations, setSavedLocations] = useState<SavedLocation[]>([]);
+	const [isNamingLocation, setIsNamingLocation] = useState(false);
+	const [newLocationName, setNewLocationName] = useState("");
+
+	useEffect(() => {
+		void loadSavedLocations().then(setSavedLocations);
+	}, []);
+
+	// Curated cities/neighbourhoods on the map, plus — in the explore tab only —
+	// a heatmap of where people actually are, before picking a spot.
+	const [mapViewport, setMapViewport] = useState<MapViewport | null>(null);
+	const { data: exploreLocations } = useExploreLocations();
+	const { points: heatmapPoints } = useExploreHeatmap(mapViewport, isExploreTab);
+	const mapPlaces = useMemo(() => (exploreLocations ? toMapPlaces(exploreLocations) : undefined), [exploreLocations]);
+	const exploreLocationsById = useMemo(
+		() => new Map((exploreLocations ?? []).map((location) => [location.id, location])),
+		[exploreLocations],
+	);
+
+	// Home location + visiting mode are account-wide profile settings (not
+	// grid-browsing preferences like geohash above), but they're both about
+	// "where/how your profile shows up" so they live in this same sheet
+	// rather than the profile editor. Both save immediately, no separate
+	// "Save" step. Visiting mode is rarely changed, so it sits in its own
+	// sheet behind the header icon.
+	const { data: homeLocation } = useHomeLocation();
+	const updateHomeLocation = useUpdateHomeLocation();
+	const { data: visitingMode } = useVisitingMode();
+	const [isVisitingModeOpen, setIsVisitingModeOpen] = useState(false);
+	const VisitingModeIcon = VISITING_MODE_ICONS[visitingMode ?? "AUTO"];
+
+	const handleSetAsHome = async (lat: number, lon: number) => {
+		try {
+			await updateHomeLocation.mutateAsync({ lat, lon });
+			toast.success(t("browse_location.home_updated_toast"));
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : t("browse_location.home_update_failed"));
+		}
+	};
+
+	// Derived directly from geohash (not one-time state) so it can never go
+	// stale — geohash itself can change while this sheet is open (e.g. right
+	// after saving a pick, before the close animation has unmounted it).
+	const savedCenter = useMemo<[number, number] | undefined>(() => {
+		const center = geohash ? geohashCenter(geohash) : null;
+		return center ? [center.lat, center.lon] : undefined;
+	}, [geohash]);
+	const [gpsFallbackCenter, setGpsFallbackCenter] = useState<[number, number] | undefined>(undefined);
+	const initialCenter = savedCenter ?? gpsFallbackCenter;
+
+	// Keeps the pin on the active location of the current tab — the saved
+	// geohash for "set", the explore location (or the real location as a
+	// starting point) for "explore". Re-runs on tab switch and whenever the
+	// underlying location changes, not just once on mount.
+	useEffect(() => {
+		const source = isExploreTab
+			? exploreLocation ?? (geohash ? { geohash, label: locationName ?? t("browse_location.current_location_label") } : null)
+			: geohash
+				? { geohash, label: locationName ?? t("browse_location.current_location_label") }
+				: null;
+		if (!source) return;
+		const center = geohashCenter(source.geohash);
+		if (!center) return;
+		const isAuto = !isExploreTab && useAutoLocation;
+		setSelectedLocation((current) =>
+			current && current.lat === center.lat && current.lon === center.lon && !!current.isAuto === isAuto
+				? current
+				: { ...center, label: source.label, isAuto },
+		);
+	}, [isExploreTab, exploreLocation, geohash, locationName, useAutoLocation, t]);
+
+	// No saved location to center on yet (fresh user) — try the device's
+	// current position just to position the map sensibly. This only nudges
+	// where the map opens; it doesn't pick/select anything, so no
+	// permission-denied error needs surfacing.
+	useEffect(() => {
+		if (geohash) return;
+		void (async () => {
+			try {
+				const tauriGeo = await import("@tauri-apps/plugin-geolocation").catch(() => null);
+				if (tauriGeo) {
+					const perms = await tauriGeo.checkPermissions();
+					if (perms.location !== "granted") return;
+					const pos = await tauriGeo.getCurrentPosition({ enableHighAccuracy: false, timeout: 8000, maximumAge: 60000 });
+					setGpsFallbackCenter([pos.coords.latitude, pos.coords.longitude]);
+					return;
+				}
+				if (!("geolocation" in navigator)) return;
+				const pos = await new Promise<GeolocationPosition>((res, rej) =>
+					navigator.geolocation.getCurrentPosition(res, rej, { enableHighAccuracy: false, timeout: 8000, maximumAge: 60000 }),
+				);
+				setGpsFallbackCenter([pos.coords.latitude, pos.coords.longitude]);
+			} catch {
+				// no permission yet / unavailable — map just opens at the world view
+			}
+		})();
+	}, [geohash]);
+
+	useEffect(() => {
+		if (!autoFocusLocationSearch) return;
+		// Wait for the sheet's slide-in before focusing (and opening the keyboard).
+		const timer = setTimeout(() => search.inputRef.current?.focus(), 320);
+		return () => clearTimeout(timer);
+	}, [autoFocusLocationSearch]);
+
+	const saveAndClose = async (lat: number, lon: number, label: string, isAuto = false) => {
+		setIsSaving(true);
+		try {
+			if (!(await confirmAgeVerificationRegion(lat, lon, geohash))) return;
+			await setPreferences({ geohash: encodeGeohash(lat, lon), locationName: label, useAutoLocation: isAuto });
+			// Setting your real location while still "exploring" elsewhere would
+			// leave the grid showing a place you just moved away from — end
+			// explore whenever you actually commit a new real location.
+			if (exploreLocation) {
+				onSetExploreLocation(null);
+			}
+			close();
+		} catch {
+			setLocationError(t("browse_location.error_search_failed"));
+		} finally {
+			setIsSaving(false);
+		}
+	};
+
+	// Explore is local-only state (see GridPage), so unlike saveAndClose there's
+	// no request to await — it just updates the parent and closes.
+	const confirmExplore = (lat: number, lon: number, label: string) => {
+		onSetExploreLocation({ geohash: encodeGeohash(lat, lon), label });
+		close();
+	};
+
+	const stopExploring = () => {
+		onSetExploreLocation(null);
+		close();
+	};
+
+	// Resolves the geocoded place name for a GPS fix, so the header pill shows
+	// the same "Street Number, City, District" format as every other way of
+	// picking a location. Falls back to the generic text if the lookup fails.
+	const resolveGpsLabel = async (lat: number, lon: number): Promise<string> => {
+		const label = await reverseGeocodeGeohash(encodeGeohash(lat, lon)).catch(() => null);
+		return label ?? t("browse_location.current_location_label");
+	};
+
+	// Only moves the pin (flagged as auto) — confirming happens via the footer
+	// button, same as every other chip.
+	const handleUseCurrentLocation = async () => {
+		setIsDetectingLocation(true);
+		setCurrentLocationError(null);
+		try {
+			const { lat, lon } = await getCurrentLocation();
+			const label = await resolveGpsLabel(lat, lon);
+			setSelectedLocation({ lat, lon, label, isAuto: true });
+		} catch (e) {
+			appLog.error("Geolocation failed", e);
+			setCurrentLocationError(t(getLocationErrorMessageKey(e)));
+		} finally {
+			setIsDetectingLocation(false);
+		}
+	};
+
+	const isSearching = search.isActive;
+
+	const pinGeohash = selectedLocation ? encodeGeohash(selectedLocation.lat, selectedLocation.lon) : null;
+	const isPinManual = !selectedLocation?.isAuto;
+	const homeGeohash = homeLocation ? encodeGeohash(homeLocation.lat, homeLocation.lon) : null;
+	const pinnedSavedLocation = isPinManual ? savedLocations.find((saved) => saved.geohash === pinGeohash) : undefined;
+	// Home already has its own chip, so saving it again would only duplicate it.
+	const isPinOnHome = isPinManual && !!homeGeohash && pinGeohash === homeGeohash;
+
+	// Whether the pin already is the active location of this tab — nothing to
+	// confirm then, so the footer button stays disabled.
+	const isActiveLocationSelected = isExploreTab
+		? !!exploreLocation && pinGeohash === exploreLocation.geohash
+		: !!geohash && pinGeohash === geohash && !!selectedLocation?.isAuto === useAutoLocation;
+
+	const pinLocation = (lat: number, lon: number, label: string) => {
+		setSelectedLocation({ lat, lon, label, city: null });
+		setIsNamingLocation(false);
+	};
+
+	// Tapping a city/neighbourhood marker pins it under its own name
+	// ("Capitol Hill, Seattle") rather than a reverse-geocoded street address.
+	const handlePlaceClick = (place: MapPlace) => {
+		const location = exploreLocationsById.get(Number(place.id));
+		const parent = location?.parentId != null ? exploreLocationsById.get(location.parentId) : undefined;
+		const city = location?.type === "City" ? location.name : parent?.name ?? null;
+		setSelectedLocation({
+			lat: place.lat,
+			lon: place.lon,
+			label: parent ? `${place.label}, ${parent.name}` : place.label,
+			city,
+		});
+		setIsNamingLocation(false);
+	};
+
+	const handleMapPick = (lat: number, lon: number) => {
+		const fallbackLabel = t("browse_location.lat_lon_label", { lat: lat.toFixed(4), lon: lon.toFixed(4) });
+		pinLocation(lat, lon, t("browse_location.resolving_location"));
+		const geohashForPick = encodeGeohash(lat, lon);
+		void reverseGeocodeGeohash(geohashForPick).then((label) => {
+			setSelectedLocation((current) =>
+				current && current.lat === lat && current.lon === lon
+					? { ...current, label: label ?? fallbackLabel }
+					: current,
+			);
+		});
+		void reverseGeocodeCityForGeohash(geohashForPick).then((city) => {
+			setSelectedLocation((current) =>
+				current && current.lat === lat && current.lon === lon ? { ...current, city } : current,
+			);
+		});
+	};
+
+	const handleSelectSearchResult = (result: GeocodeResult, initialLabel: string) => {
+		const lat = Number(result.lat);
+		const lon = Number(result.lon);
+		// initialLabel is the result's address breakdown (addressdetails=1),
+		// formatted like everywhere else; the reverse-geocode call below still
+		// refines it in case that lookup resolves a more precise address.
+		const initialCity = result.address ? getCityFromAddress(result.address) : null;
+		setSelectedLocation({ lat, lon, label: initialLabel, city: initialCity });
+		setIsNamingLocation(false);
+		const geohashForResult = encodeGeohash(lat, lon);
+		void reverseGeocodeGeohash(geohashForResult).then((label) => {
+			if (!label) return;
+			setSelectedLocation((current) =>
+				current && current.lat === lat && current.lon === lon ? { ...current, label } : current,
+			);
+		});
+		if (!initialCity) {
+			void reverseGeocodeCityForGeohash(geohashForResult).then((city) => {
+				if (!city) return;
+				setSelectedLocation((current) =>
+					current && current.lat === lat && current.lon === lon ? { ...current, city } : current,
+				);
+			});
+		}
+	};
+
+	// Bookmark/trash button in the footer: removes the pinned spot if it's
+	// already saved, otherwise opens the naming field to save it.
+	const handleToggleBookmark = () => {
+		if (pinnedSavedLocation) {
+			void deleteSavedLocation(pinnedSavedLocation.id).then(setSavedLocations);
+			return;
+		}
+		setIsNamingLocation((v) => {
+			const next = !v;
+			if (next && !newLocationName.trim() && selectedLocation?.city) {
+				setNewLocationName(selectedLocation.city);
+			}
+			return next;
+		});
+	};
+
+	const handleSaveCurrentAsNamedLocation = () => {
+		const name = newLocationName.trim();
+		if (!name || !selectedLocation) return;
+		void addSavedLocation({
+			name,
+			geohash: encodeGeohash(selectedLocation.lat, selectedLocation.lon),
+			lat: selectedLocation.lat,
+			lon: selectedLocation.lon,
+		}).then(setSavedLocations);
+		// Saved locations apply under their name, so the pin takes it too.
+		setSelectedLocation((current) => (current ? { ...current, label: name, isAuto: false } : current));
+		setNewLocationName("");
+		setIsNamingLocation(false);
+	};
+
+	const handleConfirm = () => {
+		if (!selectedLocation) return;
+		if (isExploreTab) {
+			confirmExplore(selectedLocation.lat, selectedLocation.lon, selectedLocation.label);
+		} else {
+			void saveAndClose(selectedLocation.lat, selectedLocation.lon, selectedLocation.label, !!selectedLocation.isAuto);
+		}
+	};
+
+	return (
+		<>
+			{/* Header */}
+			<div className="mb-3 flex items-center justify-between gap-3">
+				<div className="min-w-0">
+					<h3 className="text-sm font-semibold text-[var(--text)]">{t("browse_location.title")}</h3>
+					{exploreLocation ? (
+						<p className="mt-0.5 flex items-center gap-1 text-xs" style={{ color: EXPLORE_COLOR }}>
+							<Search className="h-3 w-3 shrink-0" />
+							<span className="truncate">{t("browse_location.exploring_label", { label: exploreLocation.label })}</span>
+						</p>
+					) : locationName ? (
+						<p className="mt-0.5 flex items-center gap-1 text-xs text-[var(--text-muted)]">
+							{useAutoLocation
+								? <Navigation className="h-3 w-3 shrink-0 text-[var(--accent)]" />
+								: <MapPin className="h-3 w-3 shrink-0 text-[var(--accent)]" />}
+							<span className="truncate">{locationName}</span>
+						</p>
+					) : null}
+				</div>
+				<div className="flex shrink-0 items-center gap-2">
+					{!isExploreTab && (
+						<button
+							type="button"
+							onClick={() => setIsVisitingModeOpen(true)}
+							title={t("profile_editor.sections.visiting_mode.title")}
+							aria-label={t("profile_editor.sections.visiting_mode.title")}
+							className={SHEET_ICON_BUTTON_CLASS}
+						>
+							<VisitingModeIcon className="h-4 w-4" />
+						</button>
+					)}
+					<SheetCloseButton />
+				</div>
+			</div>
+
+			{/* Set vs. Explore: "set" changes your real, visible location;
+			    "explore" only changes what you browse — see confirmExplore.
+			    Explore gets its own color (EXPLORE_COLOR) everywhere — the
+			    sheet's accent is swapped for it, see LocationOverlay. */}
+			<div className="mb-3 shrink-0">
+				<SlidingTabs<LocationTab>
+					value={activeTab}
+					onChange={(tab) => {
+						setActiveTab(tab);
+						// Leaving the explore tab ends explore right away, not just
+						// once a new real location is confirmed — otherwise the grid
+						// would keep showing the explored area while this tab implies
+						// you're back to your real location.
+						if (tab === "set" && exploreLocation) {
+							onSetExploreLocation(null);
+						}
+					}}
+					tabs={[
+						{ value: "set", icon: <MapPin className="h-3.5 w-3.5" />, label: t("browse_location.tab_set") },
+						{ value: "explore", icon: <Search className="h-3.5 w-3.5" />, label: t("browse_location.tab_explore") },
+					]}
+				/>
+			</div>
+
+			{locationError && (
+				<div className="mb-3 flex shrink-0 items-center gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-500">
+					<X className="h-4 w-4 shrink-0" />
+					{locationError}
+				</div>
+			)}
+
+			<MapSheetLayout
+				search={
+					<MapSheetSearch
+						search={search}
+						onSelect={handleSelectSearchResult}
+						placeholder={t("browse_location.search_placeholder")}
+						focusColor={tabColor}
+					/>
+				}
+				map={
+					mapPickerError ? (
+						<p className="px-4 py-4 text-sm text-[var(--text-muted)]">{mapPickerError}</p>
+					) : (
+						<MapLocationPicker
+							selectedLocation={selectedLocation}
+							onPick={handleMapPick}
+							onError={setMapPickerError}
+							className="h-full w-full"
+							defaultZoom={11}
+							initialCenter={initialCenter}
+							accentColor={isExploreTab ? EXPLORE_COLOR : undefined}
+							heatmapPoints={isExploreTab ? heatmapPoints : undefined}
+							places={mapPlaces}
+							onPlaceClick={handlePlaceClick}
+							onViewportChange={setMapViewport}
+						/>
+					)
+				}
+				pinLabel={selectedLocation && !isSearching ? selectedLocation.label : undefined}
+				picks={isSearching ? undefined : (
+					<>
+						{/* Quick picks — same chip row as the chat's share-location sheet.
+						    Tapping one only moves the pin; the footer button confirms. */}
+						<MapSheetQuickPicks>
+							{isExploreTab && exploreLocation ? (
+								<LocationChip
+									icon={<X className="h-4 w-4" />}
+									title={t("browse_location.stop_explore")}
+									subtitle={exploreLocation.label}
+									isActive={false}
+									onClick={stopExploring}
+									accentColor={EXPLORE_COLOR}
+									accentContrast="#fff"
+								/>
+							) : null}
+							{!isExploreTab ? (
+								<LocationChip
+									icon={isDetectingLocation ? <Loader2 className="h-4 w-4 animate-spin" /> : <LocateFixedFilled className="h-4 w-4" />}
+									title={t("browse_location.current_location_label")}
+									subtitle={
+										isDetectingLocation
+											? t("browse_location.detecting_location")
+											: useAutoLocation && locationName
+												? locationName
+												: t("browse_location.mode_gps")
+									}
+									isActive={!!selectedLocation?.isAuto}
+									disabled={isDetectingLocation}
+									onClick={() => void handleUseCurrentLocation()}
+								/>
+							) : null}
+							{!isExploreTab && homeLocation ? (
+								<LocationChip
+									icon={<HomeFilled className="h-4 w-4" />}
+									title={t("browse_location.home_location_label")}
+									subtitle={homeLocation.name ?? null}
+									isActive={isPinOnHome}
+									onClick={() => pinLocation(homeLocation.lat, homeLocation.lon, homeLocation.name)}
+								/>
+							) : null}
+							{savedLocations.map((saved) => (
+								<SavedLocationChip
+									key={saved.id}
+									location={saved}
+									isActive={pinnedSavedLocation?.id === saved.id}
+									onClick={() => pinLocation(saved.lat, saved.lon, saved.name)}
+									accentColor={tabColor}
+									accentContrast={tabContrast}
+								/>
+							))}
+						</MapSheetQuickPicks>
+						{currentLocationError && !isExploreTab ? (
+							<p className={`${MAP_SHEET_HINT_CLASS} !text-red-400`}>{currentLocationError}</p>
+						) : savedLocations.length === 0 ? (
+							<p className={MAP_SHEET_HINT_CLASS}>
+								{t("browse_location.saved_hint", { defaultValue: "Tap the bookmark below to save the pinned spot for quick access." })}
+							</p>
+						) : null}
+
+						{isNamingLocation && (
+							<div className="mt-3 flex gap-2 px-4">
+								<input
+									type="text"
+									autoFocus
+									value={newLocationName}
+									onChange={(e) => setNewLocationName(e.target.value)}
+									onKeyDown={(e) => { if (e.key === "Enter") handleSaveCurrentAsNamedLocation(); }}
+									placeholder={t("browse_location.save_as_placeholder")}
+									style={{ "--tab-color": tabColor } as React.CSSProperties}
+									className="h-11 min-w-0 flex-1 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 text-sm text-[var(--text)] outline-none transition focus:border-[var(--tab-color)]"
+								/>
+								<button
+									type="button"
+									disabled={!newLocationName.trim()}
+									onClick={handleSaveCurrentAsNamedLocation}
+									style={{ backgroundColor: tabColor, color: tabContrast }}
+									className="shrink-0 rounded-xl px-4 text-sm font-bold transition hover:brightness-110 active:scale-[0.98] disabled:opacity-50"
+								>
+									{t("travel_plans.save")}
+								</button>
+							</div>
+						)}
+					</>
+				)}
+				footer={
+					<>
+						{!isExploreTab && (
+							<button
+								type="button"
+								onClick={() => selectedLocation && void handleSetAsHome(selectedLocation.lat, selectedLocation.lon)}
+								disabled={!selectedLocation || updateHomeLocation.isPending || isPinOnHome}
+								title={t("browse_location.set_as_home")}
+								aria-label={t("browse_location.set_as_home")}
+								className={MAP_SHEET_ICON_BUTTON_CLASS}
+							>
+								{updateHomeLocation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Home className="h-4 w-4" />}
+							</button>
+						)}
+						<button
+							type="button"
+							onClick={handleToggleBookmark}
+							disabled={!selectedLocation || (isPinOnHome && !pinnedSavedLocation)}
+							title={pinnedSavedLocation ? t("browse_location.delete_saved_location") : t("browse_location.save_as")}
+							aria-label={pinnedSavedLocation ? t("browse_location.delete_saved_location") : t("browse_location.save_as")}
+							style={isNamingLocation ? { color: tabColor } : undefined}
+							className={cn(MAP_SHEET_ICON_BUTTON_CLASS, pinnedSavedLocation && "hover:text-red-400")}
+						>
+							{pinnedSavedLocation ? <Trash2 className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
+						</button>
+						<button
+							type="button"
+							disabled={!selectedLocation || isActiveLocationSelected || isSaving}
+							onClick={handleConfirm}
+							style={{ backgroundColor: tabColor, color: tabContrast }}
+							className={sheetButtonClass()}
+						>
+							{isSaving ? (
+								<Loader2 className="h-4 w-4 animate-spin" />
+							) : (
+								<>
+									<Check className="h-4 w-4 shrink-0" />
+									<span className="truncate">
+										{isExploreTab ? t("browse_location.start_explore") : t("browse_location.use_selected_location")}
+									</span>
+								</>
+							)}
+						</button>
+					</>
+				}
+			/>
+
+			{/* Portaled out: this sheet's transformed panel would otherwise become
+			    the containing block for the nested sheet's position: fixed. */}
+			{isVisitingModeOpen &&
+				createPortal(
+					<VisitingModeSheet isDesktop={isDesktop} onClose={() => setIsVisitingModeOpen(false)} />,
+					document.body,
+				)}
+		</>
+	);
+}
+
+const VISITING_MODE_ICONS: Record<VisitingMode, typeof MapPin> = { AUTO: Compass, OFF: Home, ON: MapPin };
+
+// Profile mode: Auto/Home/Visiting. Only applies to your real location, not
+// the explore tab's local-only browsing. Saves immediately on tap.
+function VisitingModeSheet({ isDesktop, onClose }: { isDesktop: boolean; onClose: () => void }) {
+	const { t } = useTranslation();
+	const { data: visitingMode, isLoading, isError } = useVisitingMode();
+	const updateVisitingModeMutation = useUpdateVisitingMode();
+
+	const handleChange = async (mode: VisitingMode) => {
+		try {
+			await updateVisitingModeMutation.mutateAsync(mode);
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : t("api.errors.save_visiting_mode"));
+			throw error;
+		}
+	};
+
+	return (
+		<SelectSheet
+			title={t("profile_editor.sections.visiting_mode.title")}
+			value={visitingMode}
+			options={VISITING_MODES.map((mode) => {
+				const modeKey = getVisitingModeTranslationKey(mode);
+				return {
+					value: mode,
+					label: t(`profile_editor.sections.visiting_mode.options.${modeKey}.label`),
+					description: t(`profile_editor.sections.visiting_mode.options.${modeKey}.description`),
+					icon: VISITING_MODE_ICONS[mode],
+				};
+			})}
+			onSelect={handleChange}
+			onClose={onClose}
+			isDesktop={isDesktop}
+			zIndex="z-[70]"
+			disabled={isLoading || isError}
+			footer={
+				isLoading || isError ? (
+					<p className={`pb-2 text-xs leading-relaxed ${isError ? "text-red-400" : "text-[var(--text-muted)]"}`}>
+						{isError ? t("profile_editor.sections.visiting_mode.error") : t("profile_editor.sections.visiting_mode.loading")}
+					</p>
+				) : null
+			}
+		/>
+	);
+}

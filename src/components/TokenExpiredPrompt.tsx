@@ -1,0 +1,66 @@
+import { type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
+import { KeyRound } from "lucide-react";
+import { useAuth } from "../contexts/useAuth";
+import { fullscreenPrimaryButtonClass } from "./FullscreenPrompt";
+
+export function TokenExpiredPromptView({ onSignOut }: { onSignOut: () => void }) {
+	const { t } = useTranslation();
+
+	return (
+		<div className="fs-card-outer fs-card-overlay z-[110] no-touch-callout">
+			<div className="fs-card-inner fs-card-lg flex flex-col">
+				<div
+					className="flex flex-1 flex-col items-center justify-center px-8 text-center"
+					style={{
+						paddingTop: "max(48px, var(--safe-area-top))",
+						paddingBottom: "max(24px, var(--safe-area-bottom))",
+					}}
+				>
+					<div className="mb-6 flex h-20 w-20 items-center justify-center rounded-2xl bg-[var(--surface-2)] border border-[var(--border)]">
+						<KeyRound className="h-9 w-9 text-[var(--accent)]" />
+					</div>
+					<h1 className="text-2xl font-bold text-[var(--text)]">{t("token_expired.title")}</h1>
+					<p className="mt-2 max-w-xs text-sm leading-relaxed text-[var(--text-muted)]">
+						{t("token_expired.description")}
+					</p>
+				</div>
+
+				<div
+					className="flex h-44 shrink-0 flex-col justify-end gap-2 px-6"
+					style={{ paddingBottom: "max(28px, calc(var(--safe-area-bottom) + 12px))" }}
+				>
+					<button
+						type="button"
+						onClick={onSignOut}
+						className={fullscreenPrimaryButtonClass}
+					>
+						{t("token_expired.sign_out")}
+					</button>
+				</div>
+			</div>
+		</div>
+	);
+}
+
+/**
+ * Gates the routed app behind a full-page "your session expired" prompt —
+ * same slot in the tree as OutdatedVersionGate/TestReminderGate in App.tsx,
+ * not a floating overlay. Shown once the session can no longer be refreshed:
+ * a JWT login whose token ran out (AppError::TokenExpired, see useApi.ts's
+ * asAppError + AuthContext's fg:token-expired listener), or any session the
+ * server rejected on refresh (the backend's auth:session-error event).
+ */
+export function TokenExpiredGate({ children }: { children: ReactNode }) {
+	const { tokenExpired, logout } = useAuth();
+
+	if (!tokenExpired) {
+		return <>{children}</>;
+	}
+
+	return (
+		<div className="app-shell">
+			<TokenExpiredPromptView onSignOut={() => void logout()} />
+		</div>
+	);
+}

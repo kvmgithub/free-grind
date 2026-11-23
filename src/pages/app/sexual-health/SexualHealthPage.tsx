@@ -1,0 +1,192 @@
+import { useEffect, useRef, useState } from "react";
+import { HeaderBackButton } from "../../../components/HeaderBackButton";
+import { Calendar, Check, Clock, FlaskConical, Pill, Settings, TriangleAlert } from "lucide-react";
+import { useTranslation } from "react-i18next";
+import { useLocation, useNavigate } from "react-router-dom";
+import { FilterPill } from "../../../components/ui/FilterPill";
+import { PageHeaderBackground } from "../../../components/ui/PageHeaderBackground";
+import { FeedScrollContainer } from "../../../components/ui/FeedScrollContainer";
+import { useSwipeTabs } from "../../../components/ui/sliding-tabs";
+import { SexualHealthHistoryTab } from "./SexualHealthHistoryTab";
+import { SexualHealthDosesTab } from "./SexualHealthDosesTab";
+import { SexualHealthAppointmentsTab } from "./SexualHealthAppointmentsTab";
+import { SexualHealthTestsTab } from "./SexualHealthTestsTab";
+import { SexualHealthPrepSettingsSheet } from "./SexualHealthPrepSettingsSheet";
+import { loadPrepDoses } from "../../../services/prepDoses";
+import { computeProtectionStatus } from "../../../services/prepTracking";
+import { usePrepScheme } from "./usePrepScheme";
+
+type SexualHealthTab = "doses" | "history" | "appointments" | "tests";
+
+const TAB_ORDER: readonly SexualHealthTab[] = ["doses", "history", "appointments", "tests"];
+
+export function SexualHealthPage() {
+	const { t } = useTranslation();
+	const navigate = useNavigate();
+	const location = useLocation();
+	// Reached either from Settings → Safety or from the chat inbox header's
+	// quick link — the back button should return wherever you actually came
+	// from instead of always landing on Settings.
+	const cameFromInbox = (location.state as { from?: string } | null)?.from === "inbox";
+	const [activeTab, setActiveTab] = useState<SexualHealthTab>("history");
+	// Each tab portals its status line (protection status, last test, …)
+	// into this slot, shown as the header's subtitle under the title.
+	const [headerSlotEl, setHeaderSlotEl] = useState<HTMLDivElement | null>(null);
+	// The floating "add/log" button also portals in, but into a slot
+	// rendered as a sibling of (not nested inside) FeedScrollContainer —
+	// see SexualHealthFab.tsx for why nesting it there breaks its
+	// positioning, the same way RightNowPage keeps its own FAB outside its
+	// FeedScrollContainer.
+	const [fabSlotEl, setFabSlotEl] = useState<HTMLDivElement | null>(null);
+
+	// Drives the small status badge on the "PrEP" tab pill — loaded here
+	// (not just inside SexualHealthDosesTab) since the pill is visible from
+	// every tab, not only while Doses is active.
+	const [prepScheme, setPrepScheme] = usePrepScheme();
+	const [prepBadge, setPrepBadge] = useState<"protected" | "attention" | null>(null);
+	const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+	// Bumped by SexualHealthDosesTab right after a dose is logged/deleted so
+	// the pill badge updates immediately instead of waiting for a tab switch
+	// (which is the only other thing that re-triggers the effect below).
+	const [prepRefreshKey, setPrepRefreshKey] = useState(0);
+
+	// Swiping the content left/right pages through the tabs.
+	const tabSwipe = useSwipeTabs(TAB_ORDER, activeTab, setActiveTab);
+	// Keeps the active pill visible in the (horizontally scrolling) tab row.
+	const tabRowRef = useRef<HTMLDivElement>(null);
+	useEffect(() => {
+		tabRowRef.current
+			?.querySelector<HTMLElement>(`[data-tab="${activeTab}"] > *`)
+			?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+	}, [activeTab]);
+
+	useEffect(() => {
+		let cancelled = false;
+		void loadPrepDoses().then((doses) => {
+			if (cancelled) return;
+			const status = computeProtectionStatus(doses, prepScheme);
+			if (status.state === "protected") {
+				setPrepBadge("protected");
+			} else if (status.state === "building" || status.state === "unprotected") {
+				setPrepBadge("attention");
+			} else {
+				setPrepBadge(null);
+			}
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, [prepScheme, activeTab, prepRefreshKey]);
+
+	const tabs: { value: SexualHealthTab; icon: React.ReactNode; label: string }[] = [
+		{ value: "doses", icon: <Pill className="h-3.5 w-3.5" />, label: t("sexualHealth.tabs.doses", { defaultValue: "PrEP" }) },
+		{ value: "history", icon: <Clock className="h-3.5 w-3.5" />, label: t("sexualHealth.tabs.history", { defaultValue: "History" }) },
+		{
+			value: "appointments",
+			icon: <Calendar className="h-3.5 w-3.5" />,
+			label: t("sexualHealth.tabs.appointments", { defaultValue: "Appointments" }),
+		},
+		{ value: "tests", icon: <FlaskConical className="h-3.5 w-3.5" />, label: t("sexualHealth.tabs.tests", { defaultValue: "Tests" }) },
+	];
+
+	return (
+		<section className="app-screen flex h-dvh w-full flex-col overflow-x-hidden !px-0 !pb-0" style={{ paddingTop: "calc(var(--safe-area-top) + 10px)" }}>
+			<header className="relative z-20 flex shrink-0 flex-col pb-3 pointer-events-none">
+				<PageHeaderBackground color="var(--accent)" />
+				<div className="pointer-events-auto mx-auto grid w-full max-w-4xl gap-3 px-4 sm:px-5 rail:max-w-none rail:px-[var(--app-px)]">
+					<div className="flex items-center justify-between gap-2">
+						<div className="flex min-w-0 items-center gap-2">
+							<HeaderBackButton
+								onClick={() => navigate(cameFromInbox ? "/chat" : "/settings")}
+								label={cameFromInbox ? t("nav.inbox") : t("settings.title")}
+							/>
+							<div className="min-w-0">
+								<h1 className="truncate text-lg font-semibold">{t("sexualHealth.title", { defaultValue: "Sexual Health" })}</h1>
+								{/* One line tall even while a tab is still loading, so the header doesn't jump. */}
+								<div ref={setHeaderSlotEl} className="app-subtitle min-h-[1.5em] truncate" />
+							</div>
+						</div>
+						<button
+							type="button"
+							onClick={() => setIsSettingsOpen(true)}
+							className="header-icon-btn shrink-0 rounded-xl p-2 text-[var(--text-muted)] transition hover:text-[var(--text)]"
+							aria-label={t("sexualHealth.info.settings_button", { defaultValue: "PrEP settings" })}
+						>
+							<Settings className="h-5 w-5" />
+						</button>
+					</div>
+
+					<div ref={tabRowRef} className="-mx-[var(--app-px)] overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+						<div className="flex min-w-max items-center gap-2 px-[var(--app-px)]">
+							{tabs.map((tab) => (
+								<span key={tab.value} data-tab={tab.value} className="contents">
+									<FilterPill
+										icon={tab.icon}
+										label={tab.label}
+										active={activeTab === tab.value}
+										onClick={() => setActiveTab(tab.value)}
+										badge={
+											tab.value === "doses" && prepBadge ? (
+												<span
+													className={`ms-0.5 flex h-4 min-w-[16px] items-center justify-center rounded-full px-1 ${
+														prepBadge === "protected" ? "bg-emerald-500 text-white" : "bg-amber-500 text-white"
+													}`}
+												>
+													{prepBadge === "protected" ? (
+														<Check className="h-2.5 w-2.5 stroke-[3.5]" />
+													) : (
+														<TriangleAlert className="h-2.5 w-2.5 stroke-[3]" />
+													)}
+												</span>
+											) : undefined
+										}
+									/>
+								</span>
+							))}
+						</div>
+					</div>
+				</div>
+			</header>
+
+			<FeedScrollContainer {...tabSwipe}>
+				<div className="mx-auto w-full max-w-4xl rail:max-w-none pb-[calc(var(--safe-area-bottom)+120px)] rail:pb-[calc(var(--page-bottom)+4rem)]">
+					{activeTab === "doses" && (
+						<SexualHealthDosesTab
+							headerSlotEl={headerSlotEl}
+							fabSlotEl={fabSlotEl}
+							scheme={prepScheme}
+							onDosesChanged={() => setPrepRefreshKey((key) => key + 1)}
+						/>
+					)}
+					{activeTab === "history" && <SexualHealthHistoryTab headerSlotEl={headerSlotEl} fabSlotEl={fabSlotEl} />}
+					{activeTab === "appointments" && (
+						<SexualHealthAppointmentsTab headerSlotEl={headerSlotEl} fabSlotEl={fabSlotEl} />
+					)}
+					{activeTab === "tests" && <SexualHealthTestsTab headerSlotEl={headerSlotEl} fabSlotEl={fabSlotEl} />}
+				</div>
+			</FeedScrollContainer>
+
+			{/* Desktop: darken the bottom edge behind the action pill, like a bottom
+			    sheet's scrim, so the pill stands out from the feed scrolling under it. */}
+			<div
+				aria-hidden="true"
+				className="pointer-events-none fixed bottom-0 start-[var(--nav-rail-width,0px)] end-0 z-[55] hidden h-36 rail:block"
+				style={{ background: "linear-gradient(to top, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0.4) 45%, transparent 100%)" }}
+			/>
+			<div className="fixed start-[var(--nav-rail-width,0px)] end-0 bottom-[calc(var(--nav-height,var(--safe-area-bottom))+0.75rem)] rail:bottom-[var(--page-bottom)] z-[60] pointer-events-none">
+				<div className="relative mx-auto h-full w-full max-w-4xl rail:max-w-none px-4 md:px-10">
+					{/* Desktop: the FAB renders as a pill centered at the bottom (see RightNowPage). */}
+					<div ref={setFabSlotEl} className="absolute bottom-0 right-[16%] translate-x-1/2 rail:right-1/2 pointer-events-auto empty:pointer-events-none" />
+				</div>
+			</div>
+
+			{isSettingsOpen && (
+				<SexualHealthPrepSettingsSheet
+					scheme={prepScheme}
+					onSchemeChange={setPrepScheme}
+					onClose={() => setIsSettingsOpen(false)}
+				/>
+			)}
+		</section>
+	);
+}

@@ -103,7 +103,32 @@ pub(crate) async fn check_update<R: Runtime>(
         return Ok(None);
     }
 
-    if manifest.sequence <= ctx.current_sequence {
+    // A bundle built from an older app release than the installed binary is
+    // always older than the binary's embedded frontend. The sequence gate
+    // can't catch this while the embedded assets run (current sequence 0) or
+    // across a channel switch, so compare the release part of the version
+    // (`<release>-ota.<channel>.<seq>`) against the binary directly.
+    if let Some(release) = ota_release_version(&manifest.version) {
+        if release < current_bin {
+            log::info!(
+                "[hotswap] Seq {} ({}) is older than binary {}. Skipping.",
+                manifest.sequence,
+                manifest.version,
+                ctx.binary_version
+            );
+            emit_lifecycle(app, "check-complete", None, None, None);
+            return Ok(None);
+        }
+    }
+
+    // Sequence numbers are only comparable within the same channel — a
+    // channel with less frequent releases can have a lower "latest"
+    // sequence than another channel the device has already applied an
+    // update from. If the requested channel differs from the channel the
+    // active version came from, skip the sequence gate entirely so
+    // switching channels (e.g. dev -> main) doesn't get stuck forever.
+    let same_channel = ctx.channel == ctx.current_channel;
+    if same_channel && manifest.sequence <= ctx.current_sequence {
         log::info!(
             "[hotswap] Manifest sequence {} is not newer than current {}",
             manifest.sequence,
@@ -131,8 +156,20 @@ pub(crate) async fn check_update<R: Runtime>(
     Ok(Some(manifest))
 }
 
+/// App release a bundle version was built from: `1.0.0-beta.48` for
+/// `1.0.0-beta.48-ota.development.1729500000`. `None` if it isn't semver.
+fn ota_release_version(version: &str) -> Option<Version> {
+    let release = version.split_once("-ota.").map_or(version, |(r, _)| r);
+    Version::parse(release).ok()
+}
+
 /// Options for the download operation, bundled to avoid excessive arguments.
 pub(crate) struct DownloadOptions<'a> {
+    /// The channel this download was requested under. Persisted into the
+    /// version's metadata so future checks can detect channel switches.
+    pub channel: Option<String>,
+    /// Running binary version, persisted as `installed_with_binary`.
+    pub binary_version: &'a str,
     pub pubkey: &'a str,
     pub base_dir: &'a Path,
     pub max_bundle_size: u64,
@@ -246,6 +283,8 @@ pub(crate) async fn download_and_extract<R: Runtime>(
             min_binary_version: manifest.min_binary_version.clone(),
             confirmed: false,
             unconfirmed_launch_count: 0,
+            channel: opts.channel.clone(),
+            installed_with_binary: Some(opts.binary_version.to_string()),
         },
     )?;
 
@@ -649,7 +688,11 @@ pub(crate) fn check_compatibility(
         return None;
     }
 
-    if cache_policy.should_discard(&current, &meta, None) {
+    let installed_with = meta
+        .installed_with_binary
+        .as_deref()
+        .and_then(|v| Version::parse(v).ok());
+    if cache_policy.should_discard(&current, &meta, installed_with.as_ref()) {
         log::info!(
             "[hotswap] Binary cache policy discards cached v{} (binary={}, min={}).",
             meta.version,
@@ -864,6 +907,8 @@ mod tests {
                 min_binary_version: min_bin.to_string(),
                 confirmed,
                 unconfirmed_launch_count: 0,
+                channel: None,
+                installed_with_binary: None,
             },
         )
         .unwrap();
@@ -959,6 +1004,8 @@ mod tests {
                 min_binary_version: "1.0.0".into(),
                 confirmed: false,
                 unconfirmed_launch_count: 0,
+                channel: None,
+                installed_with_binary: None,
             },
         )
         .unwrap();
@@ -1171,6 +1218,7 @@ mod tests {
     ) -> crate::resolver::CheckContext {
         crate::resolver::CheckContext {
             current_sequence,
+            current_channel: None,
             binary_version: binary_version.to_string(),
             platform: "macos",
             arch: "aarch64",
@@ -1224,6 +1272,74 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_check_update_channel_switch_bypasses_sequence_gate() {
+        // Active version came from "dev" at a high sequence. Switching to
+        // "main", whose latest sequence is lower, must still be offered —
+        // sequence numbers aren't comparable across channels.
+        let resolver = MockResolver::returning_manifest(make_manifest(5, "1.0.0"));
+        let mut ctx = make_check_ctx("1.0.0", 100);
+        ctx.current_channel = Some("dev".into());
+        ctx.channel = Some("main".into());
+        let result = check_update(&resolver, &ctx, None::<&tauri::AppHandle<tauri::Wry>>)
+            .await
+            .unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().sequence, 5);
+    }
+
+    #[tokio::test]
+    async fn test_check_update_same_channel_still_gated() {
+        // Re-checking the same channel must still respect the sequence gate
+        // so an already-applied (or older) manifest isn't re-offered.
+        let resolver = MockResolver::returning_manifest(make_manifest(5, "1.0.0"));
+        let mut ctx = make_check_ctx("1.0.0", 100);
+        ctx.current_channel = Some("main".into());
+        ctx.channel = Some("main".into());
+        let result = check_update(&resolver, &ctx, None::<&tauri::AppHandle<tauri::Wry>>)
+            .await
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_check_update_skips_release_older_than_binary() {
+        // Embedded frontend of beta.50 must not be "updated" to a beta.48 bundle.
+        let mut m = make_manifest(1_762_800_000, "1.0.0-beta.0");
+        m.version = "1.0.0-beta.48-ota.development.1762800000".into();
+        let resolver = MockResolver::returning_manifest(m);
+        let mut ctx = make_check_ctx("1.0.0-beta.50", 0);
+        ctx.channel = Some("development".into());
+        let result = check_update(&resolver, &ctx, None::<&tauri::AppHandle<tauri::Wry>>)
+            .await
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_check_update_offers_same_or_newer_release() {
+        for release in ["1.0.0-beta.50", "1.0.0-beta.51"] {
+            let mut m = make_manifest(1_762_800_000, "1.0.0-beta.0");
+            m.version = format!("{release}-ota.development.1762800000");
+            let resolver = MockResolver::returning_manifest(m);
+            let ctx = make_check_ctx("1.0.0-beta.50", 0);
+            let result = check_update(&resolver, &ctx, None::<&tauri::AppHandle<tauri::Wry>>)
+                .await
+                .unwrap();
+            assert!(result.is_some(), "{release} should be offered");
+        }
+    }
+
+    #[test]
+    fn test_ota_release_version() {
+        assert_eq!(
+            ota_release_version("1.0.0-beta.48-ota.development.1729500000"),
+            Some(Version::parse("1.0.0-beta.48").unwrap())
+        );
+        assert_eq!(ota_release_version("1.2.0"), Some(Version::parse("1.2.0").unwrap()));
+        assert_eq!(ota_release_version("garbage"), None);
     }
 
     #[tokio::test]

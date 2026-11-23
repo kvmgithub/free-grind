@@ -1,19 +1,119 @@
-import { Grid as GridIcon, Droplet, Flame, MessageCircle } from "lucide-react";
+import { Flame, MessageCircle, Check, Loader2 } from "lucide-react";
+import {
+	LayoutGridFilled as GridIcon,
+	PumpkinFilled,
+	BatFilled,
+	BleedingHeartFilled,
+	TombstoneFilled,
+	BaubleGridFilled,
+	CandleFilled,
+	MistletoeFilled,
+	SnowflakeChatFilled,
+	RingFilled,
+	WineGlassesFilled,
+	HeartArrowFilled,
+	LoveLetterFilled,
+} from "./icons/FilledIcons";
+import { ProfilePlaceholderIcon } from "./icons/ProfilePlaceholderIcon";
+import toast from "react-hot-toast";
+import { RightNowIcon } from "./icons/RightNowIcon";
 import { useNavigate, useLocation } from "react-router-dom";
 import { Tabs, TabsList, TabsTrigger } from "../components/ui/tabs";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useLayoutEffect, useRef } from "react";
+import { cn } from "../utils/cn";
 import { useApiFunctions } from "../hooks/useApiFunctions";
 import { useTranslation } from "react-i18next";
 import { useAuth } from "../contexts/useAuth";
+import { useExploreMode } from "../contexts/ExploreModeContext";
+import { useIsRightNowLive } from "../hooks/useIsRightNowLive";
+import { useActiveSeason, type SeasonalOverlayId } from "../hooks/useSeasonalOverlay";
 import {
 	getInterestLastSeen,
 	INTEREST_SEEN_EVENT,
+	markInterestSeen,
 	getInboxLastSeen,
 	INBOX_SEEN_EVENT,
+	markInboxSeen,
 } from "../services/seenStore";
-import { CHAT_REALTIME_EVENT, TAP_RECEIVED_EVENT } from "./ChatRealtimeBridge";
+import { CHAT_REALTIME_EVENT } from "./ChatRealtimeBridge";
 import { messageSchema, type Message } from "../types/messages";
 import type { RealtimeEnvelope } from "../types/chat-realtime";
+import { useInterestData } from "../hooks/queries/useInterestQueries";
+import { isAndroid, isIos } from "../services/saveMedia";
+import { haptic } from "../utils/haptics";
+import { Avatar } from "./ui/avatar";
+import { useMyOwnProfile } from "../hooks/queries/useProfileQueries";
+import { getProfilePhotoHash } from "../pages/app/profile-editor/profileEditorUtils";
+import { useDesktopBreakpoint } from "../hooks/useDesktopBreakpoint";
+import { useSystemNavInset } from "../hooks/useSystemNavInset";
+import { getThumbImageUrl } from "../utils/media";
+import { getSavedAccountProfile, getSavedAccountThumbUrl, useSavedAccountProfiles } from "../services/savedAccountProfiles";
+import { looksLikeMessageUpdate } from "../utils/messageUpdates";
+import { RIGHT_NOW_REQUESTS_CHANGED_EVENT, hasUnseenRightNowRequests, markRightNowRequestsSeen } from "../services/rightNowRequestsSignal";
+
+// Nav icons and tab names (`labels`: the nav.<season>.* keys) swapped in during
+// a seasonal theme (only one is ever active, see useActiveSeason).
+type SeasonalNav = {
+	icons: Record<"browse" | "rightNow" | "interest" | "inbox", typeof GridIcon>;
+	labels: string;
+};
+const HALLOWEEN_NAV: SeasonalNav = {
+	icons: { browse: PumpkinFilled, rightNow: BatFilled, interest: BleedingHeartFilled, inbox: TombstoneFilled },
+	labels: "nav.halloween",
+};
+const CHRISTMAS_NAV: SeasonalNav = {
+	icons: { browse: BaubleGridFilled, rightNow: CandleFilled, interest: MistletoeFilled, inbox: SnowflakeChatFilled },
+	labels: "nav.christmas",
+};
+const VALENTINES_NAV: SeasonalNav = {
+	icons: { browse: RingFilled, rightNow: WineGlassesFilled, interest: HeartArrowFilled, inbox: LoveLetterFilled },
+	labels: "nav.valentines",
+};
+const SEASONAL_NAV: Record<SeasonalOverlayId, SeasonalNav> = { halloween: HALLOWEEN_NAV, christmas: CHRISTMAS_NAV, valentines: VALENTINES_NAV };
+
+// Bottom-nav style options; only offered (and only honoured) in the mobile app.
+export const NAV_SHOW_LABELS_KEY = "fg-nav-show-labels";
+// Bar style: unset/"false" = full width, "true" = floating card, "fade" =
+// floating without a card, on a dark fade instead.
+export const NAV_FLOATING_KEY = "fg-nav-floating";
+export const NAV_STYLE_EVENT = "fg-nav-style-changed";
+
+export type NavBarStyle = "solid" | "floating" | "fade";
+
+export const readNavBarStyle = (): NavBarStyle => {
+	const value = window.localStorage.getItem(NAV_FLOATING_KEY);
+	return value === "fade" ? "fade" : value === "true" ? "floating" : "solid";
+};
+
+const readNavStyle = () => ({
+	showLabels: window.localStorage.getItem(NAV_SHOW_LABELS_KEY) === "true",
+	barStyle: readNavBarStyle(),
+});
+
+/**
+ * The bottom nav's effective look, kept in sync with the customization page.
+ * `fullWidth`: edge-to-edge bar (mobile app default) instead of the floating
+ * card desktop/web always use — overlays placed above the nav (e.g. the Right
+ * Now map card) need less bottom offset then. `transparent`: floating tabs
+ * without a card, kept readable by a dark fade from the screen edge.
+ */
+export function useNavStyle(): { fullWidth: boolean; hideLabels: boolean; transparent: boolean } {
+	const [isMobilePlatform] = useState(() => isAndroid() || isIos());
+	const [navStyle, setNavStyle] = useState(readNavStyle);
+	useEffect(() => {
+		const onChange = () => setNavStyle(readNavStyle());
+		window.addEventListener(NAV_STYLE_EVENT, onChange);
+		return () => window.removeEventListener(NAV_STYLE_EVENT, onChange);
+	}, []);
+	return {
+		// Mobile app hides labels by default; desktop/web always shows them.
+		hideLabels: isMobilePlatform && !navStyle.showLabels,
+		// Full-width edge-to-edge bar in the mobile app, unless the user opted
+		// into the floating card that desktop/web always use.
+		fullWidth: isMobilePlatform && navStyle.barStyle === "solid",
+		transparent: isMobilePlatform && navStyle.barStyle === "fade",
+	};
+}
 
 /**
  * Extracts and validates chat messages from a variety of possible realtime envelope formats.
@@ -61,40 +161,168 @@ export function NavBar() {
 	const navigate = useNavigate();
 	const location = useLocation();
 	const apiFunctions = useApiFunctions();
-	const { userId } = useAuth();
+	const { userId, savedAccounts, switchAccount } = useAuth();
+	useSavedAccountProfiles();
+	const { data: myProfile } = useMyOwnProfile();
+	const { data: interestData } = useInterestData();
+	const { isExploreActive } = useExploreMode();
+	// A live (public) Right Now session takes the grid tab's color over everything, explore included.
+	const isRightNowLive = useIsRightNowLive();
+	const activeSeason = useActiveSeason();
+	const seasonalNav = activeSeason ? SEASONAL_NAV[activeSeason] : null;
+	const seasonalIcons = seasonalNav?.icons;
+	const navLabel = (key: string, fallback: string) =>
+		seasonalNav ? t(`${seasonalNav.labels}.${key}`, { defaultValue: fallback }) : fallback;
+	const { hideLabels, fullWidth, transparent } = useNavStyle();
+	// Desktop: vertical rail on the left instead of the bottom bar.
+	const rail = useDesktopBreakpoint();
+	// Floating card (not full-width, not the cardless fade): styled like the
+	// native iOS 26 / Material 3 bars, with a selection pill concentric to the capsule.
+	const capsule = !rail && !fullWidth && !transparent;
+
+	const pathRef = useRef(location.pathname);
+	useEffect(() => {
+		pathRef.current = location.pathname;
+	}, [location.pathname]);
+
+	// Tracks which conversations are muted so the realtime handler can ignore
+	// their messages without waiting for the next poll.
+	const mutedConversationIdsRef = useRef<Set<string>>(new Set());
+
 	const [activeTab, setActiveTab] = useState("browse");
-	const [unreadCount, setUnreadCount] = useState(0);
+	// On Right Now (its tab, or the grid while a session is live) every tab hovers in Right Now's color.
+	const isRightNowPage = activeTab === "right-now" || (activeTab === "browse" && isRightNowLive);
+	const setUnreadCount = useState(0)[1];
 	const [interestUnseen, setInterestUnseen] = useState(false);
 	const [inboxUnseen, setInboxUnseen] = useState(false);
+	const [rightNowUnseen, setRightNowUnseen] = useState(() => hasUnseenRightNowRequests(userId));
+
+	// Read preferences directly from localStorage (defaulting to true if not set)
+	const [showRightNow] = useState(() => window.localStorage.getItem("fg-show-right-now") !== "false");
+	const [showInterest] = useState(() => window.localStorage.getItem("fg-show-interest") !== "false");
+
+	const profileImageHash = getProfilePhotoHash(myProfile);
+	const profilePhotoUrl = profileImageHash ? getThumbImageUrl(profileImageHash, "75x75") : null;
+
+	// Quick account switcher: opened by long-pressing the settings tab when more
+	// than one account is saved. A plain tap still just opens settings.
+	const [isAccountSwitcherOpen, setIsAccountSwitcherOpen] = useState(false);
+	const [switchingProfileId, setSwitchingProfileId] = useState<string | null>(null);
+	const accountSwitcherRef = useRef<HTMLDivElement>(null);
+	const hasAccountSwitcher = savedAccounts.length > 1;
+	const settingsLongPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	// Set once the long press has opened the switcher, so the trailing
+	// mousedown/click of that same press doesn't also navigate to settings.
+	const settingsLongPressFiredRef = useRef(false);
+
+	const cancelSettingsLongPress = () => {
+		if (settingsLongPressTimerRef.current) {
+			clearTimeout(settingsLongPressTimerRef.current);
+			settingsLongPressTimerRef.current = null;
+		}
+	};
+
+	useEffect(() => cancelSettingsLongPress, []);
+
+	useEffect(() => {
+		if (!isAccountSwitcherOpen) return;
+		const handler = (e: MouseEvent | TouchEvent) => {
+			const target = e.target as Element | null;
+			if (accountSwitcherRef.current?.contains(target)) return;
+			// The settings tab handles its own presses (long press reopens, tap navigates).
+			if (target?.closest?.("[data-nav-account-tab]")) return;
+			setIsAccountSwitcherOpen(false);
+		};
+		document.addEventListener("mousedown", handler);
+		document.addEventListener("touchstart", handler);
+		return () => {
+			document.removeEventListener("mousedown", handler);
+			document.removeEventListener("touchstart", handler);
+		};
+	}, [isAccountSwitcherOpen]);
+
+	useEffect(() => {
+		setIsAccountSwitcherOpen(false);
+	}, [location.pathname]);
+
+	// Rail: the switcher sits just right of the profile tab's pill (avatar +
+	// label, highlighted while open), bottom edges level, measured from the tab
+	// itself rather than offset from the rail's edges.
+	const [railSwitcherPos, setRailSwitcherPos] = useState<{ left: number; bottom: number } | null>(null);
+	useLayoutEffect(() => {
+		if (!rail || !isAccountSwitcherOpen) {
+			setRailSwitcherPos(null);
+			return;
+		}
+		const measure = () => {
+			const tab = navRef.current?.querySelector("[data-nav-account-tab]");
+			if (!tab) return;
+			const rect = tab.getBoundingClientRect();
+			setRailSwitcherPos({ left: rect.right + 8, bottom: window.innerHeight - rect.bottom });
+		};
+		measure();
+		window.addEventListener("resize", measure);
+		return () => window.removeEventListener("resize", measure);
+	}, [rail, isAccountSwitcherOpen]);
+
+	const handleSwitchAccount = async (profileId: string) => {
+		setSwitchingProfileId(profileId);
+		try {
+			await switchAccount(profileId);
+			setIsAccountSwitcherOpen(false);
+			navigate("/");
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : "Failed to switch account.");
+		} finally {
+			setSwitchingProfileId(null);
+		}
+	};
+
 	const navItems = [
 		{
 			value: "browse",
-			label: t("nav.browse"),
-			icon: GridIcon,
+			label: navLabel("browse", t("nav.browse")),
+			icon: seasonalIcons?.browse ?? GridIcon,
 			path: "/",
+			visible: true, // Mandatory
 		},
 		{
 			value: "right-now",
-			label: t("nav.right_now"),
-			icon: Droplet,
+			label: navLabel("right_now", t("nav.right_now")),
+			icon: seasonalIcons?.rightNow ?? RightNowIcon,
 			path: "/right-now",
+			visible: showRightNow, // Toggleable
 		},
 		{
 			value: "interest",
-			label: t("nav.interest"),
-			icon: Flame,
+			label: navLabel("interest", t("nav.interest")),
+			icon: seasonalIcons?.interest ?? Flame,
 			path: "/interest",
+			visible: showInterest, // Toggleable
 		},
 		{
 			value: "inbox",
-			label: t("nav.inbox"),
-			icon: MessageCircle,
+			label: navLabel("inbox", t("nav.inbox")),
+			icon: seasonalIcons?.inbox ?? MessageCircle,
 			path: "/chat",
+			visible: true, // Mandatory
 		},
-	];
+		{
+			value: "settings",
+			label: t("nav.settings", { defaultValue: "Settings" }),
+			icon: null,
+			path: "/settings",
+			visible: true, // Mandatory
+		},
+	].filter(item => item.visible);
 
 	// Update active tab based on current path
 	useEffect(() => {
+		// Shared albums lives under /settings but is opened from the inbox.
+		if (location.pathname === "/settings/shared-albums") {
+			setActiveTab("inbox");
+			return;
+		}
 		const currentItem = navItems.find(
 			(item) =>
 				(item.path === "/" &&
@@ -106,14 +334,14 @@ export function NavBar() {
 		if (currentItem) {
 			setActiveTab(currentItem.value);
 		}
-	}, [location.pathname]);
+	}, [location.pathname, navItems]);
 
 	useEffect(() => {
 		let cancelled = false;
-		const isAtInbox = location.pathname.startsWith("/chat");
 
 		const refreshInboxState = async () => {
 			if (document.hidden) return;
+			const isAtInbox = pathRef.current.startsWith("/chat") || pathRef.current === "/settings/shared-albums";
 			try {
 				// Fetch the latest inbox summary to sync unread counts and global "seen" state
 				const response = await apiFunctions.listConversations({
@@ -122,8 +350,14 @@ export function NavBar() {
 
 				if (cancelled) return;
 
+				mutedConversationIdsRef.current = new Set(
+					response.entries
+						.filter((entry) => entry.data.muted)
+						.map((entry) => entry.data.conversationId),
+				);
+
 				const totalUnread = response.entries.reduce(
-					(sum, entry) => sum + (entry.data.unreadCount || 0),
+					(sum, entry) => sum + (entry.data.muted ? 0 : entry.data.unreadCount || 0),
 					0,
 				);
 				setUnreadCount(totalUnread);
@@ -134,21 +368,37 @@ export function NavBar() {
 					0,
 				);
 
-				if (lastSeen === 0) {
+				if (lastSeen === 0 && newest > 0) {
 					// Initialize "last seen" on first run to avoid showing stale dots
-					if (newest > 0) {
-						window.localStorage.setItem("fg-inbox-last-seen", String(newest));
-					}
-					setInboxUnseen(false);
-				} else {
-					// If we are currently on the inbox page, ensure our "last seen"
-					// timestamp is at least as high as the newest message we just fetched.
-					// This prevents the dot from reappearing immediately when switching away.
-					if (isAtInbox && newest > lastSeen) {
-						markInboxSeen(newest);
-					}
-					setInboxUnseen(!isAtInbox && newest > lastSeen);
+					window.localStorage.setItem("fg-inbox-last-seen", String(newest));
 				}
+
+				// Keeps the "last seen" bookmark current while the user is looking
+				// at the inbox, so the dot doesn't reappear immediately when they
+				// switch away — unrelated to whether anything is actually unread.
+				if (isAtInbox && newest > lastSeen) {
+					markInboxSeen(newest);
+				}
+
+				// A conversation only lights up the dot if it's both genuinely
+				// unread (server-reported unreadCount, the same signal the inbox
+				// rows themselves trust — not just "some activity happened") *and*
+				// that activity is newer than the last time the inbox list was
+				// actually viewed. The unreadCount check keeps the user's own
+				// outgoing messages, an automation auto-reply sent while this page
+				// isn't mounted, or a message already read on another device from
+				// falsely lighting it up. The lastSeen check keeps an unread
+				// conversation the user already looked at (but didn't open) from
+				// re-lighting the dot on every later remount/poll — visiting the
+				// inbox list once is enough to acknowledge it. Muted conversations
+				// never contribute at all, regardless of unread state.
+				const hasUnseenUnread = response.entries.some(
+					(entry) =>
+						!entry.data.muted &&
+						(entry.data.unreadCount ?? 0) > 0 &&
+						(entry.data.lastActivityTimestamp ?? 0) > lastSeen,
+				);
+				setInboxUnseen(!isAtInbox && hasUnseenUnread);
 			} catch {
 				if (!cancelled) {
 					setUnreadCount(0);
@@ -162,6 +412,7 @@ export function NavBar() {
 		const intervalId = window.setInterval(refreshInboxState, 60_000);
 
 		const handleRealtime = (event: Event) => {
+			const isAtInbox = pathRef.current.startsWith("/chat") || pathRef.current === "/settings/shared-albums";
 			// If we are already looking at the inbox, suppress the dot immediately
 			if (isAtInbox) {
 				setInboxUnseen(false);
@@ -174,9 +425,15 @@ export function NavBar() {
 			const messages = extractMessages(envelope);
 			if (messages.length > 0) {
 				const lastSeen = getInboxLastSeen();
-				// Check for messages from other users
+				// Check for messages from other users, excluding muted conversations
 				const fromOthers = messages.filter(
-					(m) => userId != null && Number(m.senderId) !== Number(userId)
+					(m) =>
+						userId != null &&
+						Number(m.senderId) !== Number(userId) &&
+						// Group membership lines (joined, left, …) aren't unread messages.
+						m.type !== "GroupEvent" &&
+						!looksLikeMessageUpdate(m, userId) &&
+						!mutedConversationIdsRef.current.has(m.conversationId)
 				);
 
 				if (fromOthers.length > 0) {
@@ -209,149 +466,490 @@ export function NavBar() {
 			window.removeEventListener(INBOX_SEEN_EVENT, onSeen as EventListener);
 			window.removeEventListener("visibilitychange", onVisibilityChange);
 		};
-	}, [apiFunctions, location.pathname, userId]);
+	}, [apiFunctions, userId]);
+
+	// Clear the inbox dot immediately when navigating to the chat section or shared albums
+	useEffect(() => {
+		if (location.pathname.startsWith("/chat") || location.pathname === "/settings/shared-albums") {
+			setInboxUnseen(false);
+		}
+	}, [location.pathname]);
 
 	// Track whether the Interest tab has anything new since the user last
-	// looked. Polls taps + views and listens for live tap events.
+	// looked. Listens for live update events via the useInterestData hook.
 	useEffect(() => {
-		let cancelled = false;
-		const isAtInterest = location.pathname.startsWith("/interest");
+		const refreshInterestUnseen = () => {
+			if (!interestData) return;
+			const isAtInterest = pathRef.current === "/interest";
+			const lastSeen = getInterestLastSeen();
 
-		const refreshInterestUnseen = async () => {
-			if (document.hidden) return;
-			try {
-				const [tapsResponse, viewsResponse] = await Promise.all([
-					apiFunctions.getTaps(),
-					apiFunctions.getViews(),
-				]);
-				const lastSeen = getInterestLastSeen();
-				const newest = (() => {
-					const tapsRaw = (tapsResponse as { profiles?: unknown[] }).profiles;
-					const viewsRaw = (viewsResponse as { profiles?: unknown[] }).profiles;
-					let max = 0;
-					for (const list of [tapsRaw, viewsRaw]) {
-						if (!Array.isArray(list)) continue;
-						for (const entry of list) {
-							if (!entry || typeof entry !== "object") continue;
-							const ts = (entry as { timestamp?: unknown }).timestamp;
-							const value =
-								typeof ts === "number"
-									? ts
-									: typeof ts === "string"
-										? Number(ts)
-										: 0;
-							if (Number.isFinite(value) && value > max) max = value;
-						}
-					}
-					return max;
-				})();
+			const newest = Math.max(
+				...(interestData.taps.map(t => t.timestamp || 0)),
+				...(interestData.views.map(v => v.timestamp || 0)),
+				0
+			);
 
-				if (cancelled) return;
-
-				// On first run (no stored seen timestamp), treat current state as
-				// already seen so we don't show a stale dot.
-				if (lastSeen === 0) {
-					if (newest > 0) {
-						window.localStorage.setItem(
-							"fg-interest-last-seen",
-							String(newest),
-						);
-					}
-					setInterestUnseen(false);
-					return;
-				}
-
-				// If we are currently on the interest page, ensure our "last seen"
-				// timestamp is at least as high as the newest item we just fetched.
-				if (isAtInterest && newest > lastSeen) {
+			// On first run (no stored seen timestamp), treat current state as
+			// already seen so we don't show a stale dot.
+			if (lastSeen === 0) {
+				if (newest > 0) {
 					markInterestSeen(newest);
 				}
-
-				setInterestUnseen(!isAtInterest && newest > lastSeen);
-			} catch {
-				if (!cancelled) setInterestUnseen(false);
+				setInterestUnseen(false);
+				return;
 			}
+
+			// If we are currently on the interest page, ensure our "last seen"
+			// timestamp is at least as high as the newest item.
+			if (isAtInterest && newest > lastSeen) {
+				markInterestSeen(newest);
+			}
+
+			setInterestUnseen(!isAtInterest && newest > lastSeen);
 		};
 
-		void refreshInterestUnseen();
-		const intervalId = window.setInterval(() => {
-			void refreshInterestUnseen();
-		}, 60_000);
+		refreshInterestUnseen();
 
-		const onTap = () => {
-			if (!isAtInterest) {
-				setInterestUnseen(true);
-			}
-		};
 		const onSeen = () => setInterestUnseen(false);
-		const onVisibilityChange = () => {
-			if (!document.hidden) {
-				void refreshInterestUnseen();
-			}
-		};
-
-		window.addEventListener(TAP_RECEIVED_EVENT, onTap as EventListener);
 		window.addEventListener(INTEREST_SEEN_EVENT, onSeen as EventListener);
-		window.addEventListener("visibilitychange", onVisibilityChange);
 
 		return () => {
-			cancelled = true;
-			window.clearInterval(intervalId);
-			window.removeEventListener(TAP_RECEIVED_EVENT, onTap as EventListener);
-			window.removeEventListener(
-				INTEREST_SEEN_EVENT,
-				onSeen as EventListener,
-			);
-			window.removeEventListener("visibilitychange", onVisibilityChange);
+			window.removeEventListener(INTEREST_SEEN_EVENT, onSeen as EventListener);
 		};
-	}, [apiFunctions, location.pathname]);
+	}, [interestData]);
+
+	// New Right Now requests (rightnow.v1.request): dot until the page is opened.
+	useEffect(() => {
+		setRightNowUnseen(hasUnseenRightNowRequests(userId));
+		const onChanged = (event: Event) => setRightNowUnseen((event as CustomEvent<{ unseen: boolean }>).detail.unseen);
+		window.addEventListener(RIGHT_NOW_REQUESTS_CHANGED_EVENT, onChanged);
+		return () => window.removeEventListener(RIGHT_NOW_REQUESTS_CHANGED_EVENT, onChanged);
+	}, [userId]);
+
+	useEffect(() => {
+		if (userId != null && location.pathname.startsWith("/right-now")) markRightNowRequestsSeen(userId);
+	}, [location.pathname, userId]);
+
+	// Clear the interest dot immediately when navigating to the interest section
+	useEffect(() => {
+		if (location.pathname === "/interest") {
+			setInterestUnseen(false);
+		}
+	}, [location.pathname]);
 
 	const handleTabChange = (value: string) => {
 		setActiveTab(value);
 		const item = navItems.find((i) => i.value === value);
-		if (item) {
+		// Radix fires onValueChange from both mousedown and focus, and
+		// depending on render timing a single tap can hit both — pushing the
+		// same tab twice, so the first system back appeared to do nothing.
+		// BrowserRouter pushes synchronously, so the second call sees the
+		// already-updated pathname and skips.
+		if (item && window.location.pathname !== item.path) {
 			navigate(item.path);
 		}
 	};
 
+	// Publish the bar's rendered height (safe-area padding included) as
+	// --nav-height, so floating UI (FABs, map cards) can sit right above it
+	// regardless of full-width/floating style or hidden labels. The desktop
+	// rail takes no bottom space; it flags the root instead (data-nav="rail"),
+	// which sets --nav-rail-width for ProtectedLayout's left offset.
+	const navRef = useRef<HTMLElement>(null);
+	useLayoutEffect(() => {
+		const nav = navRef.current;
+		if (!nav) return;
+		const root = document.documentElement;
+		if (rail) {
+			root.style.setProperty("--nav-height", "0px");
+			root.dataset.nav = "rail";
+			return () => {
+				root.style.removeProperty("--nav-height");
+				delete root.dataset.nav;
+			};
+		}
+		const publish = () => root.style.setProperty("--nav-height", `${nav.offsetHeight}px`);
+		publish();
+		const observer = "ResizeObserver" in window ? new ResizeObserver(publish) : null;
+		observer?.observe(nav);
+		return () => {
+			observer?.disconnect();
+			root.style.removeProperty("--nav-height");
+		};
+	}, [rail]);
+
+	// Floating bar: keep the same gap below it as on its sides, like iOS, and
+	// let it overlap the gesture-handle / home-indicator area. Only a tall
+	// inset (Android 3-button navigation) is kept clear, since the bar would
+	// cover the system buttons there.
+	const systemNavInset = useSystemNavInset();
+
+	// Determine the grid column class safely based on exactly how many tabs remain
+	const gridColsClass = 
+		navItems.length === 2 ? "grid-cols-2" : 
+		navItems.length === 3 ? "grid-cols-3" : 
+		navItems.length === 4 ? "grid-cols-4" :
+		"grid-cols-5";
+	const activeTabIndex = navItems.findIndex((item) => item.value === activeTab);
+
 	return (
-		<nav className="fixed inset-x-0 bottom-0 z-50 px-3 pb-[calc(env(safe-area-inset-bottom,0px)+10px)] md:px-4 md:pb-[calc(env(safe-area-inset-bottom,0px)+14px)]">
+		<nav
+			ref={navRef}
+			className={cn(
+				rail
+					? // No fill or border: the tabs sit on the page background like the
+						// page headers, so the header glow runs behind them and only the
+						// content is shown as cards. Top padding = the page headers' own
+						// (--header-top), so the first tab lines up with the page title;
+						// bottom padding = the pages' --page-bottom, so the profile tab ends
+						// level with the page content.
+						"fixed inset-y-0 start-0 w-[var(--nav-rail-width)] pt-[var(--header-top)] pb-[var(--page-bottom)]"
+					: "fixed inset-x-0 bottom-0",
+				// While the account switcher is open, lift the bar (and the switcher
+				// inside it) above the pages' floating action buttons (z-[60]).
+				isAccountSwitcherOpen ? "z-[65]" : "z-50",
+				!rail && !fullWidth && "px-3 pb-[calc(var(--nav-system-inset)+var(--nav-bottom-gap,0.75rem))] md:px-4 md:pb-[calc(var(--nav-system-inset)+var(--nav-bottom-gap,1rem))]",
+			)}
+			style={
+				{
+					"--nav-system-inset": `${systemNavInset}px`,
+					// 3-button navigation: the system bar is transparent, so sit right on top of
+					// its buttons with no gap instead of the usual 12px.
+					...(systemNavInset > 0 && { "--nav-bottom-gap": "0px" }),
+				} as React.CSSProperties
+			}
+		>
+			{/* Floating styles: a dark fade rising from the screen edge (like the
+			    profile footer actions) sets the bar off from the content. Strong for
+			    the transparent style, where it alone keeps the icons readable; lighter
+			    behind the card. It reaches above the bar without adding to its height
+			    (--nav-height). */}
+			{!rail && !fullWidth && (
+				<div
+					aria-hidden
+					className={cn("pointer-events-none absolute inset-x-0 bottom-0", transparent ? "-top-24" : "-top-12")}
+					style={{
+						background: transparent
+							? "linear-gradient(to top, rgba(0,0,0,1) 0%, rgba(0,0,0,0.95) 45%, rgba(0,0,0,0.7) 72%, transparent 100%)"
+							: "linear-gradient(to top, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0.5) 40%, rgba(0,0,0,0.2) 70%, transparent 100%)",
+					}}
+				/>
+			)}
+			{/* Mobile app: full-width bar that extends under the system navigation
+			    bar (edge-to-edge), with the safe-area inset as inner padding.
+			    Floating style: rounded capsule (transparent style: without the card).
+			    Desktop: left rail. */}
 			<div
-				className="mx-auto w-full max-w-4xl rounded-2xl border border-[var(--border)] p-1.5"
-				style={{
-					backgroundColor: "rgba(22, 29, 39, 0.9)",
-					background: "color-mix(in srgb, var(--surface) 90%, transparent)",
-					backdropFilter: "blur(16px)",
-				}}
+				className={cn(
+					"relative",
+					rail
+						? "h-full"
+						: fullWidth
+							? cn(
+									"w-full border-t border-[var(--border)] pt-1.5",
+									// 3-button navigation: sit right on the system buttons, no gap.
+									systemNavInset > 0 ? "pb-[var(--safe-area-bottom)]" : "pb-[calc(var(--safe-area-bottom)+0.375rem)]",
+								)
+							: transparent
+								? // Cardless: extra side padding keeps the outer tabs off the curve.
+									"mx-auto w-full max-w-4xl rounded-full px-3 py-1.5"
+								: // Capsule: tight inset so the active tab's pill follows the bar's curve. No outline
+									// on Android, like Material 3 bars (surface + shadow only).
+									cn(
+										"mx-auto w-full max-w-4xl rounded-full p-1",
+										isAndroid()
+											? // M3 level-3 elevation: key + ambient shadow.
+												"shadow-[0_4px_10px_rgba(0,0,0,0.55),0_12px_36px_rgba(0,0,0,0.5)]"
+											: "border border-[var(--border)] shadow-[0_8px_28px_rgba(0,0,0,0.35)]",
+									),
+				)}
+				style={
+					rail || transparent
+						? undefined
+						: {
+								backgroundColor: "rgba(22, 29, 39, 0.8)",
+								// Android capsule: lighter tonal surface (surface-2), since in dark
+								// themes M3 shows elevation mostly by tone; shadows barely read on black.
+								// Tinted with the page's tab color like Material You's surfaceContainer.
+								background:
+									capsule && isAndroid()
+										? `color-mix(in srgb, color-mix(in srgb, var(--surface-2) 94%, ${
+												isRightNowPage ? "var(--right-now)" : activeTab === "browse" && isExploreActive ? "var(--explore)" : "var(--accent)"
+											}) 92%, transparent)`
+										: "color-mix(in srgb, var(--surface) 80%, transparent)",
+								backdropFilter: "blur(24px) saturate(180%)",
+								WebkitBackdropFilter: "blur(24px) saturate(180%)",
+							}
+				}
 			>
-				<Tabs value={activeTab} onValueChange={handleTabChange}>
-					<TabsList className="grid h-16 w-full grid-cols-4 bg-transparent p-0 md:h-[4.1rem]">
+				<Tabs
+					value={activeTab}
+					onValueChange={handleTabChange}
+					orientation={rail ? "vertical" : "horizontal"}
+					// Keep the tabs at their previous centered width; only the
+					// background spans the full screen on mobile.
+					className={cn(rail ? "h-full" : fullWidth && "mx-auto w-full max-w-4xl px-[calc(0.75rem+1px+0.375rem)]")}
+				>
+					<TabsList
+						className={cn(
+							rail
+								? "flex h-full w-full flex-col items-stretch justify-start gap-1 bg-transparent px-2 py-0"
+								: cn(
+										"grid w-full bg-transparent p-0",
+										gridColsClass,
+										// Mobile app without labels: keep icon size, shrink the bar instead.
+										hideLabels ? "h-12" : capsule ? "h-[3.625rem]" : "h-16 md:h-[4.1rem]",
+									),
+							capsule && "relative",
+						)}
+					>
+						{/* Capsule: one shared selection pill that slides to the active tab.
+						    The columns are equal, so translateX(index × 100%) of a one-column-wide
+						    pill lands on the tab. A single element with a px radius and a permanent
+						    compositor layer (will-change): webviews could drop the radius of an
+						    opacity child while the layer was promoted mid-slide, showing a rectangle. */}
+						{capsule && activeTabIndex >= 0 && (
+							<div
+								aria-hidden
+								className={cn(
+									"pointer-events-none absolute inset-y-0 start-0",
+									"transition-[transform,color] duration-[340ms] ease-[cubic-bezier(0.3,1.25,0.55,1)] motion-reduce:transition-none",
+									activeTab === "right-now" || (activeTab === "browse" && isRightNowLive)
+										? "text-[var(--right-now)]"
+										: activeTab === "browse" && isExploreActive
+											? "text-[var(--explore)]"
+											: "text-[var(--accent)]",
+								)}
+								style={{
+									width: `${100 / navItems.length}%`,
+									transform: `translateX(${activeTabIndex * 100}%)`,
+									willChange: "transform",
+									borderRadius: "9999px",
+									background: "color-mix(in srgb, currentColor 14%, transparent)",
+								}}
+							/>
+						)}
 						{navItems.map((item) => {
 							const Icon = item.icon;
+							const isSwitcherTab = item.value === "settings" && hasAccountSwitcher;
 							return (
 								<TabsTrigger
 									key={item.value}
 									value={item.value}
-									className="flex h-full flex-col items-center justify-center gap-1 rounded-xl text-[var(--text-muted)] transition-colors duration-150 hover:text-[var(--text)] focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface)] data-[state=active]:bg-[var(--accent)] data-[state=active]:text-[var(--accent-contrast)] md:gap-1.5"
+									data-nav-account-tab={isSwitcherTab ? "" : undefined}
+									aria-expanded={isSwitcherTab ? isAccountSwitcherOpen : undefined}
+									// Radix already switches the tab on mousedown, so by onClick
+									// activeTab equals this item; pointerdown still sees the old tab.
+									onPointerDown={(e) => {
+										if (e.button === 0 && item.value !== activeTab) haptic(10);
+										// Touch/pen: long press opens the switcher. Mouse uses right-click instead.
+										if (!isSwitcherTab || e.pointerType === "mouse") return;
+										settingsLongPressFiredRef.current = false;
+										cancelSettingsLongPress();
+										settingsLongPressTimerRef.current = setTimeout(() => {
+											settingsLongPressTimerRef.current = null;
+											settingsLongPressFiredRef.current = true;
+											haptic(30);
+											setIsAccountSwitcherOpen(true);
+										}, 450);
+									}}
+									onPointerUp={isSwitcherTab ? cancelSettingsLongPress : undefined}
+									onPointerLeave={isSwitcherTab ? cancelSettingsLongPress : undefined}
+									onPointerCancel={isSwitcherTab ? cancelSettingsLongPress : undefined}
+									onContextMenu={
+										isSwitcherTab
+											? (e) => {
+													// Suppress the system/browser menu; on desktop right-click opens the switcher.
+													e.preventDefault();
+													if (e.nativeEvent instanceof PointerEvent ? e.nativeEvent.pointerType === "mouse" : e.button === 2) {
+														setIsAccountSwitcherOpen(true);
+													}
+												}
+											: undefined
+									}
+									onMouseDown={(e) => {
+										// Radix activates tabs on mousedown, i.e. before a touch long press
+										// is detected. Default-preventing makes Radix skip it; onClick (on
+										// release) navigates instead, unless the press was a long press.
+										if (isSwitcherTab) e.preventDefault();
+									}}
+									onFocus={(e) => {
+										// Radix also activates on focus (automatic mode), which on touch
+										// happens at press time too; navigation is left to onClick.
+										if (isSwitcherTab) e.preventDefault();
+									}}
+									onClick={() => {
+										if (isSwitcherTab && settingsLongPressFiredRef.current) {
+											settingsLongPressFiredRef.current = false;
+											return;
+										}
+										if (isSwitcherTab) setIsAccountSwitcherOpen(false);
+										if (item.value === "browse" && activeTab === "browse") {
+											window.dispatchEvent(new CustomEvent("browse-scroll-top"));
+										}
+										setActiveTab(item.value);
+										navigate(item.path, { replace: true });
+									}}
+									className={cn(
+										isSwitcherTab && "select-none [-webkit-touch-callout:none]",
+										"flex h-full flex-col items-center justify-center gap-1 rounded-xl transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface)] md:gap-1.5",
+										// No filled pill (full-width and floating alike), highlight via text color only.
+										"data-[state=active]:bg-transparent data-[state=active]:shadow-none",
+										rail
+											? // Rail: stacked icon + label, tinted pill for the active tab; the
+												// profile tab sits at the bottom like in desktop messengers.
+												cn(
+													"h-auto w-full flex-none px-1 py-2.5 text-[var(--text-muted)] hover-fill hover:text-[var(--text)]",
+													"data-[state=active]:bg-[color-mix(in_srgb,currentColor_12%,transparent)]",
+													item.value === "settings" && "mt-auto",
+												)
+											: transparent
+												? // On the dark fade: light icons with a shadow, in either theme.
+													"text-white/90 drop-shadow-[0_1px_1.5px_rgba(0,0,0,1)] drop-shadow-[0_0_0.8px_rgba(0,0,0,1)] hover:text-white"
+												: "text-[var(--text-muted)] hover:text-[var(--text)]",
+										// Capsule: press shrink like native tab bars; the active pill is drawn
+										// once behind all tabs (above) so it can slide. Positioned to stay above it.
+										capsule &&
+											"relative min-w-0 gap-0.5 rounded-full px-0.5 transition-[color,transform] active:scale-[0.94] md:gap-0.5",
+										item.value === "right-now" || (item.value === "browse" && isRightNowLive)
+											? "focus-visible:ring-[var(--right-now)] data-[state=active]:text-[var(--right-now)]"
+											: item.value === "browse" && isExploreActive
+												? "focus-visible:ring-[var(--explore)] data-[state=active]:text-[var(--explore)]"
+												: "focus-visible:ring-[var(--accent)] data-[state=active]:text-[var(--accent)]",
+										isRightNowPage || item.value === "right-now" || (item.value === "browse" && isRightNowLive)
+											? "[--hover-tint:var(--right-now)]"
+											: item.value === "browse" && isExploreActive && "[--hover-tint:var(--explore)]",
+									)}
 								>
-									<div className="relative">
-										<Icon className="h-5 w-5 md:h-[1.2rem] md:w-[1.2rem]" />
+									{/* Fixed icon-sized slot so the slightly larger avatar overflows evenly
+									    instead of pushing its label below the other tabs' labels. */}
+									<div className={cn("relative flex items-center justify-center", capsule ? "h-6 w-6" : "h-5 w-5 md:h-[1.2rem] md:w-[1.2rem]")}>
+										{Icon ? (
+											<Icon className={cn("fill-current", capsule ? "h-6 w-6" : "h-5 w-5 md:h-[1.2rem] md:w-[1.2rem]")} />
+										) : !profilePhotoUrl ? (
+											// No profile photo: a user icon that takes the tab's (active) color like the other icons.
+											<ProfilePlaceholderIcon className={capsule ? "h-6 w-6" : "h-5 w-5 md:h-[1.2rem] md:w-[1.2rem]"} />
+										) : (
+											<Avatar
+												src={profilePhotoUrl}
+												alt={t("browse_page.your_profile_photo")}
+												className={cn(
+													"shrink-0 border-0 transition-colors",
+													capsule ? "h-[1.625rem] w-[1.625rem] ring-[1.5px]" : "h-6 w-6 ring-2 md:h-[1.35rem] md:w-[1.35rem]",
+													// Capsule: the active tab's pill already marks it, so the ring only
+													// shows while the switcher is open from another tab.
+													(capsule ? activeTab === "settings" || !isAccountSwitcherOpen : activeTab !== "settings" && !isAccountSwitcherOpen)
+														? "ring-transparent"
+														: "ring-[var(--accent)]",
+												)}
+											/>
+										)}
 										{(item.value === "inbox" && inboxUnseen) ||
-										(item.value === "interest" && interestUnseen) ? (
-											<span className="absolute -right-1 -top-1 flex h-2 w-2">
-												<span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--accent)] opacity-75"></span>
-												<span className="relative inline-block h-2 w-2 rounded-full bg-[var(--accent)] ring-1 ring-[var(--surface)]"></span>
+										(item.value === "interest" && interestUnseen) ||
+										(item.value === "right-now" && rightNowUnseen) ? (
+											<span className="absolute -end-1 -top-1 flex h-2 w-2">
+												<span
+													className={cn(
+														"absolute inline-flex h-full w-full animate-ping rounded-full opacity-75",
+														isRightNowPage
+															? "bg-[var(--right-now)]"
+															: activeTab === "browse" && isExploreActive
+																? "bg-[var(--explore)]"
+																: "bg-[var(--accent)]",
+													)}
+												></span>
+												<span
+													className={cn(
+														"relative inline-block h-2 w-2 rounded-full ring-1 ring-[var(--surface)]",
+														isRightNowPage
+															? "bg-[var(--right-now)]"
+															: activeTab === "browse" && isExploreActive
+																? "bg-[var(--explore)]"
+																: "bg-[var(--accent)]",
+													)}
+												></span>
 											</span>
 										) : null}
 									</div>
-									<span className="text-xs md:text-[0.8rem]">
-										{item.label}
-									</span>
+									{hideLabels && !rail ? (
+										<span className="sr-only">{item.label}</span>
+									) : (
+										<span
+											className={
+												rail
+													? "w-full whitespace-normal break-words text-center text-[0.7rem] leading-tight"
+													: capsule
+														? "max-w-full truncate text-[0.6875rem] font-semibold leading-tight tracking-[-0.01em]"
+														: "text-xs md:text-[0.8rem]"
+											}
+										>
+											{item.label}
+										</span>
+									)}
 								</TabsTrigger>
 							);
 						})}
 					</TabsList>
 				</Tabs>
+
+				{isAccountSwitcherOpen && (!rail || railSwitcherPos) && (
+					<div
+						ref={accountSwitcherRef}
+						className={cn(
+							"z-50 w-max min-w-[14rem] max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-lg menu-surface p-3 animate-in fade-in zoom-in-95 duration-150",
+							// Rail: right of the rail, level with the avatar (railSwitcherPos).
+							rail
+								? "fixed slide-in-from-left-2"
+								: cn("absolute bottom-full mb-2 slide-in-from-bottom-2", fullWidth ? "end-3" : "end-0"),
+						)}
+						style={rail && railSwitcherPos ? { left: railSwitcherPos.left, bottom: railSwitcherPos.bottom } : undefined}
+					>
+						<div className="flex flex-col gap-1">
+							{savedAccounts.map((account) => {
+								const isActive = userId != null && String(userId) === account.profileId;
+								const isSwitching = switchingProfileId === account.profileId;
+								const savedProfile = getSavedAccountProfile(account.profileId);
+								return (
+									<button
+										key={account.profileId}
+										type="button"
+										onClick={() => void handleSwitchAccount(account.profileId)}
+										disabled={isActive || isSwitching}
+										className="flex min-w-0 items-center gap-2.5 rounded-sm px-1.5 py-1.5 text-start transition-colors hover-fill disabled:cursor-default"
+									>
+										<div className="relative h-10 w-10 shrink-0">
+											<Avatar
+												src={getSavedAccountThumbUrl(savedProfile)}
+												alt=""
+												className="h-full w-full rounded-full border-0"
+											/>
+											{isSwitching && (
+												<div className="absolute inset-0 flex items-center justify-center rounded-full bg-[var(--surface)]/80">
+													<Loader2 className="h-4 w-4 animate-spin text-[var(--accent)]" />
+												</div>
+											)}
+											{isActive && (
+												<div className="absolute -bottom-0.5 -end-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-[var(--accent)] text-white ring-2 ring-[var(--surface)]">
+													<Check className="h-2.5 w-2.5" strokeWidth={3} />
+												</div>
+											)}
+										</div>
+										<div className="min-w-0 flex-1">
+											<p className="truncate text-sm font-semibold leading-snug text-[var(--text)]">
+												{savedProfile.displayName || t("common.unknown_display_name")}
+											</p>
+											{account.email && (
+												<p className="truncate text-xs text-[var(--text-muted)] leading-snug mt-0.5">
+													{account.email}
+												</p>
+											)}
+										</div>
+									</button>
+								);
+							})}
+						</div>
+					</div>
+				)}
 			</div>
 		</nav>
 	);

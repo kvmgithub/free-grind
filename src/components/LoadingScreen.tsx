@@ -1,0 +1,27 @@
+import logo from "../images/freegrind-logo.webp";
+
+export function LoadingScreen() {
+	return (
+		<div
+			className="fixed inset-0 z-[300] flex flex-col items-center justify-center gap-6 bg-[var(--bg)]"
+			style={{
+				paddingTop: "var(--safe-area-top)",
+				paddingBottom: "var(--safe-area-bottom)",
+			}}
+		>
+			<div className="relative flex h-24 w-24 items-center justify-center">
+				<div className="absolute inset-0 rounded-full bg-[var(--surface-2)] shadow-inner" />
+				<div className="absolute inset-0 animate-spin rounded-full border-2 border-transparent border-t-[var(--accent)] border-e-[var(--accent)]/40" />
+				<img
+					src={logo}
+					alt={__APP_NAME__}
+					className="relative h-14 w-14 rounded-2xl object-contain"
+					draggable={false}
+				/>
+			</div>
+			<p className="text-sm font-semibold tracking-wide text-[var(--text-muted)]">
+				{__APP_NAME__}
+			</p>
+		</div>
+	);
+}

@@ -6,6 +6,8 @@ import {
 	formatWeightForUnits,
 	type UnitsPreset,
 } from "../../../utils/units";
+import { formatRelativeTime } from "../../../utils/relativeTime";
+import { hourCycleOptions } from "../../../utils/timeFormat";
 
 type AccountCreationAnchor = {
 	time: number;
@@ -31,6 +33,8 @@ const ACCOUNT_CREATION_ANCHORS: readonly AccountCreationAnchor[] = [
 	{ time: 1738065780, id: 730248000 },
 	{ time: 1739059200, id: 733779000 },
 	{ time: 1741564800, id: 744008000 },
+	{ time: 1779660000, id: 901631500 },
+	{ time: 1791816200, id: 927729800 },
 ];
 
 function parseProfileId(profileId: string | number | null | undefined): number | null {
@@ -97,15 +101,7 @@ function getDateTimeFormatter(lng: string, options: Intl.DateTimeFormatOptions) 
 	return dateTimeFormatterCache.get(key)!;
 }
 
-export function formatEstimatedAccountCreation(
-	profileId: string | number | null | undefined,
-	t?: (key: string, options?: any) => string,
-): string {
-	const timestamp = estimateAccountCreationTimestamp(profileId);
-	if (timestamp == null) {
-		return t ? t("browse_page.unknown") : "Unknown";
-	}
-
+export function formatAccountCreationDate(timestamp: number): string {
 	const formatter = getDateTimeFormatter(i18n.language, {
 		year: "numeric",
 		month: "short",
@@ -129,9 +125,25 @@ export function formatProfilePhotoCreatedAt(
 		day: "numeric",
 		hour: "numeric",
 		minute: "2-digit",
+		...hourCycleOptions(),
 	});
 
 	return formatter.format(new Date(timestamp));
+}
+
+export function formatTravelDateRange(startMs: number, endMs: number): string {
+	const dayFormatter = getDateTimeFormatter(i18n.language, { month: "short", day: "numeric" });
+	const dayYearFormatter = getDateTimeFormatter(i18n.language, {
+		month: "short",
+		day: "numeric",
+		year: "numeric",
+	});
+	const start = new Date(startMs);
+	const end = new Date(endMs);
+	const sameYear = start.getFullYear() === end.getFullYear();
+	const startLabel = sameYear ? dayFormatter.format(start) : dayYearFormatter.format(start);
+	const endLabel = dayYearFormatter.format(end);
+	return `${startLabel} – ${endLabel}`;
 }
 
 export function formatDistance(
@@ -152,8 +164,23 @@ export function isCurrentlyOnline(
 	return onlineUntil > Date.now();
 }
 
+/** Online indicators turn amber once a profile's online window has this many minutes or fewer left. */
+export const ONLINE_ENDING_SOON_MINUTES = 5;
+
+export function isOnlineEndingSoon(
+	onlineUntil: number | null | undefined,
+	nowTimestamp: number = Date.now(),
+): boolean {
+	if (typeof onlineUntil !== "number" || !Number.isFinite(onlineUntil) || onlineUntil <= nowTimestamp) {
+		return false;
+	}
+	return Math.ceil((onlineUntil - nowTimestamp) / (60 * 1000)) <= ONLINE_ENDING_SOON_MINUTES;
+}
+
 export type OnlineStatusMeta = {
 	isOnline: boolean;
+	/** Online, but with ONLINE_ENDING_SOON_MINUTES or fewer left. */
+	isEndingSoon?: boolean;
 	labelKey: string;
 	count?: number;
 	/** @deprecated Use labelKey and t() instead */
@@ -165,10 +192,14 @@ export function getOnlineStatusMeta(
 	onlineUntil: number | null | undefined,
 	nowTimestamp: number = Date.now(),
 ): OnlineStatusMeta {
+	// lastOnline/onlineUntil of 0 is the server's "unknown/hidden" sentinel
+	// (seen e.g. from Explore mode's privacy mask on cascade responses), not
+	// a real epoch timestamp — treat it the same as null/undefined, otherwise
+	// it renders as tens of thousands of days ago.
 	const hasLastOnline =
-		typeof lastOnline === "number" && Number.isFinite(lastOnline);
+		typeof lastOnline === "number" && Number.isFinite(lastOnline) && lastOnline > 0;
 	const hasOnlineUntil =
-		typeof onlineUntil === "number" && Number.isFinite(onlineUntil);
+		typeof onlineUntil === "number" && Number.isFinite(onlineUntil) && onlineUntil > 0;
 	const minuteMs = 60 * 1000;
 	const hourMs = 60 * minuteMs;
 	const dayMs = 24 * hourMs;
@@ -184,6 +215,7 @@ export function getOnlineStatusMeta(
 		);
 		return {
 			isOnline: true,
+			isEndingSoon: minsLeft <= ONLINE_ENDING_SOON_MINUTES,
 			labelKey: "browse_page.status_online_left",
 			count: minsLeft,
 			label: `Online (${minsLeft}m left)`,
@@ -224,6 +256,21 @@ export function getOnlineStatusMeta(
 	};
 }
 
+/**
+ * Online label key/count for a status meta: "Online (12m left)" when the
+ * remaining time should be shown (Appearance setting), plain "Online" otherwise.
+ * Offline labels are returned unchanged.
+ */
+export function getOnlineStatusLabelArgs(
+	meta: OnlineStatusMeta,
+	showTimeLeft: boolean,
+): { key: string; count?: number } {
+	if (meta.isOnline && !showTimeLeft) {
+		return { key: "browse_page.status_online" };
+	}
+	return { key: meta.labelKey, count: meta.count };
+}
+
 export function getDisplayName(card: BrowseCard): string {
 	const value = card.displayName?.trim();
 	if (value) {
@@ -231,6 +278,41 @@ export function getDisplayName(card: BrowseCard): string {
 	}
 
 	return ``;
+}
+
+/**
+ * Grindr's cascade endpoint intermittently omits `primaryImageUrl` on an
+ * otherwise-valid card (seen on both full_profile_v1 and partial_profile_v1
+ * items). Since browse loads fully replace `cards`, that flakiness on a
+ * refresh/auto-refresh flashes a previously-good photo to the no-photo
+ * placeholder. Carry the last-known image forward per profileId until the
+ * API sends one again, rather than blanking it out.
+ */
+export function mergeBrowseCardImages(
+	previous: BrowseCard[],
+	next: BrowseCard[],
+): BrowseCard[] {
+	if (previous.length === 0) {
+		return next;
+	}
+
+	const previousImageByProfileId = new Map(
+		previous
+			.filter((card) => card.primaryImageUrl)
+			.map((card) => [card.profileId, card.primaryImageUrl]),
+	);
+
+	if (previousImageByProfileId.size === 0) {
+		return next;
+	}
+
+	return next.map((card) => {
+		if (card.primaryImageUrl) {
+			return card;
+		}
+		const previousImageUrl = previousImageByProfileId.get(card.profileId);
+		return previousImageUrl ? { ...card, primaryImageUrl: previousImageUrl } : card;
+	});
 }
 
 export function getCardInitials(name: string): string {
@@ -247,39 +329,22 @@ export function formatTimeAgo(
 	timestamp: number | null | undefined,
 	t?: (key: string, options?: any) => string,
 ): string {
-	if (!timestamp || !Number.isFinite(timestamp)) {
-		return t ? t("browse_page.unknown") : "Unknown";
-	}
-
-	const diffMs = Date.now() - timestamp;
-	if (diffMs <= 0) {
-		return t ? t("browse_page.status_just_now") : "Just now";
-	}
-
-	const minute = 60 * 1000;
-	const hour = 60 * minute;
-	const day = 24 * hour;
-
-	if (diffMs < hour) {
-		const minutes = Math.max(1, Math.floor(diffMs / minute));
-		return t ? t("browse_page.status_minutes_ago", { count: minutes }) : `${minutes}m ago`;
-	}
-
-	if (diffMs < day) {
-		const hours = Math.max(1, Math.floor(diffMs / hour));
-		return t ? t("browse_page.status_hours_ago", { count: hours }) : `${hours}h ago`;
-	}
-
-	const days = Math.max(1, Math.floor(diffMs / day));
-	return t ? t("browse_page.status_days_ago", { count: days }) : `${days}d ago`;
+	const formatted = formatRelativeTime(timestamp);
+	if (!formatted && t) return t("browse_page.unknown");
+	return formatted || "Unknown";
 }
+
+// The "Not set" strings below are internal sentinels consumed by
+// shouldHideField, never shown to the user (every call site is gated by it),
+// so they must stay untranslated — translating them broke hiding for any
+// non-English locale, since shouldHideField only matched the English string.
 
 export function formatOptionalNumber(
 	value: number | null | undefined,
-	t?: (key: string, options?: any) => string,
+	_t?: (key: string, options?: any) => string,
 ): string {
 	if (value == null || !Number.isFinite(value)) {
-		return t ? t("browse_page.not_set") : "Not set";
+		return "Not set";
 	}
 
 	return String(value);
@@ -288,10 +353,10 @@ export function formatOptionalNumber(
 export function formatEnumValue(
 	value: number | null | undefined,
 	labels: Record<number, string>,
-	t?: (key: string, options?: any) => string,
+	_t?: (key: string, options?: any) => string,
 ): string {
 	if (value == null || !Number.isFinite(value)) {
-		return t ? t("browse_page.not_set") : "Not set";
+		return "Not set";
 	}
 
 	return labels[value] ?? String(value);
@@ -300,10 +365,10 @@ export function formatEnumValue(
 export function formatEnumArray(
 	values: number[],
 	labels: Record<number, string>,
-	t?: (key: string, options?: any) => string,
+	_t?: (key: string, options?: any) => string,
 ): string {
 	if (values.length === 0) {
-		return t ? t("browse_page.not_set") : "Not set";
+		return "Not set";
 	}
 
 	return values.map((value) => labels[value] ?? String(value)).join(", ");

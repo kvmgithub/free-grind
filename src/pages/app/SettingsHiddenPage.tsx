@@ -1,0 +1,300 @@
+import { useCallback, useEffect, useState } from "react";
+import { Eye, Loader2 } from "lucide-react";
+import { EyeOffFilled } from "../../components/icons/FilledIcons";
+import toast from "react-hot-toast";
+import { useTranslation } from "react-i18next";
+import { useNavigate, useLocation } from "react-router-dom";
+import { PageHeader } from "../../components/PageHeader";
+import { PullToRefreshContainer } from "./components/PullToRefreshContainer";
+import { useApiFunctions } from "../../hooks/useApiFunctions";
+import { listHiddenProfiles, unhideAllProfiles, unhideProfile } from "../../services/profileHide";
+import { useProfileHideMode } from "../../services/profileHideMode";
+import { getThumbImageUrl, validateMediaHash } from "../../utils/media";
+import { ProfileImage } from "../../components/ui/profile-image";
+import { ConfirmDialog } from "../../components/ui/confirm-dialog";
+import { ErrorState } from "../../components/ui/states";
+import { DrawerEmptyState } from "./chat/drawerUi";
+
+type HiddenProfileListItem = {
+	profileId: string;
+	displayName: string;
+	avatarUrl: string | null;
+};
+
+export function SettingsHiddenPage() {
+	const { t } = useTranslation();
+	const navigate = useNavigate();
+	const location = useLocation();
+	const apiFunctions = useApiFunctions();
+	const hideMode = useProfileHideMode();
+
+	const [hiddenProfiles, setHiddenProfiles] = useState<HiddenProfileListItem[]>([]);
+	const [isLoading, setIsLoading] = useState(true);
+	const [error, setError] = useState<string | null>(null);
+	const [mutatingProfileId, setMutatingProfileId] = useState<string | null>(null);
+	const [isUnhidingAll, setIsUnhidingAll] = useState(false);
+	const [confirmUnhideAll, setConfirmUnhideAll] = useState(false);
+
+	const loadHiddenProfiles = useCallback(async () => {
+		setIsLoading(true);
+		setError(null);
+
+		try {
+			const stored = await listHiddenProfiles(apiFunctions);
+
+			if (stored.length === 0) {
+				setHiddenProfiles([]);
+				return;
+			}
+
+			// Batch-fetch fresh details via the cascade endpoint in chunks of 50,
+			// same as the Blocked page — falls back to the locally snapshotted
+			// name/avatar (local snapshot or the /v1/hides entry) if a chunk fails or a profile
+			// has since become unresolvable (deleted/banned).
+			const CHUNK_SIZE = 50;
+			const ids = stored.map((p) => p.profileId);
+			const chunks: string[][] = [];
+			for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
+				chunks.push(ids.slice(i, i + CHUNK_SIZE));
+			}
+
+			const detailsById = new Map<string, { displayName: string; avatarUrl: string | null }>();
+			await Promise.all(
+				chunks.map(async (chunk) => {
+					try {
+						const raw = await apiFunctions.getProfilesByIds(chunk);
+						const profiles =
+							raw && typeof raw === "object" && Array.isArray((raw as { profiles?: unknown }).profiles)
+								? (raw as { profiles: unknown[] }).profiles
+								: [];
+						for (const p of profiles) {
+							if (!p || typeof p !== "object") continue;
+							const idRaw = (p as { profileId?: unknown }).profileId;
+							if (idRaw == null) continue;
+							const profileId = String(idRaw);
+							const nameRaw = (p as { displayName?: unknown }).displayName;
+							const displayName =
+								typeof nameRaw === "string" && nameRaw.trim().length > 0 ? nameRaw.trim() : null;
+							const hashRaw = (p as { profileImageMediaHash?: unknown }).profileImageMediaHash;
+							const avatarUrl =
+								typeof hashRaw === "string" && validateMediaHash(hashRaw)
+									? getThumbImageUrl(hashRaw, "75x75")
+									: null;
+							if (displayName || avatarUrl) {
+								detailsById.set(profileId, {
+									displayName: displayName ?? t("common.unknown_display_name"),
+									avatarUrl,
+								});
+							}
+						}
+					} catch {
+						// Chunk failed — its ids fall back to the local snapshot below.
+					}
+				}),
+			);
+
+			setHiddenProfiles(
+				stored.map((profile) => {
+					const meta = detailsById.get(profile.profileId);
+					const avatarUrl =
+						meta?.avatarUrl ??
+						(profile.avatarMediaHash && validateMediaHash(profile.avatarMediaHash)
+							? getThumbImageUrl(profile.avatarMediaHash, "75x75")
+							: null);
+					return {
+						profileId: profile.profileId,
+						displayName:
+							meta?.displayName ??
+							profile.displayName ??
+							t("common.unknown_display_name"),
+						avatarUrl,
+					} satisfies HiddenProfileListItem;
+				}),
+			);
+		} catch (loadError) {
+			setHiddenProfiles([]);
+			setError(loadError instanceof Error ? loadError.message : t("settings_hidden.error_load"));
+		} finally {
+			setIsLoading(false);
+		}
+		// hideMode: reload when the mode switches, the list shown is the active mode's.
+	}, [apiFunctions, hideMode, t]);
+
+	useEffect(() => {
+		void loadHiddenProfiles();
+	}, [loadHiddenProfiles]);
+
+	const handleUnhide = async (profileId: string) => {
+		if (mutatingProfileId) return;
+
+		setMutatingProfileId(profileId);
+		try {
+			if (!(await unhideProfile(apiFunctions, profileId))) {
+				toast.error(t("profile_details.unhide_failed", { defaultValue: "Failed to unhide profile." }));
+				return;
+			}
+			setHiddenProfiles((previous) => previous.filter((p) => p.profileId !== profileId));
+			toast.success(t("profile_details.unhide_success"));
+		} finally {
+			setMutatingProfileId(null);
+		}
+	};
+
+	const handleUnhidePress = (profileId: string) => {
+		if (mutatingProfileId) return;
+		void handleUnhide(profileId);
+	};
+
+	const handleUnhideAll = async () => {
+		setIsUnhidingAll(true);
+		try {
+			await unhideAllProfiles(apiFunctions, hiddenProfiles.map((p) => p.profileId));
+			setHiddenProfiles([]);
+			toast.success(t("settings_hidden.unhide_all_success", { defaultValue: "All profiles unhidden." }));
+		} catch (err) {
+			toast.error(
+				err instanceof Error ? err.message : t("settings_hidden.unhide_all_failed", { defaultValue: "Failed to unhide all profiles." }),
+			);
+		} finally {
+			setIsUnhidingAll(false);
+			setConfirmUnhideAll(false);
+		}
+	};
+
+	return (
+		<PullToRefreshContainer
+			className="app-screen flex flex-col"
+			contentClassName="flex flex-1 flex-col"
+			onRefresh={() => loadHiddenProfiles()}
+			isDisabled={isLoading}
+			refreshingLabel={t("settings_hidden.refreshing")}
+		>
+			<PageHeader
+				backTo="/settings"
+				title={t("settings_hidden.title")}
+				subtitle={t("settings_hidden.subtitle")}
+			/>
+
+			{/* Fills the rest of the screen so the empty state can sit centered in it. */}
+			<div className={`grid flex-1 gap-6 ${!isLoading && !error && hiddenProfiles.length === 0 ? "content-center" : "content-start"}`}>
+				{isLoading ? (
+					<div>
+						<div className="mb-2 flex items-center gap-2 px-1">
+							<div className="h-3 w-16 animate-pulse rounded-full ink-tint-10" />
+						</div>
+						<div className="native-group">
+							{Array.from({ length: 4 }).map((_, i) => (
+								<div key={i} className="flex items-center gap-3 px-4 py-3">
+									<div className="h-11 w-11 shrink-0 animate-pulse rounded-full overflow-hidden ink-tint-10" />
+									<div className="min-w-0 flex-1 space-y-1.5">
+										<div className="h-3.5 w-28 animate-pulse rounded-full ink-tint-10" />
+										<div className="h-3 w-16 animate-pulse rounded-full ink-tint-10" />
+									</div>
+									<div className="h-8 w-20 animate-pulse rounded-full ink-tint-10" />
+								</div>
+							))}
+						</div>
+					</div>
+				) : error ? (
+					<ErrorState
+						title={t("settings_hidden.error_load")}
+						description={error}
+						onRetry={() => void loadHiddenProfiles()}
+					/>
+				) : hiddenProfiles.length === 0 ? (
+					<DrawerEmptyState
+						icon={<EyeOffFilled />}
+						fanned={false}
+						title={t("settings_hidden.empty")}
+						hint={t("settings_hidden.empty_desc", { defaultValue: "Profiles you hide from the grid will show up here." })}
+					/>
+				) : (
+					<div>
+						<div className="mb-2 flex items-center gap-2 px-1">
+							<p className="text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">
+								{t("settings_hidden.section_label", { defaultValue: "Hidden" })}
+							</p>
+							<span className="rounded-full ink-tint-10 px-2 py-0.5 text-[10px] font-bold tabular-nums text-[var(--text-muted)]">
+								{hiddenProfiles.length}
+							</span>
+						</div>
+						<div className="native-group">
+							{hiddenProfiles.map((profile) => {
+								const isMutating = mutatingProfileId === profile.profileId;
+								return (
+									<div key={profile.profileId} className="flex items-center gap-3 px-4 py-3">
+										<button
+											type="button"
+											className="flex min-w-0 flex-1 items-center gap-3 text-start"
+											onClick={() => navigate(`/profile/${profile.profileId}`, { state: { returnTo: location.pathname } })}
+										>
+											<div className="h-11 w-11 shrink-0 rounded-full overflow-hidden bg-[var(--surface-2)] drop-shadow-sm">
+												<ProfileImage
+													className="bg-slate-500/15 text-slate-400"
+													src={profile.avatarUrl}
+													alt={t("profile_details.photo_alt", { name: profile.displayName })}
+												/>
+											</div>
+											<div className="min-w-0 flex-1">
+												<p className="truncate text-sm font-semibold">
+													{profile.displayName}
+												</p>
+												<p className="text-xs text-[var(--text-muted)]">
+													{t("settings_hidden.profile_id", { id: profile.profileId })}
+												</p>
+											</div>
+										</button>
+										<button
+											type="button"
+											onClick={() => handleUnhidePress(profile.profileId)}
+											onPointerUp={(event) => {
+												if (event.pointerType === "mouse") return;
+												event.preventDefault();
+												handleUnhidePress(profile.profileId);
+											}}
+											disabled={isMutating}
+											className="inline-flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full ink-tint-10 px-3 text-xs font-semibold text-[var(--text)] transition-[transform,background-color,color] duration-150 hover:ink-tint-14 hover:text-[var(--accent)] active:scale-[0.96] disabled:opacity-50"
+										>
+											{isMutating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Eye className="h-3.5 w-3.5" />}
+											{t("settings_hidden.unhide", { defaultValue: "Unhide" })}
+										</button>
+									</div>
+								);
+							})}
+						</div>
+					</div>
+				)}
+				{/* Unhide all: an action row of its own with its explanation as a footnote. */}
+				{!isLoading && !error && hiddenProfiles.length > 0 && (
+					<div>
+						<button
+								type="button"
+								onClick={() => setConfirmUnhideAll(true)}
+								disabled={isUnhidingAll}
+								className="flex w-full items-center justify-center gap-2 rounded-[20px] accent-tint-12 px-4 py-3.5 text-sm font-semibold text-[var(--accent-readable)] transition-colors hover:accent-tint-18 active:accent-tint-24 disabled:opacity-60"
+							>
+								{isUnhidingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <Eye className="h-4 w-4" />}
+								{isUnhidingAll
+									? t("settings_hidden.unhiding_all", { defaultValue: "Unhiding…" })
+									: t("settings_hidden.unhide_all_title", { defaultValue: "Unhide All" })}
+							</button>
+						<p className="mt-2 px-4 text-xs leading-relaxed text-[var(--text-muted)]">
+							{t("settings_hidden.unhide_all_desc", { defaultValue: "Show all hidden profiles on the grid again." })}
+						</p>
+					</div>
+				)}
+			</div>
+
+			<ConfirmDialog
+				isOpen={confirmUnhideAll}
+				title={t("settings_hidden.unhide_all_title", { defaultValue: "Unhide All" })}
+				message={t("settings_hidden.unhide_all_confirm", { defaultValue: "This will unhide all hidden profiles. Are you sure?" })}
+				confirmLabel={isUnhidingAll ? t("settings_hidden.unhiding_all", { defaultValue: "Unhiding…" }) : t("settings_hidden.unhide_all_title", { defaultValue: "Unhide All" })}
+				cancelLabel={t("settings_hidden.cancel", { defaultValue: "Cancel" })}
+				onConfirm={() => void handleUnhideAll()}
+				onCancel={() => setConfirmUnhideAll(false)}
+				isProcessing={isUnhidingAll}
+			/>
+		</PullToRefreshContainer>
+	);
+}

@@ -1,18 +1,24 @@
 import type { AlbumDetail } from "../../../types/albums";
+import { sanitizeUploadFile } from "../../../services/uploadSanitize";
 
 export function countAlbumMedia(detail: AlbumDetail | undefined): {
 	total: number;
 	images: number;
+	videos: number;
 	nonImages: number;
 } {
 	const content = detail?.content ?? [];
 	const images = content.filter((item) =>
 		(item.contentType ?? "").toLowerCase().startsWith("image/"),
 	).length;
+	const videos = content.filter((item) =>
+		(item.contentType ?? "").toLowerCase().startsWith("video/"),
+	).length;
 	const total = content.length;
 	return {
 		total,
 		images,
+		videos,
 		nonImages: Math.max(0, total - images),
 	};
 }
@@ -30,16 +36,49 @@ export function concatUint8Arrays(chunks: Uint8Array[]): Uint8Array {
 	return output;
 }
 
-export async function buildMultipartBody(file: File): Promise<{
+
+export function getVideodimensions(file: File): Promise<{ width: number; height: number } | undefined> {
+	return new Promise((resolve) => {
+		const vid = document.createElement("video");
+		vid.preload = "metadata";
+		const objUrl = URL.createObjectURL(file);
+		vid.onloadedmetadata = () => {
+			URL.revokeObjectURL(objUrl);
+			const { videoWidth, videoHeight } = vid;
+			resolve(videoWidth > 0 && videoHeight > 0 ? { width: videoWidth, height: videoHeight } : undefined);
+		};
+		vid.onerror = () => { URL.revokeObjectURL(objUrl); resolve(undefined); };
+		vid.src = objUrl;
+	});
+}
+
+/** Returns the duration of a video file in milliseconds, or null if unreadable. */
+export function getVideoDurationMs(file: File): Promise<number | null> {
+	return new Promise((resolve) => {
+		const vid = document.createElement("video");
+		vid.preload = "metadata";
+		const objUrl = URL.createObjectURL(file);
+		vid.onloadedmetadata = () => {
+			URL.revokeObjectURL(objUrl);
+			const { duration } = vid;
+			resolve(Number.isFinite(duration) && duration > 0 ? Math.round(duration * 1000) : null);
+		};
+		vid.onerror = () => { URL.revokeObjectURL(objUrl); resolve(null); };
+		vid.src = objUrl;
+	});
+}
+
+/** Normalizes the photo/video first (metadata stripped, see uploadSanitize). */
+export async function buildMultipartBody(original: File): Promise<{
 	body: Uint8Array;
 	contentType: string;
 }> {
+	const file = await sanitizeUploadFile(original);
 	const encoder = new TextEncoder();
 	const boundary = `----opengrind-${crypto.randomUUID?.() ?? Date.now().toString(16)}`;
-	const safeFilename = file.name.replace(/"/g, "_");
 	const header =
 		`--${boundary}\r\n` +
-		`Content-Disposition: form-data; name="content"; filename="${safeFilename}"\r\n` +
+		`Content-Disposition: form-data; name="content"; filename=""\r\n` +
 		`Content-Type: ${file.type || "application/octet-stream"}\r\n\r\n`;
 	const footer = `\r\n--${boundary}--\r\n`;
 
@@ -54,4 +93,12 @@ export async function buildMultipartBody(file: File): Promise<{
 		body,
 		contentType: `multipart/form-data; boundary=${boundary}`,
 	};
+}
+
+export function formatMs(ms: number): string {
+	const totalSeconds = Math.floor(ms / 1000);
+	if (totalSeconds < 60) return `${totalSeconds}s`;
+	const minutes = Math.floor(totalSeconds / 60);
+	const seconds = totalSeconds % 60;
+	return seconds === 0 ? `${minutes} min` : `${minutes}:${String(seconds).padStart(2, "0")} min`;
 }

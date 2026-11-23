@@ -2,11 +2,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { decode } from "@msgpack/msgpack";
 import z from "zod";
 import { useCallback } from "react";
-import { methodSchemas, type MethodName, type AppError } from "../types/api";
+import { methodSchemas, banInfoSchema, type MethodName, type AppError, type BanInfo } from "../types/api";
 import {
 	addApiTraceEntry,
 	toTracePreview,
 } from "../services/apiTrace";
+import {
+	noticeUnsupportedVersionInError,
+	noticeUnsupportedVersionInResponse,
+} from "../services/unsupportedVersion";
 
 function traceId(): string {
 	return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -50,6 +54,7 @@ export function useApi() {
 				responseBody: null,
 				error: toTracePreview(error),
 			});
+			noticeUnsupportedVersionInError(error);
 			throw error;
 		}
 	}, []);
@@ -57,15 +62,35 @@ export function useApi() {
 	const asAppError = useCallback((error: unknown): AppError | null => {
 		const { data, success } = z
 			.object({
-				kind: z.enum(["Http", "Auth", "Api", "NotInitialized"]),
+				kind: z.enum([
+					"Http",
+					"Connect",
+					"Auth",
+					"NotSignedIn",
+					"SessionStale",
+					"Api",
+					"Unauthorized",
+					"VerificationRequired",
+					"Banned",
+					"RateLimited",
+					"RequestBlocked",
+					"NetworkBlocked",
+					"SessionCleared",
+					"NotInitialized",
+					"TokenExpired",
+					"SignUpLimitReached",
+				]),
 				message: z
 					.string()
 					.or(
 						z.object({
 							code: z.number(),
 							message: z.string(),
+							profileId: z.string().nullish(),
+							body: z.string().optional(),
 						}),
 					)
+					.or(banInfoSchema)
 					.optional(),
 			})
 			.safeParse(error);
@@ -74,16 +99,54 @@ export function useApi() {
 			let prettyMessage: string;
 			if (typeof data.message === "string") {
 				prettyMessage = data.message;
+			} else if (data.message && "kind" in data.message) {
+				prettyMessage = `Banned (${data.message.kind}): ${data.message.message}`;
 			} else if (data.message) {
 				prettyMessage = `Error ${data.message.code}: ${data.message.message}`;
 			} else if (data.kind === "NotInitialized") {
 				prettyMessage = "The app failed to start correctly. Please restart the app and try again.";
+			} else if (data.kind === "SignUpLimitReached") {
+				prettyMessage = "This app can't create any more accounts.";
+			} else if (data.kind === "TokenExpired") {
+				prettyMessage = "Your login token has expired. Please sign in again.";
+			} else if (data.kind === "RateLimited") {
+				prettyMessage = "Too many requests — please wait a moment and try again.";
+			} else if (data.kind === "RequestBlocked" || data.kind === "NetworkBlocked") {
+				prettyMessage = "The request was blocked. Please try again later.";
+			} else if (data.kind === "NotSignedIn") {
+				prettyMessage = "You're not signed in.";
+			} else if (data.kind === "SessionStale") {
+				prettyMessage = "Couldn't refresh your session. Check your connection and try again.";
+			} else if (data.kind === "SessionCleared") {
+				prettyMessage = "Signed out while the request was in flight.";
 			} else {
 				prettyMessage = "An unknown error occurred";
 			}
+
+			// Third-party (JWT) login sessions have no real refresh mechanism, so
+			// once the token itself expires every subsequent authenticated call
+			// fails this way. Broadcast it globally rather than at this one call
+			// site, since any page's API call can be the one that first notices —
+			// AuthContext listens for this to show a full-screen re-login prompt
+			// (mirrors the existing fg:fcm-token window-event pattern).
+			if (data.kind === "TokenExpired") {
+				window.dispatchEvent(new Event("fg:token-expired"));
+			}
+
 			return { ...data, prettyMessage };
 		}
 		return null;
+	}, []);
+
+	// Login/refresh failures for a banned account come back as a distinct
+	// AppError kind (rather than a generic Auth error) so the login screen
+	// can show ban details instead of a plain "invalid credentials" toast —
+	// see AccountStatusPrompt.tsx.
+	const asBanned = useCallback((error: unknown): BanInfo | null => {
+		const parsed = z
+			.object({ kind: z.literal("Banned"), message: banInfoSchema })
+			.safeParse(error);
+		return parsed.success ? parsed.data.message : null;
 	}, []);
 
 	const fetchRest = useCallback(
@@ -147,6 +210,7 @@ export function useApi() {
 					responseBody: toTracePreview(body),
 					error: null,
 				});
+				noticeUnsupportedVersionInResponse(status, body);
 
 				return {
 					status,
@@ -185,5 +249,5 @@ export function useApi() {
 		[asAppError],
 	);
 
-	return { callMethod, asAppError, fetchRest };
+	return { callMethod, asAppError, asBanned, fetchRest };
 }

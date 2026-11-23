@@ -1,0 +1,20 @@
+{
+	"$schema": "../gen/schemas/android-schema.json",
+	"identifier": "android-features",
+	"description": "Capabilities specific to Android (android-fs plugin is only compiled in for Android)",
+	"platforms": ["android"],
+	"windows": ["main"],
+	"permissions": [
+		"barcode-scanner:default",
+		"android-fs:allow-create-new-public-image-file",
+		"android-fs:allow-create-new-public-video-file",
+		"android-fs:allow-create-new-public-file",
+		"android-fs:allow-write-file",
+		"android-fs:allow-open-write-file-stream",
+		"android-fs:allow-set-public-file-pending",
+		"android-fs:allow-scan-public-file",
+		"android-fs:allow-remove-file",
+		"android-fs:allow-show-open-file-picker",
+		"android-fs:allow-show-save-file-picker"
+	]
+}

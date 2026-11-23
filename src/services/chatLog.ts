@@ -1,40 +1,19 @@
 /**
  * chatLog.ts — local-first message persistence.
  *
- * Stores every message seen in the app to $APPDATA/chat-log/{conversationId}.json
- * so that unsent messages, messages from blocked users, and expired media URLs
- * remain accessible even after they disappear from the Grindr API.
+ * Backed entirely by chatDb.ts (SQLite) so unsent messages, messages from
+ * blocked users, and expired media URLs remain accessible even after they
+ * disappear from the Grindr API. No JSON files are read or written — this
+ * module is just a thin, write-queue-serialized merge layer over chatDb.
  */
 
-import {
-	BaseDirectory,
-	exists,
-	mkdir,
-	readDir,
-	readTextFile,
-	remove,
-	writeTextFile,
-} from "@tauri-apps/plugin-fs";
 import type { Message } from "../types/messages";
+import * as chatDb from "./chatDb";
+import { appLog } from "../utils/logger";
+import { isChatArchiveEnabled } from "./chatArchiveMode";
+import { isViewLimitedMedia } from "../pages/app/chat/chatUtils";
 
-const LOG_DIR = "chat-log";
 let writeQueue: Promise<void> = Promise.resolve();
-
-async function ensureDir(): Promise<void> {
-	const dirExists = await exists(LOG_DIR, { baseDir: BaseDirectory.AppData });
-	if (!dirExists) {
-		await mkdir(LOG_DIR, { baseDir: BaseDirectory.AppData, recursive: true });
-	}
-}
-
-function safeId(conversationId: string): string {
-	// Restrict to filesystem-safe characters.
-	return conversationId.replace(/[^a-zA-Z0-9_-]/g, "_");
-}
-
-function logPath(conversationId: string): string {
-	return `${LOG_DIR}/${safeId(conversationId)}.json`;
-}
 
 export type ChatLogData = {
 	messages: Message[];
@@ -43,27 +22,17 @@ export type ChatLogData = {
 
 /**
  * Read all locally stored messages and metadata for a conversation.
- * Returns an empty structure if no log exists yet.
+ * Returns an empty structure if nothing is stored yet.
  */
 export async function readLog(conversationId: string): Promise<ChatLogData> {
 	try {
-		const path = logPath(conversationId);
-		const fileExists = await exists(path, { baseDir: BaseDirectory.AppData });
-		if (!fileExists) return { messages: [] };
-		const text = await readTextFile(path, { baseDir: BaseDirectory.AppData });
-		const parsed: unknown = JSON.parse(text);
-
-		if (Array.isArray(parsed)) {
-			// Backward compatibility: old format was just the array of messages.
-			return { messages: parsed as Message[] };
-		}
-
-		if (parsed && typeof parsed === "object" && "messages" in parsed) {
-			return parsed as ChatLogData;
-		}
-
-		return { messages: [] };
-	} catch {
+		const [messages, lastReadTimestamp] = await Promise.all([
+			chatDb.getMessages(conversationId),
+			chatDb.getLastReadTimestamp(conversationId),
+		]);
+		return { messages, lastReadTimestamp };
+	} catch (error) {
+		appLog.error(`[chatLog] readLog failed for ${conversationId}`, error);
 		return { messages: [] };
 	}
 }
@@ -71,11 +40,21 @@ export async function readLog(conversationId: string): Promise<ChatLogData> {
 /**
  * Merge incoming messages and metadata into the persisted log for a conversation.
  *
- * - New messages are added.
- * - Existing messages are updated, except: if the stored copy has a resolved
- *   image URL (body.url) and the incoming copy does not, the stored URL is
- *   preserved so cached media survives API expiry.
+ * - New messages are stored.
+ * - Existing messages are updated, except:
+ *   - if the stored copy has a resolved image URL (body.url) and the
+ *     incoming copy does not, the stored URL is preserved so cached media
+ *     survives API expiry.
+ *   - if the incoming copy is an unsend (unsent: true, empty body) and we
+ *     already had real content cached, the content is kept and the row is
+ *     flagged local_history instead of being wiped — it remains visible,
+ *     just marked as locally-retained history.
+ *   Neither applies with archive mode off (see chatArchiveMode), except the
+ *   URL of media that isn't view-limited.
  * - lastReadTimestamp is updated if provided.
+ *
+ * Only the incoming subset is read/written (not every message ever stored
+ * for the conversation) — already-persisted rows are left untouched.
  */
 export async function appendMessages(
 	conversationId: string,
@@ -86,45 +65,53 @@ export async function appendMessages(
 
 	const run = async () => {
 		try {
-			await ensureDir();
-			const existingData = await readLog(conversationId);
-			const existing = existingData.messages;
-			const map = new Map<string, Message>();
-			for (const m of existing) {
-				map.set(m.messageId, m);
-			}
-			for (const m of messages) {
-				const prev = map.get(m.messageId);
-				if (prev) {
-					const prevBody = prev.body as Record<string, unknown> | null | undefined;
-					const newBody = m.body as Record<string, unknown> | null | undefined;
-					if (prevBody?.url && !newBody?.url) {
-						map.set(m.messageId, {
-							...m,
-							body: { ...newBody, url: prevBody.url },
-						});
-					} else {
-						map.set(m.messageId, m);
-					}
-				} else {
-					map.set(m.messageId, m);
+			const existing = messages.length
+				? await chatDb.getMessages(conversationId)
+				: [];
+			const existingById = new Map(existing.map((m) => [m.messageId, m] as const));
+			const unsendWipeMessageIds: string[] = [];
+
+			// Archive mode off: an unsend wipes the content like it does
+			// server-side, and a view-limited photo/video doesn't get back the
+			// URL an earlier view handed out.
+			const archive = isChatArchiveEnabled();
+			const merged = messages.map((m) => {
+				const prev = existingById.get(m.messageId);
+				if (!prev) {
+					return m;
 				}
-			}
-			const sorted = [...map.values()].sort((a, b) => a.timestamp - b.timestamp);
+				const prevBody = prev.body as Record<string, unknown> | null | undefined;
+				const newBody = m.body as Record<string, unknown> | null | undefined;
 
-			const newData: ChatLogData = {
-				messages: sorted,
-				lastReadTimestamp:
-					lastReadTimestamp !== undefined
-						? lastReadTimestamp
-						: (existingData.lastReadTimestamp ?? null),
-			};
+				if (archive && m.unsent && !newBody && prevBody) {
+					unsendWipeMessageIds.push(m.messageId);
+					return { ...prev, unsent: true };
+				}
+				// A copy older than the stored edit (a poll in flight while it was
+				// edited) keeps the edited text.
+				if (prev.editedAt != null && !m.unsent && (m.editedAt ?? 0) < prev.editedAt) {
+					return { ...m, body: prev.body, editedAt: prev.editedAt };
+				}
 
-			await writeTextFile(logPath(conversationId), JSON.stringify(newData), {
-				baseDir: BaseDirectory.AppData,
+				if (prevBody?.url && !newBody?.url && (archive || !isViewLimitedMedia(m))) {
+					return { ...m, body: { ...newBody, url: prevBody.url } };
+				}
+				return m;
 			});
-		} catch {
-			// Best effort only.
+
+			if (merged.length) {
+				await chatDb.upsertMessages(conversationId, merged);
+			}
+
+			for (const messageId of unsendWipeMessageIds) {
+				await chatDb.setMessageLocalHistory(messageId, true);
+			}
+
+			if (lastReadTimestamp !== undefined) {
+				await chatDb.setLastReadTimestamp(conversationId, lastReadTimestamp);
+			}
+		} catch (error) {
+			appLog.error(`[chatLog] appendMessages failed for ${conversationId}`, error);
 		}
 	};
 
@@ -139,59 +126,24 @@ export async function appendMessages(
  * stored messages. Conversations with empty logs are omitted.
  */
 export async function exportAllLogs(): Promise<Record<string, Message[]>> {
-	const result: Record<string, Message[]> = {};
-
 	try {
-		const dirExists = await exists(LOG_DIR, { baseDir: BaseDirectory.AppData });
-		if (!dirExists) return result;
-
-		const entries = await readDir(LOG_DIR, { baseDir: BaseDirectory.AppData });
-
-		await Promise.all(
-			entries
-				.filter((entry) => entry.name?.endsWith(".json"))
-				.map(async (entry) => {
-					const name = entry.name!;
-					const conversationId = name.slice(0, -5); // strip .json
-					try {
-						const text = await readTextFile(`${LOG_DIR}/${name}`, {
-							baseDir: BaseDirectory.AppData,
-						});
-						const parsed: unknown = JSON.parse(text);
-						if (Array.isArray(parsed) && parsed.length > 0) {
-							result[conversationId] = parsed as Message[];
-						} else if (
-							parsed &&
-							typeof parsed === "object" &&
-							"messages" in parsed &&
-							Array.isArray((parsed as any).messages)
-						) {
-							result[conversationId] = (parsed as any).messages;
-						}
-					} catch {
-						// Skip unreadable files.
-					}
-				}),
-		);
-	} catch {
-		// Return whatever was collected.
+		return await chatDb.exportAllMessages();
+	} catch (error) {
+		appLog.error("[chatLog] exportAllLogs failed", error);
+		return {};
 	}
-
-	return result;
 }
 
 /**
- * Remove local history for one conversation.
+ * Remove a single message from local storage (e.g. after a successful
+ * "delete message" — without this, the message would resurface on the next
+ * load since the API merge treats anything missing from the response but
+ * present locally as a message that should be retained).
  */
-export async function clearLog(conversationId: string): Promise<void> {
+export async function removeMessage(messageId: string): Promise<void> {
 	try {
-		const path = logPath(conversationId);
-		const fileExists = await exists(path, { baseDir: BaseDirectory.AppData });
-		if (!fileExists) {
-			return;
-		}
-		await remove(path, { baseDir: BaseDirectory.AppData });
-	} catch {
-		// Best effort only.
+		await chatDb.deleteMessageRow(messageId);
+	} catch (error) {
+		appLog.error(`[chatLog] removeMessage failed for ${messageId}`, error);
 	}
 }

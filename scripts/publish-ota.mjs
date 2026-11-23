@@ -1,16 +1,51 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import {
+  appendFileSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
+import { resolveAutoMinBinaryVersion } from "./min-binary-version.mjs";
+import { loadManifest } from "./manifest.mjs";
+
+// Publishes the frontend as a signed OTA bundle: `latest.json` plus the bundle,
+// next to each other at the app's OTA endpoint (manifest/app.json
+// ota.endpoint, e.g. https://example.org/ota/{{channel}}/latest.json).
+//
+// - surge.sh endpoint: deployed to surge. Every channel is its own surge
+//   project, because a surge deploy replaces the whole site; this way a
+//   development deploy never wipes the main channel.
+// - any other endpoint (your own web server): the files are written to
+//   OTA_OUT_DIR, and the caller uploads that folder to the endpoint's
+//   directory for the channel.
+
+const OTA_ENDPOINT_TEMPLATE = (() => {
+  const endpoint = loadManifest().ota.endpoint;
+  if (!/^https:\/\/[^/]+\/(.+\/)?latest\.json$/.test(endpoint) || !endpoint.includes("{{channel}}")) {
+    throw new Error(`manifest ota.endpoint ${endpoint}: expected https://…{{channel}}…/latest.json`);
+  }
+  return endpoint;
+})();
 
 function parseCliArgs(argv) {
   let channelOverride;
 
   for (const arg of argv) {
     if (arg === "--help" || arg === "-h") {
-      console.log("Usage: npm run ota -- [-main|-development|--channel <name>]");
+      console.log("Usage: bun run ota -- [-main|-development|--channel <name>]");
       console.log("  -main          Publish to the main OTA channel");
       console.log("  -development   Publish to the development OTA channel");
       console.log("  --channel      Publish to a custom OTA channel");
+      console.log();
+      console.log("Required env (.env.local): HOTSWAP_PRIVATE_KEY or HOTSWAP_PRIVATE_KEY_PATH,");
+      console.log("  and SURGE_LOGIN, SURGE_TOKEN (surge endpoint) or OTA_OUT_DIR (own server)");
+      console.log("Optional env: HOTSWAP_PRIVATE_KEY_PASSWORD, OTA_NOTES, OTA_MANDATORY,");
+      console.log("  OTA_MIN_BINARY_VERSION, OTA_SKIP_BUILD, OTA_BUNDLE, OTA_SURGE_DOMAIN_TEMPLATE");
       process.exit(0);
     }
 
@@ -83,117 +118,121 @@ function requireEnv(name) {
   return value;
 }
 
-function run(command, args, options = {}) {
-  return execFileSync(command, args, {
-    stdio: options.capture ? ["inherit", "pipe", "inherit"] : "inherit",
-    encoding: options.capture ? "utf8" : undefined,
-  });
+function run(command, args) {
+  try {
+    execFileSync(command, args, { stdio: "inherit" });
+  } catch (error) {
+    // The error lists every argument, the signing key and its password
+    // included; report the command and exit status only (no `cause` either).
+    // eslint-disable-next-line preserve-caught-error
+    throw new Error(`${command} ${args[0] ?? ""} failed (exit ${error?.status ?? "?"})`);
+  }
 }
 
-const backendUrl = requireEnv("OTA_BACKEND_URL").replace(/\/$/, "");
-const backendToken =
-  process.env.OTA_BACKEND_TOKEN || process.env.CI_UPLOAD_TOKEN || requireEnv("OTA_BACKEND_TOKEN");
-const keyPassword = process.env.HOTSWAP_PRIVATE_KEY_PASSWORD ?? "";
-const otaChannel = channelOverride || process.env.OTA_CHANNEL || "testingwjay";
-const otaMandatory = process.env.OTA_MANDATORY === "true" ? "true" : "false";
+const otaChannel = channelOverride || process.env.OTA_CHANNEL || "development";
+if (!/^[a-z0-9-]{1,40}$/.test(otaChannel)) {
+  throw new Error(`Invalid OTA channel "${otaChannel}" (must be a valid hostname label)`);
+}
+
+// Where latest.json lives for this channel; the bundle goes next to it.
+const surgeOverride = process.env.OTA_SURGE_DOMAIN_TEMPLATE;
+const endpoint = surgeOverride
+  ? `https://${surgeOverride.replace("{channel}", otaChannel)}/latest.json`
+  : OTA_ENDPOINT_TEMPLATE.replaceAll("{{channel}}", otaChannel);
+const baseUrl = endpoint.slice(0, -"latest.json".length);
+const endpointHost = new URL(endpoint).host;
+const surgeDomain = endpointHost.endsWith(".surge.sh") ? endpointHost : null;
+const outDir = process.env.OTA_OUT_DIR;
+if (surgeDomain) {
+  requireEnv("SURGE_LOGIN");
+  requireEnv("SURGE_TOKEN");
+} else if (!outDir) {
+  throw new Error(`OTA_OUT_DIR is required: ${endpoint} isn't on surge.sh, upload the folder there yourself`);
+}
 
 const pkg = JSON.parse(readFileSync("package.json", "utf8"));
 const appVersion = pkg.version;
-const otaVersion = `${appVersion}-ota.${otaChannel}.${Date.now()}`;
-const minBinaryVersion = process.env.OTA_MIN_BINARY_VERSION || appVersion;
-const notes =
-  process.env.OTA_NOTES ||
-  `Manual OTA upload (${otaChannel}) ${new Date().toISOString()}`;
+// Unix seconds: monotonic across deploys and well above the sequences the old
+// backend handed out, so already-installed clients still see this as newer.
+const sequence = Math.floor(Date.now() / 1000);
+const otaVersion = `${appVersion}-ota.${otaChannel}.${sequence}`;
+const minBinaryVersion = process.env.OTA_MIN_BINARY_VERSION || resolveAutoMinBinaryVersion(appVersion);
+console.log(`min_binary_version=${minBinaryVersion}`);
+const notes = process.env.OTA_NOTES || `OTA ${otaChannel} ${new Date().toISOString()}`;
+const mandatory = process.env.OTA_MANDATORY === "true";
 
-let keyValue = process.env.HOTSWAP_PRIVATE_KEY?.trim();
-let keyPath = process.env.HOTSWAP_PRIVATE_KEY_PATH;
-
+// A key file named explicitly wins over HOTSWAP_PRIVATE_KEY, which may come
+// from .env.local and belong to another app.
+const keyPath = process.env.HOTSWAP_PRIVATE_KEY_PATH;
+let keyValue =
+  keyPath && existsSync(path.resolve(keyPath))
+    ? readFileSync(path.resolve(keyPath), "utf8").trim()
+    : process.env.HOTSWAP_PRIVATE_KEY?.trim();
 if (!keyValue) {
-  if (keyPath) {
-    const resolvedKeyPath = path.resolve(keyPath);
-    if (existsSync(resolvedKeyPath)) {
-      keyPath = resolvedKeyPath;
-    } else {
-      const fallbackKeyPath = path.resolve("../OpenGrindBackend/secrets/hotswap.key");
-      if (existsSync(fallbackKeyPath)) {
-        keyPath = fallbackKeyPath;
-      }
-    }
+  throw new Error(
+    "HOTSWAP private key not found. Set HOTSWAP_PRIVATE_KEY or HOTSWAP_PRIVATE_KEY_PATH.",
+  );
+}
+const keyPassword = process.env.HOTSWAP_PRIVATE_KEY_PASSWORD ?? "";
 
-    if (keyPath && existsSync(keyPath)) {
-      keyValue = readFileSync(keyPath, "utf8").trim();
-    }
-  }
+console.log(`Publishing OTA channel=${otaChannel} version=${otaVersion} -> ${endpoint}`);
 
-  if (!keyValue) {
-    throw new Error(
-      `hotswap key not found. Set HOTSWAP_PRIVATE_KEY or HOTSWAP_PRIVATE_KEY_PATH=../OpenGrindBackend/secrets/hotswap.key.`,
-    );
+// CI passes the bundle ci/build/run.sh frontend built (and two builders agreed
+// on), so what gets signed is exactly what anyone can rebuild from the commit.
+const prebuiltBundle = process.env.OTA_BUNDLE;
+if (prebuiltBundle) {
+  copyFileSync(prebuiltBundle, "frontend.tar.gz");
+} else {
+  if (process.env.OTA_SKIP_BUILD !== "true") {
+    // The bundle's default channel (used until the user picks one) must be the
+    // channel it's served from, or loading it would move the app back to "main".
+    process.env.VITE_HOTSWAP_CHANNEL = otaChannel;
+    run("bun", ["run", "build"]);
   }
+  run("sh", ["ci/build/pack-frontend.sh", "dist", "frontend.tar.gz"]);
+}
+run("bunx", ["tauri", "signer", "sign", "frontend.tar.gz", "-k", keyValue, "-p", keyPassword]);
+const signature = readFileSync("frontend.tar.gz.sig", "utf8").trim();
+
+// Bundle file name carries the sequence so a client that fetched the previous
+// manifest never downloads a mismatched bundle mid-deploy from a CDN edge cache.
+const bundleName = `frontend-${sequence}.tar.gz`;
+const bundleUrl = `${baseUrl}${bundleName}`;
+const siteDir = surgeDomain ? path.resolve(".ota-surge") : path.resolve(outDir);
+
+rmSync(siteDir, { recursive: true, force: true });
+mkdirSync(siteDir, { recursive: true });
+copyFileSync("frontend.tar.gz", path.join(siteDir, bundleName));
+
+const manifest = {
+  version: otaVersion,
+  sequence,
+  url: bundleUrl,
+  signature,
+  min_binary_version: minBinaryVersion,
+  notes,
+  pub_date: new Date().toISOString(),
+  mandatory,
+  bundle_size: statSync("frontend.tar.gz").size,
+};
+writeFileSync(path.join(siteDir, "latest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+
+if (surgeDomain) {
+  try {
+    run("bunx", ["surge", siteDir, surgeDomain]);
+  } finally {
+    rmSync(siteDir, { recursive: true, force: true });
+  }
+} else {
+  console.log(`Wrote ${siteDir}; upload it to ${baseUrl}`);
 }
 
-try {
-  console.log(`Publishing OTA channel=${otaChannel} version=${otaVersion}`);
+console.log("OTA published successfully:");
+console.log(JSON.stringify({ channel: otaChannel, version: otaVersion, sequence, bundle_url: bundleUrl }, null, 2));
 
-  run("npm", ["run", "build"]);
-  run("tar", ["-czf", "frontend.tar.gz", "-C", "dist", "."]);
-  run("npx", ["tauri", "signer", "sign", "frontend.tar.gz", "-k", keyValue, "-p", keyPassword]);
-
-  const signature = readFileSync("frontend.tar.gz.sig", "utf8").trim();
-
-  const responseRaw = run(
-    "curl",
-    [
-      "--fail-with-body",
-      "-sS",
-      "-X",
-      "POST",
-      `${backendUrl}/api/releases`,
-      "-H",
-      `Authorization: Bearer ${backendToken}`,
-      "-F",
-      `channel=${otaChannel}`,
-      "-F",
-      "platform=all",
-      "-F",
-      "arch=all",
-      "-F",
-      `version=${otaVersion}`,
-      "-F",
-      `minBinaryVersion=${minBinaryVersion}`,
-      "-F",
-      `signature=${signature}`,
-      "-F",
-      `notes=${notes}`,
-      "-F",
-      `mandatory=${otaMandatory}`,
-      "-F",
-      "bundleFile=@frontend.tar.gz;type=application/gzip",
-    ],
-    { capture: true },
+if (process.env.GITHUB_OUTPUT) {
+  appendFileSync(
+    process.env.GITHUB_OUTPUT,
+    `ota_version=${otaVersion}\nota_sequence=${sequence}\nota_bundle_url=${bundleUrl}\n`,
   );
-
-  let response;
-  try {
-    response = JSON.parse(responseRaw);
-  } catch {
-    throw new Error(
-      `Backend did not return JSON. Received: ${responseRaw.slice(0, 400)}. Check backend auth/proxy config and CI token.`,
-    );
-  }
-  console.log("OTA uploaded successfully:");
-  console.log(
-    JSON.stringify(
-      {
-        channel: otaChannel,
-        version: otaVersion,
-        sequence: response.sequence,
-        bundle_url: response.bundle_url,
-      },
-      null,
-      2,
-    ),
-  );
-} finally {
-  // no-op: no temporary key files are created
 }

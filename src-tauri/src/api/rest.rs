@@ -1,15 +1,11 @@
-use reqwest::Method;
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 use tauri::ipc::Response;
 
 use crate::error::AppError;
 use crate::state::AppState;
-
-use super::client::GrindrClient;
-use super::client::BASE_URL;
 
 #[derive(Serialize, Deserialize)]
 pub struct RawResponse {
@@ -18,131 +14,42 @@ pub struct RawResponse {
     pub body: Vec<u8>,
 }
 
-impl GrindrClient {
-    pub(super) async fn request_json<TReq, TResp>(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<&TReq>,
-    ) -> Result<TResp, AppError>
-    where
-        TReq: Serialize + ?Sized,
-        TResp: DeserializeOwned,
-    {
-        let url = format!("{BASE_URL}{path}");
-        let mut request = self.http.request(method.clone(), &url);
-
-        if let Some(body) = body {
-            request = request.json(body);
+/// Absolute URLs don't go to Grindr, so they get a plain client — no Grindr
+/// fingerprint, headers or session token.
+async fn send_external(
+    method: grindr::Method,
+    url: &str,
+    body: Option<Vec<u8>>,
+    content_type: Option<&str>,
+) -> Result<RawResponse, AppError> {
+    static CLIENT: OnceLock<wreq::Client> = OnceLock::new();
+    let client = match CLIENT.get() {
+        Some(client) => client,
+        None => {
+            let built = wreq::Client::builder()
+                .build()
+                .map_err(|e| AppError::Http(format!("Failed to build HTTP client: {e}")))?;
+            CLIENT.get_or_init(|| built)
         }
+    };
 
-        let started_at = std::time::Instant::now();
-        eprintln!("[REST] {} {}", method, url);
-
-        let response = request.send().await.map_err(|e| {
-            eprintln!("[REST] network error on {} {}: {e}", method, url);
-            e
-        })?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            eprintln!(
-                "[REST] error {} {} -> status={} body={} ({}ms)",
-                method,
-                url,
-                status,
-                text,
-                started_at.elapsed().as_millis()
-            );
-
-            let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
-            let code = json.get("code").and_then(|c| c.as_i64()).unwrap_or(0) as i32;
-            let message = json
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or_else(|| {
-                    if text.is_empty() {
-                        "Unknown error"
-                    } else {
-                        &text
-                    }
-                })
-                .to_owned();
-
-            return Err(AppError::Api { code, message });
-        }
-
-        let resp = response.json::<TResp>().await.map_err(|e| {
-            eprintln!("[REST] JSON decode error on {} {}: {e}", method, url);
-            AppError::from(e)
-        })?;
-        eprintln!(
-            "[REST] {} {} -> 2xx ({}ms)",
-            method,
-            url,
-            started_at.elapsed().as_millis()
-        );
-        Ok(resp)
+    let mut request = client.request(method, url);
+    if let Some(bytes) = body {
+        request = request
+            .header("content-type", content_type.unwrap_or("application/json"))
+            .body(bytes);
     }
-
-    pub(super) async fn request_raw(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<Vec<u8>>,
-        content_type: Option<&str>,
-    ) -> Result<RawResponse, AppError> {
-        let is_public_path = path.starts_with("/public/");
-
-        let mut authorization = if is_public_path {
-            self.authorization_header().await
-        } else {
-            Some(
-                self.authorization_header()
-                    .await
-                    .ok_or_else(|| AppError::Auth("Not logged in".to_owned()))?,
-            )
-        };
-
-        let make_request = |authorization: Option<&str>| {
-            let mut request = self
-                .http
-                .request(method.clone(), format!("{BASE_URL}{path}"));
-
-            if let Some(authorization) = authorization {
-                request = request.header("Authorization", authorization);
-            }
-
-            if let Some(body) = body.as_ref() {
-                request = request.body(body.clone());
-
-                if let Some(content_type) = content_type {
-                    request = request.header("Content-Type", content_type);
-                } else {
-                    request = request.header("Content-Type", "application/json");
-                }
-            }
-
-            request
-        };
-
-        let mut response = make_request(authorization.as_deref()).send().await?;
-
-        if response.status().as_u16() == 401 && !is_public_path {
-            if self.refresh_token().await.is_ok() {
-                authorization = self.authorization_header().await;
-                if authorization.is_some() {
-                    response = make_request(authorization.as_deref()).send().await?;
-                }
-            }
-        }
-
-        let status = response.status().as_u16();
-        let body = response.bytes().await?.to_vec();
-
-        Ok(RawResponse { status, body })
-    }
+    let response = request
+        .send()
+        .await
+        .map_err(|e| AppError::Http(e.to_string()))?;
+    let status = response.status().as_u16();
+    let body = response
+        .bytes()
+        .await
+        .map_err(|e| AppError::Http(e.to_string()))?
+        .to_vec();
+    Ok(RawResponse { status, body })
 }
 
 #[tauri::command]
@@ -153,21 +60,70 @@ pub async fn request(
     body: Option<Vec<u8>>,
     content_type: Option<String>,
 ) -> Result<Response, AppError> {
-    println!(
-        "Received request: {method} {path} with body of length {}",
-        body.as_ref().map(|b| b.len()).unwrap_or(0)
-    );
-    let method = Method::from_str(&method).map_err(|_| AppError::Api {
+    let method = grindr::Method::from_str(&method).map_err(|_| AppError::Api {
         code: 400,
         message: format!("Invalid method: {method}"),
     })?;
 
-    let raw = state
-        .client()?
-        .request_raw(method, &path, body, content_type.as_deref())
-        .await;
+    let raw = if path.starts_with("https://") || path.starts_with("http://") {
+        send_external(method, &path, body, content_type.as_deref()).await?
+    } else {
+        let client = state.client()?;
+        let mut request = client.request(method, &path);
+        request = match (body, content_type) {
+            // The frontend JSON-encodes plain object bodies itself and sends no
+            // content type for them; re-sending them through `.json()` gives
+            // the official client's `application/json; charset=utf-8`.
+            (Some(bytes), None) => {
+                let value: serde_json::Value = serde_json::from_slice(&bytes)
+                    .map_err(|e| AppError::Http(format!("Request body is not JSON: {e}")))?;
+                request.json(&value)
+            }
+            (Some(bytes), Some(content_type)) => request.bytes(&content_type, bytes),
+            (None, _) => request,
+        };
+        let response = request
+            .send()
+            .await
+            .map_err(|e| AppError::from_client_error(e, &client))?;
+        RawResponse {
+            status: response.status,
+            body: response.body,
+        }
+    };
 
-    let raw = raw?;
+    Ok(Response::new(
+        rmp_serde::encode::to_vec_named(&raw).map_err(|e| AppError::Http(e.to_string()))?,
+    ))
+}
+
+/// GIPHY answers are a few hundred KB; this only guards against a runaway body.
+const MAX_EXTERNAL_BYTES: usize = 4 * 1024 * 1024;
+
+/// GETs a third-party URL the official app also talks to (the GIPHY API) the
+/// way the app does: grindr.rs's TLS fingerprint with a bare OkHttp client's
+/// headers, nothing else. Hosts outside grindr.rs's media allowlist are
+/// refused before a socket opens.
+#[tauri::command]
+pub async fn fetch_external(
+    state: tauri::State<'_, AppState>,
+    url: String,
+    range: Option<String>,
+) -> Result<Response, AppError> {
+    let client = state.client()?;
+    let response = client
+        .fetch_media(grindr::MediaRequest {
+            url: &url,
+            range: range.as_deref(),
+            max_bytes: MAX_EXTERNAL_BYTES,
+            fetcher: grindr::MediaFetcher::Plain,
+        })
+        .await
+        .map_err(|e| AppError::from_client_error(e, &client))?;
+    let raw = RawResponse {
+        status: response.status,
+        body: response.body.to_vec(),
+    };
 
     Ok(Response::new(
         rmp_serde::encode::to_vec_named(&raw).map_err(|e| AppError::Http(e.to_string()))?,

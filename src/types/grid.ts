@@ -31,16 +31,27 @@ export const browseCardSchema = z.object({
 	displayName: z.string().nullable().optional(),
 	age: z.number().nullable().optional(),
 	distanceMeters: z.number().nullable().optional(),
+	// Client-side only: guessed from the neighbouring tiles when the profile
+	// hides its distance and the grid is sorted by distance.
+	estimatedDistanceMeters: z.number().optional(),
 	primaryImageUrl: z.string().nullable().optional(),
 	lastOnline: z.number().nullable().optional(),
 	onlineUntil: z.number().nullable().optional(),
 	isPopular: z.boolean().optional(),
 	isVisiting: z.boolean().optional(),
+	roaming: z.boolean().optional(),
 	isBoosting: z.boolean().optional(),
 	unreadCount: z.number().optional(),
 	favorite: z.boolean().optional(),
 	chatted: z.boolean().optional(),
 	rightNow: z.string().nullable().optional(),
+	/** False: the server offers no block for this profile (see useCanBlockProfile). */
+	isBlockable: z.boolean().nullable().optional(),
+	// Map position as the server obfuscated it (upstream field names, as on the
+	// carousel items). Never the real location, and no fuzz radius either (that
+	// would narrow down the real one).
+	fuzzedLat: z.number().nullable().optional(),
+	fuzzedLon: z.number().nullable().optional(),
 });
 
 export type BrowseCard = z.infer<typeof browseCardSchema>;
@@ -49,6 +60,22 @@ export const geocodeResultSchema = z.object({
 	display_name: z.string(),
 	lat: z.string(),
 	lon: z.string(),
+	address: z
+		.object({
+			road: z.string().optional(),
+			house_number: z.string().optional(),
+			neighbourhood: z.string().optional(),
+			suburb: z.string().optional(),
+			borough: z.string().optional(),
+			city_district: z.string().optional(),
+			city: z.string().optional(),
+			town: z.string().optional(),
+			village: z.string().optional(),
+			municipality: z.string().optional(),
+			state: z.string().optional(),
+			country: z.string().optional(),
+		})
+		.optional(),
 });
 
 export type GeocodeResult = z.infer<typeof geocodeResultSchema>;
@@ -57,6 +84,9 @@ export const profileDetailItemSchema = z.object({
 	profileId: z
 		.union([z.string(), z.number()])
 		.transform((value) => String(value)),
+	// GET /v7/profiles/:id: "FULL" for a real profile, "ERROR" for the
+	// blocked/hidden/gone stub (see classifyProfileAccess). Absent elsewhere.
+	profileType: z.string().nullable().optional(),
 	displayName: z.string().nullable().optional(),
 	age: z.number().nullable().optional(),
 	showAge: z.boolean().optional(),
@@ -65,6 +95,9 @@ export const profileDetailItemSchema = z.object({
 	lastViewed: z.number().nullable().optional(),
 	lastChatTimestamp: z.number().nullable().optional(),
 	isNew: z.boolean().optional(),
+	// Account creation (ms). Only the Free Grind server sends it, and only with
+	// the account-creation-date flag; Grindr's doesn't.
+	created: z.number().nullable().optional(),
 	lastUpdatedTime: z.number().nullable().optional(),
 	distance: z.number().nullable().optional(),
 	approximateDistance: z.boolean().optional(),
@@ -84,6 +117,8 @@ export const profileDetailItemSchema = z.object({
 				reason: z.string().nullable().optional(),
 				takenOnGrindr: z.boolean().nullable().optional(),
 				createdAt: z.number().nullable().optional(),
+				// Self-hosted server: profile videos (type 2) carry their MP4 URL.
+				videoUrl: z.string().nullable().optional(),
 			}),
 		)
 		.nullable()
@@ -129,7 +164,7 @@ export const profileDetailItemSchema = z.object({
 		.transform(v => v ?? []),
 	verifiedInstagramId: z.string().nullable().optional(),
 	lastThrobTimestamp: z.unknown().nullable().optional(),
-	isBlockable: z.boolean().optional(),
+	isBlockable: z.boolean().nullable().optional(),
 	lookingFor: z.array(z.number()).nullable().optional().transform(v => v ?? []),
 	meetAt: z.array(z.number()).nullable().optional().transform(v => v ?? []),
 	grindrTribes: z.array(z.number()).nullable().optional().transform(v => v ?? []),
@@ -181,6 +216,9 @@ export type SelectedLocation = {
 	lat: number;
 	lon: number;
 	label: string;
+	// Best-guess city name, used to default the "save as" name field — null
+	// while still resolving or if the lookup couldn't find one.
+	city?: string | null;
 };
 
 export type ManagedOption = {

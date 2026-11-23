@@ -1,31 +1,48 @@
 package dev.estopia.free_grind
 
 import android.Manifest
-import android.app.NotificationChannel
+import android.animation.Animator
+import android.animation.ObjectAnimator
+import android.app.Dialog
 import android.app.NotificationManager
+import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
+import android.graphics.Color
 import android.os.Handler
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.util.Log
+import android.view.View
+import android.view.WindowManager
+import android.view.animation.LinearInterpolator
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
+import android.widget.ImageView
+import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.content.ContextCompat
-import com.google.firebase.FirebaseApp
-import com.google.firebase.FirebaseOptions
-import com.google.firebase.messaging.FirebaseMessaging
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import org.json.JSONObject
 import java.lang.ref.WeakReference
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.Executors
 
 class MainActivity : TauriActivity() {
   companion object {
     private var activityRef: WeakReference<MainActivity>? = null
     private val pendingPushPayloads = mutableListOf<String>()
+    // Share-sheet payloads (ShareTarget.readShareIntent) waiting for the WebView.
+    private val pendingSharePayloads = mutableListOf<String>()
 
     /**
      * Active in-app route plus foreground flag, kept up to date by the
@@ -35,6 +52,21 @@ class MainActivity : TauriActivity() {
      */
     @Volatile var activeRoute: String? = null
     @Volatile var inForeground: Boolean = false
+
+    /**
+     * Mirrors the NotificationsPage settings, pushed down via
+     * `FreeGrindBridge.setNotificationPreferences(...)`. chat/tapNotificationsEnabled
+     * are the per-category master switches; foregroundNotificationsEnabled is
+     * one general switch (not per-category) for whether either kind shows
+     * while foregrounded, vs. only once backgrounded/closed via FCM. Lets the
+     * FCM service suppress a push notification accordingly, even when the
+     * user isn't on the exact matching screen (which isOnConversation/
+     * isOnTapsScreen already covers). All default to true so an install that
+     * hasn't synced these yet keeps today's always-on behavior.
+     */
+    @Volatile var chatNotificationsEnabled: Boolean = true
+    @Volatile var tapNotificationsEnabled: Boolean = true
+    @Volatile var foregroundNotificationsEnabled: Boolean = true
 
     fun isOnTapsScreen(): Boolean {
       if (!inForeground) return false
@@ -67,32 +99,190 @@ class MainActivity : TauriActivity() {
       activity.dispatchPushNotificationToWebview(payloadJson, 0)
     }
 
+    /**
+     * Hands an inline notification reply (already persisted by
+     * NotificationReply) to the WebView. False when there's none alive — it
+     * then goes out from onWebViewCreate the next time the app is opened.
+     */
+    fun enqueueNotificationReply(replyJson: String): Boolean {
+      val activity = activityRef?.get() ?: return false
+      if (activity.webViewRef == null) return false
+      activity.dispatchNotificationReplyToWebview(replyJson, 0)
+      return true
+    }
+
     fun hasActiveWebView(): Boolean {
       return activityRef?.get()?.webViewRef != null
     }
+
+    fun onFcmTokenRefreshed(token: String) {
+      val activity = activityRef?.get()
+      if (activity != null) {
+        activity.latestFcmToken = token
+        activity.dispatchFcmTokenToWebview(token, 0)
+      } else {
+        // MainActivity not active — store so it gets dispatched on next resume.
+        Log.d("FCM", "MainActivity unavailable, storing refreshed token for next resume")
+        pendingRefreshedFcmToken = token
+      }
+    }
+
+    private var pendingRefreshedFcmToken: String? = null
+
+    /** Token from GoogleOAuthActivity, held until the WebView can take it. */
+    private var pendingGoogleToken: String? = null
   }
 
   private var webViewRef: WebView? = null
+  /**
+   * System-bar + display-cutout insets in CSS px as JSON, the fallback for
+   * env(safe-area-inset-*): older Android System WebViews report 0 for the
+   * system bars in an edge-to-edge window, which put content behind the
+   * navigation bar. index.css takes max(env(...), these).
+   */
+  @Volatile private var safeAreaJson: String? = null
   private var pendingFcmToken: String? = null
   private var latestFcmToken: String? = null
   private val mainHandler = Handler(Looper.getMainLooper())
+  // Bounded pool prevents Binder-thread exhaustion when many WebSocket messages
+  // arrive simultaneously and each postLocalNotification spawns avatar+IPC work.
+  private val localNotifExecutor = Executors.newFixedThreadPool(2)
+  // The system SplashScreen theme only supports an icon + background — no
+  // text or spinner slot. This Dialog (same background/icon, plus a "Free
+  // Grind" label and an indeterminate spinner) stands in for it for as long
+  // as the app takes to actually paint real content — see
+  // JsBridge.notifyContentReady() and dismissSplash() below. It's a Dialog
+  // (its own Window), not a View added into the Activity's own window/
+  // WebView hierarchy: a hardware-accelerated WebView's surface can
+  // composite above a same-window sibling View regardless of add-order, so
+  // that approach got silently painted over the moment the WebView started
+  // rendering. A separate Window is layered above the Activity's by the
+  // WindowManager and isn't subject to that quirk. The postDelayed fallback
+  // prevents it lingering forever if the JS signal never arrives (error,
+  // WebView failing to load, etc.) — a real cold start (cargo/webview/JS
+  // bundle init) has been observed taking ~20-25s on its own, so this must
+  // stay well above that or it'll cut the splash early on every
+  // normal-but-slow launch instead of only on a genuinely broken one.
+  private var splashDialog: Dialog? = null
 
-  private val requestNotificationPermission = registerForActivityResult(
-    ActivityResultContracts.RequestPermission()
-  ) { isGranted ->
-    if (isGranted) {
-      Log.d("FCM", "Notification permission granted")
+  // JsBridge.mintRecaptchaToken() allows one request at a time; this is the
+  // id the frontend will match the `fg:recaptcha-result` event against.
+  @Volatile private var pendingRecaptchaRequestId: String? = null
+
+  private val recaptchaLauncher = registerForActivityResult(
+    ActivityResultContracts.StartActivityForResult()
+  ) { result ->
+    val requestId = pendingRecaptchaRequestId ?: return@registerForActivityResult
+    pendingRecaptchaRequestId = null
+    val (rawToken, refusal, detail) = GrindrNative.recaptchaResult(result.data)
+    val token = rawToken?.trim().orEmpty()
+    val outcome = JSONObject().put("requestId", requestId)
+    if (result.resultCode == RESULT_OK && token.isNotEmpty()) {
+      outcome.put("token", token)
     } else {
-      Log.d("FCM", "Notification permission denied")
+      // RecaptchaMintActivity names its refusal ("grindr-missing",
+      // "mint-failed", ...); no marker means the user backed out.
+      outcome.put("error", if (refusal.isNullOrEmpty()) "cancelled" else refusal)
+      detail?.let { outcome.put("detail", it) }
+    }
+    dispatchRecaptchaResultToWebview(outcome.toString())
+  }
+
+  // Result of JsBridge.requestGoogleToken(): GoogleOAuthActivity answers
+  // RESULT_OK with the token, RESULT_CANCELED when the user backed out.
+  private val googleTokenLauncher = registerForActivityResult(
+    ActivityResultContracts.StartActivityForResult()
+  ) { result ->
+    val token = result.data?.getStringExtra(GoogleOAuthActivity.EXTRA_TOKEN)?.trim().orEmpty()
+    if (result.resultCode == RESULT_OK && token.isNotEmpty()) {
+      dispatchGoogleTokenToWebview(token, 0)
+    } else {
+      dispatchGoogleTokenErrorToWebview("cancelled")
+    }
+  }
+  private var splashSpinnerAnimator: Animator? = null
+
+  private fun dismissSplash() {
+    runOnUiThread {
+      splashSpinnerAnimator?.cancel()
+      splashSpinnerAnimator = null
+      splashDialog?.dismiss()
+      splashDialog = null
     }
   }
 
   override fun onCreate(savedInstanceState: Bundle?) {
-    enableEdgeToEdge()
+    // installSplashScreen() only bridges the gap before this Activity's own
+    // window exists — it's left to dismiss at its own (near-immediate)
+    // default timing rather than held with setKeepOnScreenCondition, because
+    // the system's SplashScreenView draws *on top of* everything else,
+    // including the splashDialog shown below; holding it would just hide
+    // that dialog's text/spinner behind the plain system splash for the
+    // entire wait. The dialog uses the same background/icon, so the handoff
+    // between the two is invisible regardless.
+    installSplashScreen()
+    // Fully transparent nav bar: the default SystemBarStyle.auto() paints a
+    // translucent scrim behind 3-button navigation (API 26-28 via the bar
+    // color, API 29+ via contrast enforcement), which looks like a grey band
+    // under the app's own bottom NavBar.
+    enableEdgeToEdge(
+      navigationBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT)
+    )
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      window.isNavigationBarContrastEnforced = false
+    }
     super.onCreate(savedInstanceState)
+    // Screenshot protection is on until the frontend says otherwise
+    // (setScreenCaptureProtection, a dev option), so the splash and the
+    // Recents card are covered before any JavaScript runs.
+    window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+    // Resolved once up front: both the splash icon below and the Recents
+    // (task switcher) card need to match whichever disguise is currently
+    // active, since neither otherwise picks that up on their own (see
+    // AppDisguise.kt).
+    val activeDisguise = AppDisguise.currentDisguise(this)
+    AppDisguise.applyTaskDescription(this, activeDisguise)
+    splashDialog = Dialog(this, R.style.SplashDialogTheme).apply {
+      setContentView(R.layout.splash_overlay)
+      findViewById<ImageView>(R.id.splash_icon)?.setImageResource(activeDisguise.iconRes)
+      setCancelable(false)
+      window?.let { win ->
+        win.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT)
+        // The Dialog is its own Window, so it doesn't inherit the Activity's
+        // enableEdgeToEdge() styling — left alone, it shows the system
+        // default white status/nav bars instead of the splash background.
+        // statusBarColor/navigationBarColor setters are deprecated on this
+        // project's targetSdk (36, enforced edge-to-edge) anyway — matching
+        // enableEdgeToEdge()'s own approach instead: make the dialog draw
+        // behind the (already-transparent-by-default) system bars so
+        // splash_overlay.xml's own full-bleed background shows through them,
+        // and only control the bar *icon* color via WindowInsetsControllerCompat.
+        WindowCompat.setDecorFitsSystemWindows(win, false)
+        val isNightMode = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+          Configuration.UI_MODE_NIGHT_YES
+        WindowInsetsControllerCompat(win, win.decorView).apply {
+          isAppearanceLightStatusBars = !isNightMode
+          isAppearanceLightNavigationBars = !isNightMode
+        }
+      }
+      show()
+      findViewById<View>(R.id.splash_spinner)?.let { spinner ->
+        splashSpinnerAnimator = ObjectAnimator.ofFloat(spinner, View.ROTATION, 0f, 360f).apply {
+          duration = 3000L
+          repeatCount = ObjectAnimator.INFINITE
+          interpolator = LinearInterpolator()
+          start()
+        }
+      }
+    }
+    mainHandler.postDelayed({ dismissSplash() }, 45000)
     activityRef = WeakReference(this)
-    ensureNotificationChannels()
-    requestNotificationPermissionIfNeeded()
+    ApkUpdater.emit = { event -> dispatchApkUpdateEvent(event) }
+    localNotifExecutor.execute { ApkUpdater.cleanupStale(this) }
+    // Run off the main thread — createNotificationChannel makes IPC calls to
+    // NotificationManagerService that can block for several seconds on some
+    // devices (OxygenOS in particular) and cause a startup ANR.
+    localNotifExecutor.execute { ensureNotificationChannels() }
     initFirebase()
     handleNotificationIntent(intent)
   }
@@ -106,6 +296,24 @@ class MainActivity : TauriActivity() {
   override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)
     webViewRef = webView
+    // The page's own scrolling draws Android's View scrollbar, which CSS can't
+    // reach (index.css only hides those of inner scroll containers). Native
+    // apps show none, so neither does the app.
+    webView.isVerticalScrollBarEnabled = false
+    webView.isHorizontalScrollBarEnabled = false
+    // Android's stretch overscroll for the page's own scrolling is drawn by the
+    // WebView View itself, so it stretches everything on screen, fixed header
+    // and bottom nav included (CSS overscroll-behavior doesn't reach it).
+    webView.overScrollMode = View.OVER_SCROLL_NEVER
+    // Layout changes cover rotation/resizes; onResume covers a nav-mode
+    // switch made while the app was in the background.
+    webView.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ -> publishSafeArea(v) }
+    webView.post { publishSafeArea(webView) }
+    // Records renderer deaths (e.g. out of memory) for the next start. Again
+    // once queued, in case wry assigns its client only after this callback.
+    RenderProcessGuard.install(webView)
+    webView.post { RenderProcessGuard.install(webView) }
+
     @Suppress("AddJavascriptInterface")
     webView.addJavascriptInterface(JsBridge(), "FreeGrindBridge")
     pendingFcmToken?.let {
@@ -113,23 +321,67 @@ class MainActivity : TauriActivity() {
       pendingFcmToken = null
     }
     dispatchPendingPushNotifications()
+    synchronized(pendingSharePayloads) {
+      val pending = pendingSharePayloads.toList()
+      pendingSharePayloads.clear()
+      pending
+    }.forEach { dispatchShareToWebview(it, 0) }
+    dispatchPendingNotificationReplies()
+    pendingGoogleToken?.let {
+      pendingGoogleToken = null
+      dispatchGoogleTokenToWebview(it, 0)
+    }
     handleNotificationIntent(intent)
   }
 
   override fun onResume() {
     super.onResume()
     inForeground = true
-    latestFcmToken?.let {
-      Log.d("FCM", "onResume: retrying token dispatch to WebView")
-      dispatchFcmTokenToWebview(it, 0)
+    // A self-update that finished downloading in the background: show the
+    // installer confirmation Android didn't let us open from there.
+    ApkUpdater.onAppForeground(this)
+    webViewRef?.let { wv -> wv.post { publishSafeArea(wv) } }
+    val refreshed = pendingRefreshedFcmToken
+    if (refreshed != null) {
+      pendingRefreshedFcmToken = null
+      latestFcmToken = refreshed
+      Log.d("FCM", "onResume: dispatching pending refreshed FCM token")
+      dispatchFcmTokenToWebview(refreshed, 0)
+    } else {
+      latestFcmToken?.let {
+        Log.d("FCM", "onResume: retrying token dispatch to WebView")
+        dispatchFcmTokenToWebview(it, 0)
+      }
     }
     dispatchPendingPushNotifications()
     handleNotificationIntent(intent)
+    // Back from Settings > App languages: the change may have arrived while
+    // the WebView was paused.
+    dispatchAppLocaleEvent()
+  }
+
+  // App/system language changes land here instead of recreating the
+  // activity (configChanges includes locale|layoutDirection in the manifest).
+  override fun onConfigurationChanged(newConfig: Configuration) {
+    super.onConfigurationChanged(newConfig)
+    dispatchAppLocaleEvent()
+  }
+
+  private fun dispatchAppLocaleEvent() {
+    val state = AppLocale.stateJson(this) ?: return
+    val script =
+      "window.dispatchEvent(new CustomEvent('fg:app-locale', { detail: $state }));"
+    runOnUiThread { webViewRef?.evaluateJavascript(script, null) }
   }
 
   override fun onPause() {
     inForeground = false
     super.onPause()
+  }
+
+  override fun onTrimMemory(level: Int) {
+    super.onTrimMemory(level)
+    RenderProcessGuard.recordTrim(level)
   }
 
   /**
@@ -138,11 +390,357 @@ class MainActivity : TauriActivity() {
    * focus changes so that the FCM service can decide whether to suppress
    * a system notification.
    */
+  private fun publishSafeArea(view: View) {
+    val insets = ViewCompat.getRootWindowInsets(view) ?: return
+    val i = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+    val d = resources.displayMetrics.density
+    val json = JSONObject()
+      .put("top", i.top / d)
+      .put("right", i.right / d)
+      .put("bottom", i.bottom / d)
+      .put("left", i.left / d)
+      .toString()
+    if (json == safeAreaJson) return
+    safeAreaJson = json
+    // Pushed for live changes; the page also pulls getSafeAreaInsets() on
+    // boot, since a reload drops these inline properties.
+    // window.__fgApplySafeArea is installed by safeAreaBridge.ts; it also
+    // notifies listeners (useSystemNavInset) that the insets changed.
+    val script = "window.__fgApplySafeArea&&window.__fgApplySafeArea($json)"
+    view.post { (view as? WebView)?.evaluateJavascript(script, null) }
+  }
+
   inner class JsBridge {
+    /** Native safe-area insets (see safeAreaJson); null until first measured. */
+    @JavascriptInterface
+    fun getSafeAreaInsets(): String? = safeAreaJson
+
+    /**
+     * The realtime bridge delivered this chat message while the app was
+     * visible — a late FCM push for it must not notify after the app is left.
+     */
+    @JavascriptInterface
+    fun markMessageSeen(messageId: String?) {
+      NotificationPoster.normalizeNullableString(messageId)?.let(NotificationPoster::markMessageSeenInForeground)
+    }
+
+    /** Same as markMessageSeen, for a tap from [senderId]. */
+    @JavascriptInterface
+    fun markTapSeen(senderId: String?) {
+      NotificationPoster.normalizeNullableString(senderId)?.let(NotificationPoster::markTapSeenInForeground)
+    }
+
+    /**
+     * FLAG_SECURE on/off: screenshots and recordings come out black and the
+     * Recents card is blank while it's set (screenCaptureProtection.ts).
+     */
+    @JavascriptInterface
+    fun setScreenCaptureProtection(enabled: Boolean) {
+      runOnUiThread {
+        if (enabled) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+      }
+    }
+
     @JavascriptInterface
     fun setActiveRoute(route: String?) {
       activeRoute = route
       Log.d("FCM", "JsBridge.setActiveRoute=$route foreground=$inForeground")
+    }
+
+    /** Extra state included in a renderer-death report (see RenderProcessGuard). */
+    @JavascriptInterface
+    fun setCrashContext(key: String, value: String?) {
+      RenderProcessGuard.setContext(key, value)
+    }
+
+    /** The report of the last renderer death as JSON, once; null if none. */
+    @JavascriptInterface
+    fun takeRenderCrashReport(): String? = RenderProcessGuard.takeReport(this@MainActivity)
+
+    @JavascriptInterface
+    fun setNotificationPreferences(json: String) {
+      try {
+        val obj = JSONObject(json)
+        chatNotificationsEnabled = obj.optBoolean("chatEnabled", true)
+        tapNotificationsEnabled = obj.optBoolean("tapsEnabled", true)
+        foregroundNotificationsEnabled = obj.optBoolean("foregroundEnabled", true)
+        Log.d(
+          "FCM",
+          "JsBridge.setNotificationPreferences chat=$chatNotificationsEnabled taps=$tapNotificationsEnabled foreground=$foregroundNotificationsEnabled",
+        )
+      } catch (e: Exception) {
+        Log.e("FCM", "Failed to parse notification preferences", e)
+      }
+    }
+
+    /** Localized notification texts for the native push pipeline — see NotificationStrings. */
+    @JavascriptInterface
+    fun setNotificationStrings(json: String) {
+      NotificationStrings.update(this@MainActivity, json)
+    }
+
+    /**
+     * Called once by main.tsx right after the first real paint (double
+     * requestAnimationFrame past the initial React render) — dismisses the
+     * system splash screen and the custom splash overlay installed in
+     * onCreate. Until this fires (or the 45s fallback in onCreate elapses),
+     * the splash stays up instead of the blank WebView background that
+     * would otherwise show while the app loads.
+     */
+    @JavascriptInterface
+    fun notifyContentReady() {
+      Log.d("Splash", "JsBridge.notifyContentReady() called from JS")
+      dismissSplash()
+    }
+
+    /**
+     * Posts a notification straight from the chat WebSocket while it's
+     * connected in the foreground, instead of waiting for the FCM push for
+     * the same message/tap to arrive. Runs off the JS-interface thread since
+     * NotificationPoster fetches the sender's avatar over the network.
+     * NotificationPoster dedupes against the later FCM-triggered post for
+     * the same conversation/tap, so it never shows twice.
+     */
+    @JavascriptInterface
+    fun postLocalNotification(payloadJson: String) {
+      localNotifExecutor.execute {
+        try {
+          NotificationPoster.postNotification(this@MainActivity, JSONObject(payloadJson))
+        } catch (e: Exception) {
+          Log.e("FCM", "Failed to post local notification", e)
+        }
+      }
+    }
+
+    /**
+     * NotificationReplyBridge's outcome for an inline reply:
+     * `{ id, notificationTag, ok }`. A failed one gets flagged on its line.
+     */
+    @JavascriptInterface
+    fun notificationReplyResult(json: String) {
+      localNotifExecutor.execute {
+        try {
+          val result = JSONObject(json)
+          val tag = result.optString("notificationTag").ifBlank { return@execute }
+          if (result.optBoolean("ok")) {
+            NotificationPoster.refreshAfterReply(this@MainActivity, tag)
+          } else {
+            NotificationPoster.markReplyFailed(this@MainActivity, tag, result.optString("id"))
+          }
+        } catch (e: Exception) {
+          Log.e("FCM", "Failed to apply notification reply result", e)
+        }
+      }
+    }
+
+    /**
+     * Called once the frontend has marked a conversation read (locally, or
+     * echoed back from the server via the chat.v1.conversation_read realtime
+     * event) so any already-shown system notification for it disappears
+     * instead of lingering until it's tapped.
+     */
+    @JavascriptInterface
+    fun clearConversationNotifications(conversationId: String?) {
+      val id = NotificationPoster.normalizeNullableString(conversationId) ?: return
+      cancelChatNotification(id)
+    }
+
+    /** A message was unsent — drop its line from the conversation's notification. */
+    @JavascriptInterface
+    fun withdrawMessageNotification(conversationId: String?, messageId: String?) {
+      val conversation = NotificationPoster.normalizeNullableString(conversationId) ?: return
+      val message = NotificationPoster.normalizeNullableString(messageId) ?: return
+      NotificationPoster.withdrawConversationLine(this@MainActivity, conversation, message)
+    }
+
+    @JavascriptInterface
+    fun checkMicrophonePermission(): Boolean {
+      return checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+        android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
+    @JavascriptInterface
+    fun checkCameraPermission(): Boolean {
+      return checkSelfPermission(Manifest.permission.CAMERA) ==
+        android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
+    @JavascriptInterface
+    fun checkNotificationPermission(): Boolean {
+      return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+          android.content.pm.PackageManager.PERMISSION_GRANTED
+      } else {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.areNotificationsEnabled()
+      }
+    }
+
+    @JavascriptInterface
+    fun checkLocationPermission(): Boolean {
+      return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) ==
+        android.content.pm.PackageManager.PERMISSION_GRANTED ||
+        checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) ==
+        android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
+    /**
+     * Switches the launcher icon/name to the given disguise id ("default",
+     * "calculator", "notes", "weather" — see AppDisguise.kt). Returns false
+     * for an unrecognized id instead of throwing.
+     */
+    @JavascriptInterface
+    fun setAppDisguise(id: String): Boolean {
+      val identity = AppDisguise.Identity.fromId(id) ?: return false
+      val success = AppDisguise.applyDisguise(this@MainActivity, identity)
+      if (success && identity != AppDisguise.Identity.DEFAULT) {
+        // Direct Share shortcuts carry chat names/avatars into the system
+        // share sheet — they must not outlive switching to a disguise.
+        localNotifExecutor.execute { ShareTarget.clearShortcuts(this@MainActivity) }
+      }
+      if (success) {
+        // Updates the currently open Recents card immediately — the splash
+        // icon only needs to change on the *next* cold start, so that's
+        // read fresh in onCreate instead.
+        AppDisguise.applyTaskDescription(this@MainActivity, identity)
+      }
+      return success
+    }
+
+    /** Base64 of an image shared into the app (see ShareTarget), consumed on read. */
+    @JavascriptInterface
+    fun takeSharedImage(id: String): String? = ShareTarget.takeSharedImage(this@MainActivity, id)
+
+    /** Recent chats for the share sheet's Direct Share row: `[{ conversationId, name, avatarUrl }]`. */
+    @JavascriptInterface
+    fun publishShareShortcuts(chatsJson: String) {
+      localNotifExecutor.execute { ShareTarget.publishShortcuts(this@MainActivity, chatsJson) }
+    }
+
+    /** Android 13+ per-app language, see AppLocale.kt. null below Android 13. */
+    @JavascriptInterface
+    fun getAppLocaleState(): String? = AppLocale.stateJson(this@MainActivity)
+
+    @JavascriptInterface
+    fun setAppLocale(languageTags: String): Boolean = AppLocale.set(this@MainActivity, languageTags)
+
+    @JavascriptInterface
+    fun getAppDisguise(): String {
+      return AppDisguise.currentDisguise(this@MainActivity).id
+    }
+
+    /**
+     * Opens GoogleOAuthActivity to sign in with Google. The outcome arrives
+     * as a `fg:google-token` or `fg:google-token-error` window event.
+     * Returns "ok".
+     */
+    @JavascriptInterface
+    fun requestGoogleToken(): String {
+      runOnUiThread {
+        try {
+          googleTokenLauncher.launch(Intent(this@MainActivity, GoogleOAuthActivity::class.java))
+        } catch (e: Exception) {
+          Log.e("GoogleOAuth", "Failed to launch GoogleOAuthActivity", e)
+          dispatchGoogleTokenErrorToWebview("launch_failed")
+        }
+      }
+      return "ok"
+    }
+
+    /**
+     * In-app self-update (see ApkUpdater.kt): downloads the release APK and
+     * hands it to Android's installer. Progress arrives as `fg:apk-update`
+     * window events. Returns false for a non-release URL or while an update
+     * is already running.
+     */
+    @JavascriptInterface
+    fun downloadApkUpdate(url: String): Boolean {
+      return ApkUpdater.downloadAndInstall(this@MainActivity, url)
+    }
+
+    /** Re-runs the install of an already downloaded APK after the user granted "install unknown apps". */
+    @JavascriptInterface
+    fun installDownloadedApkUpdate(): Boolean {
+      return ApkUpdater.installDownloaded(this@MainActivity)
+    }
+
+    /** The last `fg:apk-update` event (JSON), so a reopened page can show where the update is; "" if none. */
+    @JavascriptInterface
+    fun getApkUpdateState(): String {
+      return ApkUpdater.currentState().orEmpty()
+    }
+
+    @JavascriptInterface
+    fun canInstallApkUpdates(): Boolean {
+      return ApkUpdater.canInstallNow(this@MainActivity)
+    }
+
+    @JavascriptInterface
+    fun openInstallPermissionSettings(): Boolean {
+      return ApkUpdater.openInstallPermissionSettings(this@MainActivity)
+    }
+
+    /**
+     * Mints a reCAPTCHA token for one of Grindr's actions ("login",
+     * "report", ...) in RecaptchaMintActivity. The outcome arrives as a
+     * `fg:recaptcha-result` window event carrying [requestId]. Returns "ok",
+     * or "busy" while another request is in flight.
+     */
+    @JavascriptInterface
+    fun mintRecaptchaToken(action: String, requestId: String): String {
+      val intent = GrindrNative.recaptchaIntent(this@MainActivity, action) ?: return "unsupported"
+      synchronized(this@MainActivity) {
+        if (pendingRecaptchaRequestId != null) return "busy"
+        pendingRecaptchaRequestId = requestId
+      }
+      runOnUiThread {
+        try {
+          recaptchaLauncher.launch(intent)
+        } catch (e: Exception) {
+          Log.e("Recaptcha", "Failed to launch RecaptchaMintActivity", e)
+          pendingRecaptchaRequestId = null
+          dispatchRecaptchaResultToWebview(
+            JSONObject().put("requestId", requestId).put("error", "mint-failed")
+              .put("detail", e.javaClass.simpleName).toString()
+          )
+        }
+      }
+      return "ok"
+    }
+
+    @JavascriptInterface
+    fun vibrate(durationMs: Long) {
+      try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+          val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
+          } else {
+            @Suppress("DEPRECATION")
+            getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+          }
+          // Very short one-shots (10–40ms) are often too brief for the motor to
+          // spin up, so taps were only felt sometimes. The predefined click
+          // effects are tuned per device for exactly this kind of UI feedback.
+          val effect = when {
+            durationMs <= 20 -> VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK)
+            durationMs <= 50 -> VibrationEffect.createPredefined(VibrationEffect.EFFECT_HEAVY_CLICK)
+            else -> VibrationEffect.createOneShot(durationMs, VibrationEffect.DEFAULT_AMPLITUDE)
+          }
+          vibrator.vibrate(effect)
+        } else {
+          @Suppress("DEPRECATION")
+          val v = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            v.vibrate(VibrationEffect.createOneShot(durationMs, VibrationEffect.DEFAULT_AMPLITUDE))
+          } else {
+            @Suppress("DEPRECATION")
+            v.vibrate(durationMs)
+          }
+        }
+      } catch (t: Throwable) {
+        Log.w("Bridge", "vibrate failed", t)
+      }
     }
   }
 
@@ -150,78 +748,26 @@ class MainActivity : TauriActivity() {
     if (activityRef?.get() === this) {
       activityRef = null
     }
+    localNotifExecutor.shutdown()
     super.onDestroy()
   }
 
-  private fun requestNotificationPermissionIfNeeded() {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-      val hasPermission = ContextCompat.checkSelfPermission(
-        this,
-        Manifest.permission.POST_NOTIFICATIONS
-      ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-      Log.d("FCM", "POST_NOTIFICATIONS permission granted=$hasPermission")
-      if (!hasPermission) {
-        requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-      }
-    }
-  }
-
   private fun initFirebase() {
-    try {
-      val spoofedContext = SpoofedContext(applicationContext)
-      val options = FirebaseOptions.Builder()
-        .setApplicationId(getString(R.string.fcm_google_app_id))
-        .setProjectId(getString(R.string.fcm_project_id))
-        .setApiKey(getString(R.string.fcm_google_api_key))
-        .setGcmSenderId(getString(R.string.fcm_gcm_defaultSenderId))
-        .build()
-
-      if (FirebaseApp.getApps(spoofedContext).isEmpty()) {
-        FirebaseApp.initializeApp(spoofedContext, options)
-      }
-      Log.d("FCM", "Firebase initialized with spoofed context")
-
-      try {
-        FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
-          if (task.isSuccessful) {
-            val token = task.result
-            latestFcmToken = token
-            Log.d("FCM", "Push token fetched successfully (len=${token.length})")
-            Log.v("FCM", "Push token value: $token")
-            dispatchFcmTokenToWebview(token, 0)
-          } else {
-            Log.w("FCM", "Failed to get push token", task.exception)
-          }
-        }
-      } catch (t: Throwable) {
-        Log.e("FCM", "Firebase Messaging unavailable; continuing without push token", t)
-      }
-    } catch (t: Throwable) {
-      Log.e("FCM", "Firebase initialization failed; continuing without push", t)
+    // Already initialized by FreeGrindApplication; this is a no-op unless that failed.
+    PushFirebase.initialize(applicationContext)
+    PushFirebase.token { token ->
+      latestFcmToken = token
+      Log.d("FCM", "Push token fetched successfully (len=${token.length})")
+      Log.v("FCM", "Push token value: $token")
+      dispatchFcmTokenToWebview(token, 0)
     }
   }
 
   private fun ensureNotificationChannels() {
-    val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-
-    val chatChannel = NotificationChannel(
-      "free_grind_chat_notifications",
-      "Chat Messages",
-      NotificationManager.IMPORTANCE_HIGH
-    ).apply {
-      description = "Notifications for new chat messages"
-    }
-
-    val tapsChannel = NotificationChannel(
-      "free_grind_taps_notifications",
-      "Taps",
-      NotificationManager.IMPORTANCE_HIGH
-    ).apply {
-      description = "Notifications for incoming taps"
-    }
-
-    notificationManager.createNotificationChannel(chatChannel)
-    notificationManager.createNotificationChannel(tapsChannel)
+    // Names follow the active AppDisguise identity ("Chat Messages"/"Taps"
+    // normally, something generic while a decoy is active) so Android's own
+    // notification settings screen doesn't give the disguise away.
+    AppDisguise.ensureMessageChannels(this)
   }
 
   private fun dispatchFcmTokenToWebview(token: String, attempt: Int) {
@@ -257,6 +803,51 @@ class MainActivity : TauriActivity() {
     }
   }
 
+  // Not persisted to localStorage (unlike the FCM token): it's a Google
+  // credential and only needed until the sign-in page consumes it.
+  private fun dispatchApkUpdateEvent(event: JSONObject) {
+    val script =
+      "window.dispatchEvent(new CustomEvent('fg:apk-update', { detail: $event }));"
+    runOnUiThread { webViewRef?.evaluateJavascript(script, null) }
+  }
+
+  private fun dispatchGoogleTokenToWebview(token: String, attempt: Int) {
+    val script =
+      "(function(){" +
+      "var token = ${JSONObject.quote(token)};" +
+      "var href = String(location && location.href || '');" +
+      "if (href.indexOf('tauri.localhost') === -1) { return 'retry:not-ready:' + href; }" +
+      "window.__FG_GOOGLE_TOKEN = token;" +
+      "window.dispatchEvent(new CustomEvent('fg:google-token', { detail: { token: token } }));" +
+      "return 'ok';" +
+      "})();"
+
+    runOnUiThread {
+      val webView = webViewRef
+      if (webView == null) {
+        pendingGoogleToken = token
+        return@runOnUiThread
+      }
+      webView.evaluateJavascript(script) { result ->
+        if (result.contains("retry") && attempt < 12) {
+          mainHandler.postDelayed({ dispatchGoogleTokenToWebview(token, attempt + 1) }, 400)
+        }
+      }
+    }
+  }
+
+  private fun dispatchRecaptchaResultToWebview(outcomeJson: String) {
+    val script =
+      "window.dispatchEvent(new CustomEvent('fg:recaptcha-result', { detail: $outcomeJson }));"
+    runOnUiThread { webViewRef?.evaluateJavascript(script, null) }
+  }
+
+  private fun dispatchGoogleTokenErrorToWebview(reason: String) {
+    val script =
+      "window.dispatchEvent(new CustomEvent('fg:google-token-error', { detail: { reason: ${JSONObject.quote(reason)} } }));"
+    runOnUiThread { webViewRef?.evaluateJavascript(script, null) }
+  }
+
   private fun dispatchPendingPushNotifications() {
     val queuedPayloads = synchronized(pendingPushPayloads) {
       if (pendingPushPayloads.isEmpty()) {
@@ -279,9 +870,25 @@ class MainActivity : TauriActivity() {
       return
     }
 
+    if (ShareTarget.isShareIntent(intent)) {
+      // Consumed right here: this runs again from onWebViewCreate/onResume
+      // with the same intent, which must not re-import the images.
+      val shared = Intent(intent)
+      intent.action = null
+      localNotifExecutor.execute {
+        ShareTarget.readShareIntent(this, shared)?.let { dispatchShareToWebview(it.toString(), 0) }
+      }
+      return
+    }
+
     val payloadJson = intent.getStringExtra("push_payload")
     if (!payloadJson.isNullOrBlank()) {
       intent.removeExtra("push_payload")
+      // The same intent also carries the plain "action" fallback. This runs
+      // again from onResume/onWebViewCreate, and that leftover would then
+      // re-dispatch a bare chat open — overriding e.g. the "Open profile"
+      // action button's openTarget.
+      intent.removeExtra("action")
       val openedPayload = toOpenedPushPayload(payloadJson)
       cancelNotificationForAction(extractActionFromPayload(openedPayload))
       dispatchPushNotificationToWebview(openedPayload, 0)
@@ -378,8 +985,18 @@ class MainActivity : TauriActivity() {
       return
     }
 
+    cancelChatNotification(conversationId)
+  }
+
+  // Cancels using the exact (tag, id) pair NotificationPoster.postNotification
+  // used to post — notify()/cancel() only match a notification when both
+  // agree, so this must stay in sync with resolveNotificationKey there.
+  private fun cancelChatNotification(conversationId: String) {
     val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-    notificationManager.cancel(conversationId.hashCode())
+    notificationManager.cancel(
+      NotificationPoster.chatNotificationTag(conversationId),
+      NotificationPoster.NOTIFICATION_INSTANCE_ID,
+    )
   }
 
   private fun toOpenedPushPayload(payloadJson: String): String {
@@ -423,10 +1040,81 @@ class MainActivity : TauriActivity() {
       webView.evaluateJavascript(script) { result ->
         Log.d("FCM", "WebView push payload dispatch callback result=$result")
         val shouldRetry = result.contains("retry")
-        if (shouldRetry && attempt < 12) {
+        // ~20s: on a cold start from a notification tap the frontend can
+        // take longer than a few seconds to load, and a payload that runs
+        // out of retries is dropped (the tap then does nothing).
+        if (shouldRetry && attempt < 50) {
           mainHandler.postDelayed({
             dispatchPushNotificationToWebview(payloadJson, attempt + 1)
           }, 400)
+        }
+      }
+    }
+  }
+
+  private fun dispatchPendingNotificationReplies() {
+    val pending = NotificationReply.pending(this)
+    for (i in 0 until pending.length()) {
+      pending.optJSONObject(i)?.let { dispatchNotificationReplyToWebview(it.toString(), 0) }
+    }
+  }
+
+  // Dropped from NotificationReply's store once the page has queued it;
+  // NotificationReplyBridge dedupes by id, so a reply dispatched twice (from
+  // the receiver and again from onWebViewCreate) is still sent once.
+  private fun dispatchNotificationReplyToWebview(replyJson: String, attempt: Int) {
+    val script =
+      "(function(){" +
+      "var reply = ${JSONObject.quote(replyJson)};" +
+      "var href = String(location && location.href || '');" +
+      "if (href.indexOf('tauri.localhost') === -1) { return 'retry:not-ready:' + href; }" +
+      "try { reply = JSON.parse(reply); } catch (e) { return 'drop:json'; }" +
+      "var queue = Array.isArray(window.__FG_NOTIFICATION_REPLIES) ? window.__FG_NOTIFICATION_REPLIES : [];" +
+      "queue.push(reply);" +
+      "window.__FG_NOTIFICATION_REPLIES = queue;" +
+      "window.dispatchEvent(new CustomEvent('fg:notification-reply', { detail: reply }));" +
+      "return 'ok';" +
+      "})();"
+    val id = runCatching { JSONObject(replyJson).optString("id") }.getOrDefault("")
+
+    runOnUiThread {
+      val webView = webViewRef ?: return@runOnUiThread
+      webView.evaluateJavascript(script) { result ->
+        when {
+          result.contains("retry") && attempt < 50 ->
+            mainHandler.postDelayed({ dispatchNotificationReplyToWebview(replyJson, attempt + 1) }, 400)
+          result.contains("ok") || result.contains("drop") ->
+            localNotifExecutor.execute { NotificationReply.remove(this, id) }
+        }
+      }
+    }
+  }
+
+  private fun dispatchShareToWebview(payloadJson: String, attempt: Int) {
+    val script =
+      "(function(){" +
+      "var payload = ${JSONObject.quote(payloadJson)};" +
+      "var href = String(location && location.href || '');" +
+      "if (href.indexOf('tauri.localhost') === -1) { return 'retry:not-ready:' + href; }" +
+      "try { payload = JSON.parse(payload); } catch (e) { return 'retry:json'; }" +
+      "var queue = Array.isArray(window.__FG_SHARE_INTENTS) ? window.__FG_SHARE_INTENTS : [];" +
+      "queue.push(payload);" +
+      "window.__FG_SHARE_INTENTS = queue;" +
+      "window.dispatchEvent(new CustomEvent('fg:share-intent', { detail: payload }));" +
+      "return 'ok';" +
+      "})();"
+
+    runOnUiThread {
+      val webView = webViewRef
+      if (webView == null) {
+        synchronized(pendingSharePayloads) {
+          pendingSharePayloads.add(payloadJson)
+        }
+        return@runOnUiThread
+      }
+      webView.evaluateJavascript(script) { result ->
+        if (result.contains("retry") && attempt < 50) {
+          mainHandler.postDelayed({ dispatchShareToWebview(payloadJson, attempt + 1) }, 400)
         }
       }
     }

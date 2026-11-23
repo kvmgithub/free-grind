@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
 	type BrowseFilters,
@@ -22,7 +22,9 @@ export function useBrowseFilters(persistedBrowseFilters: BrowseFiltersDraft) {
 	const [heightCmMax, setHeightCmMax] = useState(persistedBrowseFilters.heightCmMax);
 	const [weightGramsMin, setWeightGramsMin] = useState(persistedBrowseFilters.weightGramsMin);
 	const [weightGramsMax, setWeightGramsMax] = useState(persistedBrowseFilters.weightGramsMax);
+	const [genders, setGenders] = useState<number[]>(persistedBrowseFilters.genders);
 	const [tribes, setTribes] = useState<number[]>(persistedBrowseFilters.tribes);
+	const [tribesImInto, setTribesImInto] = useState<number[]>(persistedBrowseFilters.tribesImInto);
 	const [lookingFor, setLookingFor] = useState<number[]>(persistedBrowseFilters.lookingFor);
 	const [relationshipStatuses, setRelationshipStatuses] = useState<number[]>(
 		persistedBrowseFilters.relationshipStatuses,
@@ -34,6 +36,7 @@ export function useBrowseFilters(persistedBrowseFilters: BrowseFiltersDraft) {
 	const [meetAt, setMeetAt] = useState<number[]>(persistedBrowseFilters.meetAt);
 	const [nsfwPics, setNsfwPics] = useState<number[]>(persistedBrowseFilters.nsfwPics);
 	const [tags, setTags] = useState<string[]>(persistedBrowseFilters.tags);
+	const [nicknameFilter, setNicknameFilter] = useState(persistedBrowseFilters.nicknameFilter);
 	const [sortBy, setSortBy] = useState<BrowseSortOption>(persistedBrowseFilters.sortBy);
 
 	// Apply incoming filter state from navigation and then clear it
@@ -56,7 +59,9 @@ export function useBrowseFilters(persistedBrowseFilters: BrowseFiltersDraft) {
 		setHeightCmMax(normalized.heightCmMax);
 		setWeightGramsMin(normalized.weightGramsMin);
 		setWeightGramsMax(normalized.weightGramsMax);
+		setGenders(normalized.genders);
 		setTribes(normalized.tribes);
+		setTribesImInto(normalized.tribesImInto);
 		setLookingFor(normalized.lookingFor);
 		setRelationshipStatuses(normalized.relationshipStatuses);
 		setBodyTypes(normalized.bodyTypes);
@@ -64,6 +69,12 @@ export function useBrowseFilters(persistedBrowseFilters: BrowseFiltersDraft) {
 		setMeetAt(normalized.meetAt);
 		setNsfwPics(normalized.nsfwPics);
 		setTags(normalized.tags);
+		setNicknameFilter(normalized.nicknameFilter);
+
+		// Persist immediately so this becomes the source of truth on disk too —
+		// otherwise a later account-ready reload can clobber it with the stale draft
+		// before the regular (skip-first-run) persist effect ever saves it.
+		void saveBrowseFiltersDraft(normalized);
 
 		// Clear the state from the history entry so it doesn't re-apply when returning to this page
 		navigate(location.pathname + location.search, {
@@ -72,9 +83,16 @@ export function useBrowseFilters(persistedBrowseFilters: BrowseFiltersDraft) {
 		});
 	}, [location.key, location.state, location.pathname, location.search, navigate]);
 
-	// Persist filter state on every change
+	// Persist filter state on every change, but skip the very first run (mount
+	// with whatever initial draft was passed in) so it can't race the async
+	// load in GridPage and overwrite a freshly-loaded draft with stale data.
+	const hasMountedRef = useRef(false);
 	useEffect(() => {
-		saveBrowseFiltersDraft({
+		if (!hasMountedRef.current) {
+			hasMountedRef.current = true;
+			return;
+		}
+		void saveBrowseFiltersDraft({
 			sortBy,
 			browseFilters,
 			ageMin,
@@ -83,7 +101,9 @@ export function useBrowseFilters(persistedBrowseFilters: BrowseFiltersDraft) {
 			heightCmMax,
 			weightGramsMin,
 			weightGramsMax,
+			genders,
 			tribes,
+			tribesImInto,
 			lookingFor,
 			relationshipStatuses,
 			bodyTypes,
@@ -91,6 +111,7 @@ export function useBrowseFilters(persistedBrowseFilters: BrowseFiltersDraft) {
 			meetAt,
 			nsfwPics,
 			tags,
+			nicknameFilter,
 		});
 	}, [
 		browseFilters,
@@ -100,7 +121,9 @@ export function useBrowseFilters(persistedBrowseFilters: BrowseFiltersDraft) {
 		heightCmMax,
 		weightGramsMin,
 		weightGramsMax,
+		genders,
 		tribes,
+		tribesImInto,
 		lookingFor,
 		relationshipStatuses,
 		bodyTypes,
@@ -108,6 +131,7 @@ export function useBrowseFilters(persistedBrowseFilters: BrowseFiltersDraft) {
 		meetAt,
 		nsfwPics,
 		tags,
+		nicknameFilter,
 		sortBy,
 	]);
 
@@ -140,7 +164,9 @@ export function useBrowseFilters(persistedBrowseFilters: BrowseFiltersDraft) {
 			heightCmMax?: number;
 			weightGramsMin?: number;
 			weightGramsMax?: number;
+			genders?: string;
 			tribes?: string;
+			tribesImInto?: string;
 			lookingFor?: string;
 			relationshipStatuses?: string;
 			bodyTypes?: string;
@@ -187,7 +213,9 @@ export function useBrowseFilters(persistedBrowseFilters: BrowseFiltersDraft) {
 		if (typeof parsedWeightGramsMin === "number") next.weightGramsMin = parsedWeightGramsMin;
 		if (typeof parsedWeightGramsMax === "number") next.weightGramsMax = parsedWeightGramsMax;
 
+		const parsedGenders = toOptionalNumberCsv(genders);
 		const parsedTribes = toOptionalNumberCsv(tribes);
+		const parsedTribesImInto = toOptionalNumberCsv(tribesImInto);
 		const parsedLookingFor = toOptionalNumberCsv(lookingFor);
 		const parsedRelationshipStatuses = toOptionalNumberCsv(relationshipStatuses);
 		const parsedBodyTypes = toOptionalNumberCsv(bodyTypes);
@@ -196,7 +224,9 @@ export function useBrowseFilters(persistedBrowseFilters: BrowseFiltersDraft) {
 		const parsedNsfwPics = toOptionalNumberCsv(nsfwPics);
 		const parsedTags = toOptionalTagCsv(tags);
 
+		if (parsedGenders) next.genders = parsedGenders;
 		if (parsedTribes) next.tribes = parsedTribes;
+		if (parsedTribesImInto) next.tribesImInto = parsedTribesImInto;
 		if (parsedLookingFor) next.lookingFor = parsedLookingFor;
 		if (parsedRelationshipStatuses) next.relationshipStatuses = parsedRelationshipStatuses;
 		if (parsedBodyTypes) next.bodyTypes = parsedBodyTypes;
@@ -214,7 +244,9 @@ export function useBrowseFilters(persistedBrowseFilters: BrowseFiltersDraft) {
 		heightCmMin,
 		weightGramsMax,
 		weightGramsMin,
+		genders,
 		tribes,
+		tribesImInto,
 		lookingFor,
 		relationshipStatuses,
 		bodyTypes,
@@ -226,11 +258,11 @@ export function useBrowseFilters(persistedBrowseFilters: BrowseFiltersDraft) {
 
 	const activeFilterCount = useMemo(() => {
 		let count = Object.keys(browseRequestFilters).length;
-		if (browseFilters.isVisiting) {
-			count += 1;
-		}
+		if (browseFilters.isVisiting) count += 1;
+		// A purely numeric entry is a profile ID lookup, not a name filter.
+		if (nicknameFilter && !/^\d+$/.test(nicknameFilter.trim())) count += 1;
 		return count;
-	}, [browseRequestFilters, browseFilters.isVisiting]);
+	}, [browseRequestFilters, browseFilters.isVisiting, nicknameFilter]);
 
 	const hasActiveBrowseFilters = activeFilterCount > 0;
 
@@ -242,7 +274,9 @@ export function useBrowseFilters(persistedBrowseFilters: BrowseFiltersDraft) {
 		setHeightCmMax("");
 		setWeightGramsMin("");
 		setWeightGramsMax("");
+		setGenders([]);
 		setTribes([]);
+		setTribesImInto([]);
 		setLookingFor([]);
 		setRelationshipStatuses([]);
 		setBodyTypes([]);
@@ -250,6 +284,30 @@ export function useBrowseFilters(persistedBrowseFilters: BrowseFiltersDraft) {
 		setMeetAt([]);
 		setNsfwPics([]);
 		setTags([]);
+		setNicknameFilter("");
+	};
+
+	const applyDraft = (draft: BrowseFiltersDraft) => {
+		const normalized = normalizeBrowseFiltersDraft(draft);
+		setSortBy(normalized.sortBy);
+		setBrowseFilters(normalized.browseFilters);
+		setAgeMin(normalized.ageMin);
+		setAgeMax(normalized.ageMax);
+		setHeightCmMin(normalized.heightCmMin);
+		setHeightCmMax(normalized.heightCmMax);
+		setWeightGramsMin(normalized.weightGramsMin);
+		setWeightGramsMax(normalized.weightGramsMax);
+		setGenders(normalized.genders);
+		setTribes(normalized.tribes);
+		setTribesImInto(normalized.tribesImInto);
+		setLookingFor(normalized.lookingFor);
+		setRelationshipStatuses(normalized.relationshipStatuses);
+		setBodyTypes(normalized.bodyTypes);
+		setSexualPositions(normalized.sexualPositions);
+		setMeetAt(normalized.meetAt);
+		setNsfwPics(normalized.nsfwPics);
+		setTags(normalized.tags);
+		setNicknameFilter(normalized.nicknameFilter);
 	};
 
 	return {
@@ -267,8 +325,12 @@ export function useBrowseFilters(persistedBrowseFilters: BrowseFiltersDraft) {
 		setWeightGramsMin,
 		weightGramsMax,
 		setWeightGramsMax,
+		genders,
+		setGenders,
 		tribes,
 		setTribes,
+		tribesImInto,
+		setTribesImInto,
 		lookingFor,
 		setLookingFor,
 		relationshipStatuses,
@@ -283,11 +345,14 @@ export function useBrowseFilters(persistedBrowseFilters: BrowseFiltersDraft) {
 		setNsfwPics,
 		tags,
 		setTags,
+		nicknameFilter,
+		setNicknameFilter,
 		sortBy,
 		setSortBy,
 		browseRequestFilters,
 		activeFilterCount,
 		hasActiveBrowseFilters,
 		clearBrowseFilters,
+		applyDraft,
 	};
 }

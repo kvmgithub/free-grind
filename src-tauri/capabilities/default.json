@@ -11,8 +11,9 @@
 			"identifier": "opener:allow-open-url",
 			"allow": [
 				{ "url": "geo:*" },
-				{ "url": "https://www.google.com/maps/*" }
-			]
+				{ "url": "https://www.google.com/maps/*" },
+				{ "url": "https://lens.google.com/uploadbyurl*" },
+				{ "url": "https://yandex.com/images/search*" }			]
 		},
 		"notification:default",
 		"fs:default",
@@ -21,12 +22,6 @@
 			"allow": [
 				{
 					"path": "$APPDATA/preferences.json"
-				},
-				{
-					"path": "$APPDATA/chat-log"
-				},
-				{
-					"path": "$APPDATA/chat-log/**"
 				}
 			]
 		},
@@ -35,9 +30,6 @@
 			"allow": [
 				{
 					"path": "$APPDATA/preferences.json"
-				},
-				{
-					"path": "$APPDATA/chat-log/**"
 				}
 			]
 		},
@@ -46,39 +38,23 @@
 			"allow": [
 				{
 					"path": "$APPDATA/preferences.json"
-				},
-				{
-					"path": "$APPDATA/chat-log/**"
 				}
 			]
 		},
-		{
-			"identifier": "fs:allow-mkdir",
-			"allow": [
-				{
-					"path": "$APPDATA/chat-log"
-				}
-			]
-		},
-		{
-			"identifier": "fs:allow-read-dir",
-			"allow": [
-				{
-					"path": "$APPDATA/chat-log"
-				}
-			]
-		},
-		{
-			"identifier": "fs:allow-remove",
-			"allow": [
-				{
-					"path": "$APPDATA/chat-log/**"
-				}
-			]
-		},
+		"fs:allow-appcache-write-recursive",
+		"fs:allow-appcache-read-recursive",
 		"geolocation:allow-check-permissions",
 		"geolocation:allow-request-permissions",
 		"geolocation:allow-get-current-position",
+		{
+			"identifier": "http:default",
+			"allow": [
+				{ "url": "https://*.cloudfront.net/*" },
+				{ "url": "https://cdns.grindr.com/*" },
+				{ "url": "https://accounts.spotify.com/*" },
+				{ "url": "https://api.spotify.com/*" }
+			]
+		},
 		"sql:default",
 		"sql:allow-load",
 		"sql:allow-execute",

@@ -1,32 +1,94 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { RightNowLimitError, RightNowPostGoneError, RightNowRequestAlreadySentError } from "../../services/api/feedMethods";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import toast from "react-hot-toast";
 import { useLocation, useNavigate } from "react-router-dom";
+import { getIncognitoMode } from "../../utils/privacy";
+import { Button } from "../../components/ui/button";
+import { FeedEmptyState, FeedErrorState } from "../../components/ui/states";
+import { RightNowIcon } from "../../components/icons/RightNowIcon";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import {
 	ArrowUpDown,
-	Clock,
-	Loader2,
+	Crosshair,
+	Flag,
 	MessageSquare,
+	Ghost,
+	Hourglass,
+	List,
 	Navigation,
-	SlidersHorizontal,
+	Star,
+	Check,
+	Clock,
+	Hand,
+	Inbox,
+	UserRound,
+	VenetianMask,
+	X,
 } from "lucide-react";
+import { SlidersHorizontal as PhosphorSlidersHorizontal } from "@phosphor-icons/react";
+import { ClockFilled, HomeFilled, LayoutGridFilled, MapFilled } from "../../components/icons/FilledIcons";
+import { FilterPill } from "../../components/ui/FilterPill";
+import { sanitizeQuickFilters, useRightNowQuickFilterDefs } from "../../components/quick-filters/quickFilterDefs";
+import { RIGHT_NOW_QUICK_FILTER_KEYS } from "../../config/quick-filters";
+import { getRightNowEntryKey, useReceivedRightNowRequests, useRightNowFeed, useSentRightNowRequests } from "../../hooks/queries/useRightNowQueries";
+import { RightNowRequestsSheet, pendingRightNowRequests } from "./rightnow/RightNowRequestsSheet";
 import { useApiFunctions } from "../../hooks/useApiFunctions";
-import type { RightNowFeedItem } from "../../services/apiFunctions";
-import { getThumbImageUrl, validateMediaHash } from "../../utils/media";
-import { formatDistance } from "./gridpage/utils";
+import { useFeatureFlag } from "../../services/assignmentsStore";
+import { decodeGeohash } from "../../utils/geohash";
+import { simulateRightNowMapFeed } from "./rightnow/rightnow-simulation";
+import type { RightNowDiscreetFeedItem, RightNowFeedEntry, RightNowFeedItem } from "../../services/apiFunctions";
+import type { RightNowSentRequest } from "../../types/right-now";
+import { formatDistance, isOnlineEndingSoon } from "./gridpage/utils";
+import { formatRelativeTime } from "../../utils/relativeTime";
 import { cn } from "../../utils/cn";
-import blankProfileImage from "../../images/blank-profile.png";
+import { getRightNowLastSeen, markRightNowSeen } from "../../services/seenStore";
+import { ProfileImage } from "../../components/ui/profile-image";
+import { useRevealOnScroll } from "../../hooks/useRevealOnScroll";
 import { PullToRefreshContainer } from "./components/PullToRefreshContainer";
 import {
 	type RightNowFiltersDraft,
 	type RightNowSortOption,
+	type RightNowViewMode,
 	loadRightNowFiltersDraft,
 	saveRightNowFiltersDraft,
-} from "./rightnow-filters-storage";
-import { getSexualPositionFilterOptions } from "./profile-option-builders";
-import { usePreferences } from "../../contexts/PreferencesContext";
+} from "./rightnow/rightnow-filters-storage";
+import { getSexualPositionFilterOptions, getSexualPositionLabelMap } from "./profile-option-builders";
+import { formatHeightForUnits, formatWeightForUnits } from "../../utils/units";
+import { useForceDarkScheme, usePreferences } from "../../contexts/PreferencesContext";
+import { RightNowPostFAB, type RightNowFABPhase } from "./rightnow/RightNowPostFAB";
+import { RightNowPostPill } from "./rightnow/RightNowPostPill";
+import { useNavStyle } from "../../components/NavBar";
+import { RightNowPostPage } from "./rightnow/RightNowPostPage";
+import { RightNowFiltersPage } from "./RightNowFiltersPage";
+import { PhotoViewer } from "../../components/PhotoViewer";
+import { useDesktopBreakpoint } from "../../hooks/useDesktopBreakpoint";
+import {
+	SCROLL_RESTORATION_TIMEOUT_MS,
+} from "../../config/ui-constants";
+import { PageHeaderBackground } from "../../components/ui/PageHeaderBackground";
+import { FeedScrollContainer } from "../../components/ui/FeedScrollContainer";
+import { RightNowMap, getRightNowAvatarUrl, getRightNowItemKey, getRightNowProfileImageUrl, hasMapPosition } from "./rightnow/RightNowMap";
+import { CruisingMapOverlay, useCruisingMapState, useOwnMapCard, useOwnMapPresence } from "./gridpage/cruising/CruisingMapOverlay";
+import { proxyMediaUrl } from "../../utils/mediaProxy";
+import { getProfileImageUrl, validateMediaHash } from "../../utils/media";
+import { SHEET_ICON_BUTTON_CLASS, sheetButtonClass } from "../../components/ui/bottom-sheet";
+import { PRIVACY_BLUR_CLASS, PRIVACY_BLUR_TRANSITION_CLASS, PRIVACY_HOVER_REVEAL_CLASS, useMediaBlur } from "../../hooks/useProfilePhotoPrivacy";
+import { useBlurReveal } from "../../hooks/useBlurReveal";
+import { IconTabs, type IconTabConfig } from "../../components/ui/icon-tabs";
+import { ReportProfileDialog } from "../../components/ReportProfileDialog";
+import { useAuth } from "../../contexts/useAuth";
+import { useBlockedProfileIds, useMySettings } from "../../hooks/queries/useProfileQueries";
+import { useHiddenProfileIds } from "../../hooks/useHiddenProfileIds";
 
 type SortOption = RightNowSortOption;
+
+// Stable fallback while the feed is loading/failed: a fresh `[]` per render
+// would rebuild `items` every render (test mode then fills it with synthetic
+// posts stamped with Date.now()), and the "mark as seen" effect below would
+// set state on each one — an infinite render loop.
+const EMPTY_FEED: RightNowFeedEntry[] = [];
 
 function parseFiltersFromLocationState(
 	state: unknown,
@@ -44,11 +106,11 @@ function parseFiltersFromLocationState(
 
 	const nextAgeMin =
 		typeof draft.ageMin === "number" && Number.isFinite(draft.ageMin)
-			? Math.max(18, Math.min(102, draft.ageMin))
+			? Math.max(18, Math.min(99, draft.ageMin))
 			: current.ageMin;
 	const nextAgeMax =
 		typeof draft.ageMax === "number" && Number.isFinite(draft.ageMax)
-			? Math.max(nextAgeMin, Math.min(102, draft.ageMax))
+			? Math.max(nextAgeMin, Math.min(99, draft.ageMax))
 			: current.ageMax;
 
 	return {
@@ -58,154 +120,1282 @@ function parseFiltersFromLocationState(
 			typeof draft.positionFilter === "string"
 				? draft.positionFilter
 				: current.positionFilter,
+		hostingOnly: typeof draft.hostingOnly === "boolean" ? draft.hostingOnly : current.hostingOnly,
+		favoritesOnly: typeof draft.favoritesOnly === "boolean" ? draft.favoritesOnly : current.favoritesOnly,
 	};
 }
 
-function formatMinutesAgo(postedAt: number | null, t: TFunction): string {
-	if (!postedAt) return "";
-	const diffMs = Date.now() - postedAt;
-	if (diffMs < 0) return t("right_now.just_now");
-	const minutes = Math.floor(diffMs / 60000);
-	if (minutes < 1) return t("right_now.just_now");
-	if (minutes < 60) return t("right_now.minutes_short", { count: minutes });
-	const hours = Math.floor(minutes / 60);
-	if (hours < 24) return t("right_now.hours_short", { count: hours });
-	return t("right_now.days_short", { count: Math.floor(hours / 24) });
+/** Lucide's list in the weight of the filled icons it sits next to. */
+function ListIcon({ className }: { className?: string }) {
+	return <List className={className} strokeWidth={2.5} />;
 }
 
-function getItemName(item: RightNowFeedItem, t: TFunction): string {
-	return item.displayName?.trim() || t("right_now.anonymous");
-}
+/** The post a report is about; discreet posts have no known author. */
+type RightNowReportTarget = { profileId: string | null; postId: number };
+/** Omitted for our own post and for posts without an id. */
+type ReportHandler = (() => void) | undefined;
 
-function getItemImageUrl(item: RightNowFeedItem): string | null {
+const REPORT_OVERLAY_BUTTON_CLASS =
+	"inline-flex h-8 w-8 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-md transition hover:bg-black/60 active:scale-90";
+const REPORT_PLAIN_BUTTON_CLASS =
+	"flex h-7 w-7 items-center justify-center rounded-full text-[var(--text-muted)] transition hover:text-[var(--text)] active:scale-90";
+
+function ReportPostButton({ onReport, className }: { onReport: () => void; className: string }) {
+	const { t } = useTranslation();
 	return (
-		item.imageUrl ??
-		(item.profileImageMediaHash && validateMediaHash(item.profileImageMediaHash)
-			? getThumbImageUrl(item.profileImageMediaHash, "320x320")
-			: null)
+		<button
+			type="button"
+			onClick={(e) => {
+				e.stopPropagation();
+				onReport();
+			}}
+			className={className}
+			title={t("right_now.report_post")}
+			aria-label={t("right_now.report_post")}
+		>
+			<Flag className="h-3.5 w-3.5" />
+		</button>
 	);
 }
 
-function getItemDisplayImageUrl(item: RightNowFeedItem): string {
-	return getItemImageUrl(item) ?? blankProfileImage;
+function getItemName(item: RightNowFeedItem, t: TFunction): string {
+	const name = item.displayName?.trim();
+	if (name) return name;
+	return t("common.unknown_display_name");
+}
+
+
+function getItemDisplayImageUrl(item: RightNowFeedItem): string | null {
+	return getRightNowAvatarUrl(item);
+}
+
+/** The avatar shows the post's own photo when it has one — blurred like the rest of the post media then. */
+function useAvatarPostMediaClass(item: RightNowFeedItem, avatarUrl: string | null): string | undefined {
+	const { rightNow: blurRightNowMedia } = useMediaBlur();
+	return blurRightNowMedia && avatarUrl != null && avatarUrl !== getRightNowProfileImageUrl(item)
+		? `${PRIVACY_BLUR_CLASS} ${PRIVACY_HOVER_REVEAL_CLASS}`
+		: undefined;
 }
 
 function isItemOnline(item: RightNowFeedItem): boolean {
 	return typeof item.onlineUntil === "number" && item.onlineUntil > Date.now();
 }
 
+function PostMediaGrid({
+	media,
+	onOpenPhoto,
+}: {
+	media: RightNowFeedItem["media"];
+	onOpenPhoto: (index: number) => void;
+}) {
+	const isDesktop = useDesktopBreakpoint();
+	const { rightNow: blurRightNowMedia } = useMediaBlur();
+	const { isBlurred, revealOnTap, hoverProps } = useBlurReveal(blurRightNowMedia);
+	if (!media || media.length === 0) return null;
+
+	const items = media.slice(0, 3);
+	const count = items.length;
+	const mediaClassName = (index: number) => cn(
+		"h-full w-full object-cover",
+		PRIVACY_BLUR_TRANSITION_CLASS,
+		isBlurred(String(index)) ? PRIVACY_BLUR_CLASS : "active:scale-105",
+	);
+	// A blurred photo is revealed by the first tap, like chat media.
+	const tileProps = (index: number) => ({
+		onClick: () => {
+			if (revealOnTap(String(index))) return;
+			onOpenPhoto(index);
+		},
+		...hoverProps(String(index)),
+	});
+
+	return (
+		<div
+			className={cn(
+				"mt-1.5 overflow-hidden rounded-md bg-[var(--surface-2)]",
+				isDesktop ? "w-[380px]" : "w-full sm:max-w-[260px]"
+			)}
+		>
+			<div className="relative aspect-video w-full flex gap-[2px]">
+				{count === 1 && (
+					<button
+						type="button"
+						className="h-full w-full overflow-hidden"
+						{...tileProps(0)}
+					>
+						<img
+							src={proxyMediaUrl(items[0].data?.thumbnailUrl ?? items[0].data?.fullImageUrl ?? "")}
+							className={mediaClassName(0)}
+							alt=""
+						/>
+					</button>
+				)}
+
+				{count === 2 && (
+					<>
+						<button
+							type="button"
+							className="flex-1 overflow-hidden"
+							{...tileProps(0)}
+						>
+							<img
+								src={proxyMediaUrl(items[0].data?.thumbnailUrl ?? items[0].data?.fullImageUrl ?? "")}
+								className={mediaClassName(0)}
+								alt=""
+							/>
+						</button>
+						<button
+							type="button"
+							className="flex-1 overflow-hidden"
+							{...tileProps(1)}
+						>
+							<img
+								src={proxyMediaUrl(items[1].data?.thumbnailUrl ?? items[1].data?.fullImageUrl ?? "")}
+								className={mediaClassName(1)}
+								alt=""
+							/>
+						</button>
+					</>
+				)}
+
+				{count === 3 && (
+					<>
+						<button
+							type="button"
+							className="w-[60%] overflow-hidden"
+							{...tileProps(0)}
+						>
+							<img
+								src={proxyMediaUrl(items[0].data?.thumbnailUrl ?? items[0].data?.fullImageUrl ?? "")}
+								className={mediaClassName(0)}
+								alt=""
+							/>
+						</button>
+						<div className="flex w-[40%] flex-col gap-[2px]">
+							<button
+								type="button"
+								className="flex-1 overflow-hidden"
+								{...tileProps(1)}
+							>
+								<img
+									src={proxyMediaUrl(items[1].data?.thumbnailUrl ?? items[1].data?.fullImageUrl ?? "")}
+									className={mediaClassName(1)}
+									alt=""
+								/>
+							</button>
+							<button
+								type="button"
+								className="flex-1 overflow-hidden"
+								{...tileProps(2)}
+							>
+								<img
+									src={proxyMediaUrl(items[2].data?.thumbnailUrl ?? items[2].data?.fullImageUrl ?? "")}
+									className={mediaClassName(2)}
+									alt=""
+								/>
+							</button>
+						</div>
+					</>
+				)}
+			</div>
+		</div>
+	);
+}
+
 function RightNowRow({
 	item,
 	onMessage,
 	onSelect,
+	onOpenPhoto,
+	onReport,
+	className,
 }: {
 	item: RightNowFeedItem;
 	onMessage: (profileId: string) => void;
 	onSelect: (profileId: string) => void;
+	onOpenPhoto: (photos: string[], index: number, profileId: string | null) => void;
+	onReport: ReportHandler;
+	className?: string;
 }) {
 	const { t } = useTranslation();
 	const { unitsPreset } = usePreferences();
+	const { ref, revealClass } = useRevealOnScroll();
 	const name = getItemName(item, t);
 	const isHosting = item.hosting;
-	const imageUrl = getItemDisplayImageUrl(item);
+	// The post's photos show in the media grid beside the avatar, so the avatar
+	// keeps the profile photo instead of repeating the first post photo.
+	const imageUrl = getRightNowProfileImageUrl(item);
 
-	const timeAgo = formatMinutesAgo(item.postedAt, t);
+	const timeAgo = formatRelativeTime(item.postedAt);
 	const distance =
 		item.distanceMeters != null
 			? formatDistance(item.distanceMeters, t, unitsPreset)
 			: null;
-	const subtitle = isHosting
-		? t("right_now.hosting_subtitle", { name })
-		: t("right_now.member_subtitle", { name });
 	const isOnline = isItemOnline(item);
+	const isEndingSoon = isOnline && isOnlineEndingSoon(item.onlineUntil);
+
+	const photos = useMemo(() => {
+		return (item.media || [])
+			.map((m) => m.data?.fullImageUrl || m.data?.thumbnailUrl || "")
+			.filter(Boolean);
+	}, [item.media]);
 
 	return (
-		<div className="flex items-center gap-3 px-[var(--app-px)] py-3">
-			{/* Avatar */}
+		<div
+			ref={ref}
+			className={cn(
+				"group/reveal flex items-center gap-4 ps-4 pe-4 py-3 border-b border-[var(--surface-2)]",
+				revealClass,
+				className,
+			)}
+		>
 			<button
 				type="button"
 				className="relative shrink-0"
 				onClick={() => onSelect(item.profileId)}
 			>
-				<div className="h-14 w-14 overflow-hidden rounded-full bg-[var(--surface-2)]">
-					<img src={imageUrl} alt={name} className="h-full w-full object-cover" />
+				<div className="h-15 w-15 rounded-full overflow-hidden drop-shadow-sm bg-[var(--surface-2)]">
+					<ProfileImage src={imageUrl} alt={name || ""} />
 				</div>
 				{isOnline ? (
-					<span className="absolute bottom-0.5 left-0.5 h-3 w-3 rounded-full border-2 border-[var(--bg)] bg-green-500" />
+					<span className={`absolute circle-badge-br h-3 w-3 rounded-full border-[1.5px] border-[var(--bg)] shadow-sm z-10 ${isEndingSoon ? "bg-amber-500" : "bg-green-500"}`} />
 				) : null}
 			</button>
 
-			{/* Text info */}
+			<div className="min-w-0 flex-1">
+				<button
+					type="button"
+					className="w-full text-start"
+					onClick={() => onSelect(item.profileId)}
+				>
+					{item.text && (
+						<p className="line-clamp-3 text-sm font-bold text-[var(--text)] mb-0.5">
+							{item.text}
+						</p>
+					)}
+
+					<div className="flex items-center gap-3">
+						{timeAgo ? (
+							<span className="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+								<ClockFilled className="h-3 w-3" />
+								{timeAgo}
+							</span>
+						) : null}
+						{distance && distance !== "hidden" ? (
+							<span className="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+								<Navigation className="h-3 w-3 fill-current" />
+								{distance}
+							</span>
+						) : null}
+						{isHosting && (
+							<span className="flex items-center gap-1 text-xs text-[var(--right-now)]">
+								<HomeFilled className="h-3.5 w-3.5" />
+							</span>
+						)}
+					</div>
+
+					<div className="mt-0.5 flex items-center justify-between gap-2">
+						<div className="flex min-w-0 items-center gap-1">
+							<p className="truncate text-xs text-[var(--text-muted)] font-medium">
+								{name}
+							</p>
+							{item.isFavorite && (
+								<span title={t("chat.favorite")}>
+									<Star className="h-3 w-3 shrink-0 fill-current text-[var(--accent)]" />
+								</span>
+							)}
+						</div>
+						{item.premiumType && item.premiumType !== "locked" && (
+							<span className="shrink-0 text-[10px] font-medium text-[var(--text-muted)] opacity-50 uppercase tracking-wider">
+								{item.premiumType.split("_")[0]}
+							</span>
+						)}
+					</div>
+				</button>
+
+				<PostMediaGrid
+					media={item.media}
+					onOpenPhoto={(index) => onOpenPhoto(photos, index, item.profileId)}
+				/>
+			</div>
+
+			<div className="flex shrink-0 flex-col items-center gap-1">
+				<button
+					type="button"
+					onClick={() => onMessage(item.profileId)}
+					className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[var(--right-now)]/35 text-[var(--right-now)] transition-all active:scale-95 hover:border-[var(--right-now)]/45"
+					style={{
+						backgroundColor: "color-mix(in srgb, var(--right-now), transparent 92%)",
+						boxShadow: "0 2px 8px color-mix(in srgb, var(--right-now), transparent 94%)"
+					}}
+					aria-label={t("right_now.message_aria", { name: name || "" })}
+				>
+					<MessageSquare className="h-4 w-4" />
+				</button>
+				{onReport ? <ReportPostButton onReport={onReport} className={REPORT_PLAIN_BUTTON_CLASS} /> : null}
+			</div>
+		</div>
+	);
+}
+
+
+/** Desktop grid tile, modelled on RightNowMapCard (photo on top,
+ * avatar with session countdown ring, hosting tag) but kept light for a
+ * dense grid: the whole tile opens the profile and messaging is a single icon
+ * button instead of two full-width actions. */
+function RightNowTile({
+	item,
+	onMessage,
+	onSelect,
+	onOpenPhoto,
+	onReport,
+}: {
+	item: RightNowFeedItem;
+	onMessage: (profileId: string) => void;
+	onSelect: (profileId: string) => void;
+	onOpenPhoto: (photos: string[], index: number, profileId: string | null) => void;
+	onReport: ReportHandler;
+}) {
+	const { t } = useTranslation();
+	const { unitsPreset } = usePreferences();
+	const { ref, revealClass } = useRevealOnScroll();
+	const { rightNow: blurRightNowMedia } = useMediaBlur();
+	const heroReveal = useBlurReveal(blurRightNowMedia);
+	const name = getItemName(item, t);
+	const avatarUrl = getItemDisplayImageUrl(item);
+	const distance = item.distanceMeters != null ? formatDistance(item.distanceMeters, t, unitsPreset) : null;
+	const isOnline = isItemOnline(item);
+	const isEndingSoon = isOnline && isOnlineEndingSoon(item.onlineUntil);
+	const photos = useMemo(
+		() => (item.media || []).map((m) => m.data?.fullImageUrl || m.data?.thumbnailUrl || "").filter(Boolean),
+		[item.media],
+	);
+
+	const now = Date.now();
+	const sessionFraction =
+		item.postedAt != null && item.expiresAt != null && item.expiresAt > item.postedAt
+			? Math.max(0, Math.min(1, (item.expiresAt - now) / (item.expiresAt - item.postedAt)))
+			: null;
+	const minutesLeft = item.expiresAt != null ? Math.max(0, Math.ceil((item.expiresAt - now) / 60_000)) : null;
+
+	// As on the map card: a post photo becomes the hero and the avatar shows the
+	// profile photo; without one, the profile photo fills the hero slot too.
+	const heroSrc = photos[0] ?? null;
+	// The name sits on the photo edge, so it needs white text over a scrim when there's one.
+	const hasCover = heroSrc != null || avatarUrl != null;
+	const headerAvatarUrl = heroSrc ? getRightNowProfileImageUrl(item) ?? avatarUrl : avatarUrl;
+	const headerAvatarClassName = useAvatarPostMediaClass(item, headerAvatarUrl);
+	const avatarClassName = useAvatarPostMediaClass(item, avatarUrl);
+	const profilePhotoFullUrl =
+		item.profileImageMediaHash && validateMediaHash(item.profileImageMediaHash)
+			? getProfileImageUrl(item.profileImageMediaHash, "1024x1024")
+			: null;
+
+	return (
+		<div
+			ref={ref}
+			className={cn(
+				"group/reveal native-card relative flex h-full cursor-pointer flex-col overflow-hidden !rounded-3xl transition-transform hover:-translate-y-0.5",
+				revealClass,
+				// The reveal animation's `both` fill would keep filter: blur(0) on the
+				// tile after it ends; lifting a filtered tile re-rasterizes it, which
+				// blurs it and shows a seam at the photo's edge.
+				"[animation-fill-mode:backwards]!",
+			)}
+			// Hover lift like the shared album cards; every tile here is Right Now,
+			// so the browse grid's Right Now glow would carry no meaning.
+			onClick={() => onSelect(item.profileId)}
+		>
+			{/* No --surface-2 fill behind the photo: while the hover lift lands on a
+			    fractional pixel, the clipped bottom edge is antialiased and a lighter
+			    fill shows through as a line. */}
+			<div className="relative h-40 w-full shrink-0 overflow-hidden">
+				<div className="absolute inset-0">
+					{heroSrc ? (
+						<button
+							type="button"
+							onClick={(e) => {
+								e.stopPropagation();
+								// A blurred photo is revealed by the first click, like chat media.
+								if (heroReveal.revealOnTap(heroSrc)) return;
+								onOpenPhoto(photos, 0, item.profileId);
+							}}
+							{...heroReveal.hoverProps(heroSrc)}
+							className="block h-full w-full"
+						>
+							<img
+								src={proxyMediaUrl(heroSrc)}
+								alt=""
+								className={cn("h-full w-full object-cover", PRIVACY_BLUR_TRANSITION_CLASS, heroReveal.isBlurred(heroSrc) && PRIVACY_BLUR_CLASS)}
+								draggable={false}
+							/>
+						</button>
+					) : avatarUrl ? (
+						// Profile photo as the cover: opens full size in the viewer too.
+						<button
+							type="button"
+							onClick={(e) => {
+								if (!profilePhotoFullUrl) return;
+								e.stopPropagation();
+								onOpenPhoto([profilePhotoFullUrl], 0, item.profileId);
+							}}
+							className="block h-full w-full"
+						>
+							<ProfileImage src={avatarUrl} alt={name} className={avatarClassName} placeholder="silhouette" />
+						</button>
+					) : (
+						// No photo at all: the map card's Right Now glow instead of a second
+						// placeholder icon above the avatar's.
+						<div
+							aria-hidden="true"
+							className="h-full w-full"
+							style={{ background: "radial-gradient(ellipse 80% 90% at 50% 0%, color-mix(in srgb, var(--right-now) 28%, transparent), transparent)" }}
+						/>
+					)}
+				</div>
+				{/* Dark scrim behind the name, like the browse tiles' vignette; the photo
+				    itself ends with a hard edge instead of fading into the card. */}
+				{hasCover ? (
+					<div className="pointer-events-none absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-black/60 to-transparent" />
+				) : null}
+				{item.hosting ? (
+					<span className="pointer-events-none absolute start-3 top-3 z-10 inline-flex items-center gap-1 rounded-full bg-[color-mix(in_srgb,var(--right-now)_85%,black)] px-2.5 py-1 text-[11px] font-semibold text-white shadow-[0_2px_8px_rgba(0,0,0,0.35)]">
+						<HomeFilled className="h-3 w-3" />
+						{t("right_now.hosting")}
+					</span>
+				) : null}
+				{photos.length > 1 ? (
+					<span className="pointer-events-none absolute bottom-12 end-3 z-10 rounded-full bg-black/55 px-2 py-0.5 text-[11px] font-semibold text-white backdrop-blur-md">
+						+{photos.length - 1}
+					</span>
+				) : null}
+				{onReport ? (
+					<div className="absolute end-3 top-3 z-10">
+						<ReportPostButton onReport={onReport} className={REPORT_OVERLAY_BUTTON_CLASS} />
+					</div>
+				) : null}
+			</div>
+
+			<div className="relative -mt-7 flex flex-1 flex-col px-4 pb-4">
+				{/* Centered on the edge between photo and content: name on the photo,
+				    stats below it, avatar and message button straddling the edge. */}
+				<div className="flex items-center gap-3">
+					<div className="relative shrink-0">
+						<div className="h-14 w-14 overflow-hidden rounded-full border border-[var(--bg)] bg-[var(--surface-2)] shadow-lg">
+							<ProfileImage src={headerAvatarUrl} alt={name} className={headerAvatarClassName} />
+						</div>
+						{/* Session countdown ring, same as the map card and markers */}
+						<svg className="pointer-events-none absolute -inset-[3px] h-[calc(100%+6px)] w-[calc(100%+6px)] -rotate-90 overflow-visible" viewBox="0 0 64 64" aria-hidden="true">
+							<circle cx="32" cy="32" r="30.75" fill="none" stroke="color-mix(in srgb, var(--right-now) 22%, transparent)" strokeWidth="2.5" />
+							<circle
+								cx="32"
+								cy="32"
+								r="30.75"
+								fill="none"
+								stroke="var(--right-now)"
+								strokeWidth="2.5"
+								strokeLinecap="round"
+								strokeDasharray={AVATAR_RING_CIRCUMFERENCE}
+								strokeDashoffset={AVATAR_RING_CIRCUMFERENCE * (1 - (sessionFraction ?? 1))}
+								style={{ filter: "drop-shadow(0 0 3px var(--right-now))" }}
+							/>
+						</svg>
+						{isOnline ? (
+							<span className={`absolute -bottom-0.5 -end-0.5 h-3.5 w-3.5 rounded-full border-2 border-[var(--surface)] ${isEndingSoon ? "bg-amber-500" : "bg-green-500"}`} />
+						) : null}
+					</div>
+
+					<div className="min-w-0 flex-1">
+						<div className="flex min-w-0 items-center gap-1.5">
+							<p className={cn("truncate text-base font-bold", hasCover ? "text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.6)]" : "text-[var(--text)]")}>{name}</p>
+							{item.isFavorite && <Star className="h-3.5 w-3.5 shrink-0 fill-current text-[var(--accent)]" />}
+						</div>
+						{/* Below the photo edge, beside the avatar; one line in every tile. */}
+						<div className="mt-1 flex h-5 items-center gap-3 overflow-hidden whitespace-nowrap text-xs text-[var(--text-muted)]">
+							{distance && distance !== "hidden" ? (
+								<span className="inline-flex items-center gap-1">
+									<Navigation className="h-3 w-3 fill-current" />
+									{distance}
+								</span>
+							) : null}
+							{minutesLeft != null ? (
+								<span className="inline-flex items-center gap-1 tabular-nums">
+									<Hourglass className="h-3 w-3" />
+									{minutesLeft}m
+								</span>
+							) : null}
+						</div>
+					</div>
+
+					{/* Neutral ink-tint fill like the sheet icon buttons; only the icon carries the Right Now color. */}
+					<button
+						type="button"
+						onClick={(e) => {
+							e.stopPropagation();
+							onMessage(item.profileId);
+						}}
+						className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full ink-tint-8 text-[var(--right-now)] transition active:scale-90 active:ink-tint-16 hover:ink-tint-12"
+						aria-label={t("right_now.message_aria", { name: name || "" })}
+					>
+						<MessageSquare className="h-4 w-4" />
+					</button>
+				</div>
+				{/* Always two lines tall, so every tile has the same layout. */}
+				<p className="mt-3 line-clamp-2 h-11 text-sm leading-[22px] text-[var(--text)]">{item.text}</p>
+			</div>
+		</div>
+	);
+}
+
+/** Age · height · weight · position of a discreet post's author, whichever were shared. */
+function useDiscreetFieldsLine(item: RightNowDiscreetFeedItem): string {
+	const { t } = useTranslation();
+	const { unitsPreset } = usePreferences();
+	const positionLabels = useMemo(() => getSexualPositionLabelMap(t), [t]);
+	const { age, height, weight, position } = item.profileFields;
+	return [
+		age != null ? String(age) : null,
+		height != null ? formatHeightForUnits(height, unitsPreset) : null,
+		weight != null ? formatWeightForUnits(weight, unitsPreset) : null,
+		position != null ? positionLabels[position] ?? null : null,
+	]
+		.filter((field): field is string => field != null)
+		.join(" · ");
+}
+
+function getEntryPhotos(item: RightNowFeedEntry): string[] {
+	return (item.media || []).map((m) => m.data?.fullImageUrl || m.data?.thumbnailUrl || "").filter(Boolean);
+}
+
+function DiscreetAvatar({ className }: { className?: string }) {
+	return (
+		<div className={cn("flex items-center justify-center rounded-full bg-[var(--surface-2)] text-[var(--text-muted)]", className)}>
+			<VenetianMask className="h-1/2 w-1/2" />
+		</div>
+	);
+}
+
+type DiscreetRequestProps = {
+	/** Our request to this post, if we sent one. */
+	request: RightNowSentRequest | undefined;
+	isSending: boolean;
+	onRequest: (postId: number) => void;
+	onMessage: (profileId: string) => void;
+};
+
+/**
+ * A discreet post can't be messaged directly: we send a Right Now request,
+ * and once its author accepts, the server opens a chat between us and the
+ * outbox tells us who they are.
+ */
+function DiscreetRequestButton({
+	postId,
+	request,
+	isSending,
+	onRequest,
+	onMessage,
+	className,
+}: DiscreetRequestProps & { postId: number; className: string }) {
+	const { t } = useTranslation();
+	const status = request?.status;
+	const acceptedProfileId = status === "ACCEPTED" ? request?.recipientProfileId ?? null : null;
+
+	if (acceptedProfileId) {
+		return (
 			<button
 				type="button"
-				className="min-w-0 flex-1 text-left"
-				onClick={() => onSelect(item.profileId)}
+				onClick={(e) => {
+					e.stopPropagation();
+					onMessage(acceptedProfileId);
+				}}
+				className={className}
+				title={t("right_now.request_accepted", { defaultValue: "Request accepted, open chat" })}
+				aria-label={t("right_now.request_accepted", { defaultValue: "Request accepted, open chat" })}
 			>
-				<p className="truncate text-sm font-bold text-[var(--text)]">{name}</p>
-				<p className="truncate text-xs text-[var(--text-muted)]">{subtitle}</p>
-				<div className="mt-0.5 flex items-center gap-3">
+				<MessageSquare className="h-4 w-4" />
+			</button>
+		);
+	}
+
+	const label =
+		status === "PENDING"
+			? t("right_now.request_pending", { defaultValue: "Request sent" })
+			: status === "REJECTED"
+				? t("right_now.request_rejected", { defaultValue: "Request declined" })
+				: status === "ACCEPTED"
+					? t("right_now.request_accepted_waiting", { defaultValue: "Request accepted" })
+					: t("right_now.request_send", { defaultValue: "Send request" });
+	const canSend = !status && !isSending;
+
+	return (
+		<button
+			type="button"
+			disabled={!canSend}
+			onClick={(e) => {
+				e.stopPropagation();
+				if (canSend) onRequest(postId);
+			}}
+			className={cn(className, !canSend && "opacity-60")}
+			title={label}
+			aria-label={label}
+		>
+			{isSending ? (
+				<Clock className="h-4 w-4 animate-pulse" />
+			) : status === "PENDING" ? (
+				<Clock className="h-4 w-4" />
+			) : status === "REJECTED" ? (
+				<X className="h-4 w-4" />
+			) : status === "ACCEPTED" ? (
+				<Check className="h-4 w-4" />
+			) : (
+				<Hand className="h-4 w-4" />
+			)}
+		</button>
+	);
+}
+
+/**
+ * A discreet post: the server leaves out who posted it, so there's no
+ * profile to open — just the post, the profile fields its author chose to
+ * share, and a request button.
+ */
+function RightNowDiscreetRow({
+	item,
+	onOpenPhoto,
+	onReport,
+	...requestProps
+}: DiscreetRequestProps & {
+	item: RightNowDiscreetFeedItem;
+	onOpenPhoto: (photos: string[], index: number, profileId: string | null) => void;
+	onReport: ReportHandler;
+}) {
+	const { t } = useTranslation();
+	const { unitsPreset } = usePreferences();
+	const { ref, revealClass } = useRevealOnScroll();
+	const fieldsLine = useDiscreetFieldsLine(item);
+	const timeAgo = formatRelativeTime(item.postedAt);
+	const distance = item.distanceMeters != null ? formatDistance(item.distanceMeters, t, unitsPreset) : null;
+	const photos = useMemo(() => getEntryPhotos(item), [item]);
+
+	return (
+		<div
+			ref={ref}
+			className={cn("group/reveal flex items-center gap-4 ps-4 pe-4 py-3 border-b border-[var(--surface-2)]", revealClass)}
+		>
+			<DiscreetAvatar className="h-15 w-15 shrink-0" />
+
+			<div className="min-w-0 flex-1">
+				<p className={cn("line-clamp-3 text-sm font-bold mb-0.5", item.text ? "text-[var(--text)]" : "text-[var(--text-muted)]")}>
+					{item.text || t("right_now.discreet_post", { defaultValue: "Discreet post" })}
+				</p>
+
+				<div className="flex items-center gap-3">
 					{timeAgo ? (
 						<span className="flex items-center gap-1 text-xs text-[var(--text-muted)]">
-							<Clock className="h-3 w-3" />
+							<ClockFilled className="h-3 w-3" />
 							{timeAgo}
 						</span>
 					) : null}
 					{distance && distance !== "hidden" ? (
 						<span className="flex items-center gap-1 text-xs text-[var(--text-muted)]">
-							<Navigation className="h-3 w-3" />
+							<Navigation className="h-3 w-3 fill-current" />
 							{distance}
 						</span>
 					) : null}
+					{item.hosting && (
+						<span className="flex items-center gap-1 text-xs text-[var(--right-now)]">
+							<HomeFilled className="h-3.5 w-3.5" />
+						</span>
+					)}
 				</div>
-				{item.text ? (
-					<p className="mt-1 line-clamp-2 text-xs text-[var(--text-muted)]">
-						{item.text}
-					</p>
-				) : null}
-			</button>
 
-			{/* Message button */}
-			<button
-				type="button"
-				onClick={() => onMessage(item.profileId)}
-				className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[var(--surface-2)] text-[var(--text-muted)] transition-colors active:bg-[var(--surface-3)]"
-				aria-label={t("right_now.message_aria", { name })}
-			>
-				<MessageSquare className="h-4 w-4" />
-			</button>
+				<div className="mt-0.5 flex items-center justify-between gap-2">
+					<p className="flex min-w-0 items-center gap-1 text-xs text-[var(--text-muted)] font-medium">
+						<VenetianMask className="h-3 w-3 shrink-0" />
+						<span className="truncate">{fieldsLine || t("right_now.discreet", { defaultValue: "Discreet" })}</span>
+					</p>
+					{item.premiumType && item.premiumType !== "locked" && (
+						<span className="shrink-0 text-[10px] font-medium text-[var(--text-muted)] opacity-50 uppercase tracking-wider">
+							{item.premiumType.split("_")[0]}
+						</span>
+					)}
+				</div>
+
+				<PostMediaGrid media={item.media} onOpenPhoto={(index) => onOpenPhoto(photos, index, null)} />
+			</div>
+
+			<div className="flex shrink-0 flex-col items-center gap-1">
+				<DiscreetRequestButton
+					postId={item.id}
+					{...requestProps}
+					className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[var(--right-now)]/35 bg-[color-mix(in_srgb,var(--right-now),transparent_92%)] text-[var(--right-now)] transition-all active:scale-95 hover:border-[var(--right-now)]/45"
+				/>
+				{onReport ? <ReportPostButton onReport={onReport} className={REPORT_PLAIN_BUTTON_CLASS} /> : null}
+			</div>
+		</div>
+	);
+}
+
+/** Desktop grid tile for a discreet post, laid out like RightNowTile without the profile parts. */
+function RightNowDiscreetTile({
+	item,
+	onOpenPhoto,
+	onReport,
+	...requestProps
+}: DiscreetRequestProps & {
+	item: RightNowDiscreetFeedItem;
+	onOpenPhoto: (photos: string[], index: number, profileId: string | null) => void;
+	onReport: ReportHandler;
+}) {
+	const { t } = useTranslation();
+	const { unitsPreset } = usePreferences();
+	const { ref, revealClass } = useRevealOnScroll();
+	const { rightNow: blurRightNowMedia } = useMediaBlur();
+	const heroReveal = useBlurReveal(blurRightNowMedia);
+	const fieldsLine = useDiscreetFieldsLine(item);
+	const distance = item.distanceMeters != null ? formatDistance(item.distanceMeters, t, unitsPreset) : null;
+	const photos = useMemo(() => getEntryPhotos(item), [item]);
+	const minutesLeft = item.expiresAt != null ? Math.max(0, Math.ceil((item.expiresAt - Date.now()) / 60_000)) : null;
+	const heroSrc = photos[0] ?? null;
+
+	return (
+		<div
+			ref={ref}
+			className={cn(
+				"group/reveal native-card relative flex h-full flex-col overflow-hidden !rounded-3xl",
+				revealClass,
+				"[animation-fill-mode:backwards]!",
+			)}
+		>
+			<div className="relative h-40 w-full shrink-0 overflow-hidden">
+				{heroSrc ? (
+					<button
+						type="button"
+						onClick={() => {
+							if (heroReveal.revealOnTap(heroSrc)) return;
+							onOpenPhoto(photos, 0, null);
+						}}
+						{...heroReveal.hoverProps(heroSrc)}
+						className="block h-full w-full"
+					>
+						<img
+							src={proxyMediaUrl(heroSrc)}
+							alt=""
+							className={cn("h-full w-full object-cover", PRIVACY_BLUR_TRANSITION_CLASS, heroReveal.isBlurred(heroSrc) && PRIVACY_BLUR_CLASS)}
+							draggable={false}
+						/>
+					</button>
+				) : (
+					<div
+						aria-hidden="true"
+						className="h-full w-full"
+						style={{ background: "radial-gradient(ellipse 80% 90% at 50% 0%, color-mix(in srgb, var(--right-now) 28%, transparent), transparent)" }}
+					/>
+				)}
+				{heroSrc ? (
+					<div className="pointer-events-none absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-black/60 to-transparent" />
+				) : null}
+				{item.hosting ? (
+					<span className="pointer-events-none absolute start-3 top-3 z-10 inline-flex items-center gap-1 rounded-full bg-[color-mix(in_srgb,var(--right-now)_85%,black)] px-2.5 py-1 text-[11px] font-semibold text-white shadow-[0_2px_8px_rgba(0,0,0,0.35)]">
+						<HomeFilled className="h-3 w-3" />
+						{t("right_now.hosting")}
+					</span>
+				) : null}
+				{photos.length > 1 ? (
+					<span className="pointer-events-none absolute bottom-12 end-3 z-10 rounded-full bg-black/55 px-2 py-0.5 text-[11px] font-semibold text-white backdrop-blur-md">
+						+{photos.length - 1}
+					</span>
+				) : null}
+				{onReport ? (
+					<div className="absolute end-3 top-3 z-10">
+						<ReportPostButton onReport={onReport} className={REPORT_OVERLAY_BUTTON_CLASS} />
+					</div>
+				) : null}
+			</div>
+
+			<div className="relative -mt-7 flex flex-1 flex-col px-4 pb-4">
+				<div className="flex items-center gap-3">
+					<DiscreetAvatar className="h-14 w-14 shrink-0 border border-[var(--bg)] shadow-lg" />
+					<div className="min-w-0 flex-1">
+						<p className={cn("truncate text-base font-bold", heroSrc ? "text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.6)]" : "text-[var(--text)]")}>
+							{t("right_now.discreet", { defaultValue: "Discreet" })}
+						</p>
+						<div className="mt-1 flex h-5 items-center gap-3 overflow-hidden whitespace-nowrap text-xs text-[var(--text-muted)]">
+							{fieldsLine ? <span className="truncate">{fieldsLine}</span> : null}
+							{distance && distance !== "hidden" ? (
+								<span className="inline-flex items-center gap-1">
+									<Navigation className="h-3 w-3 fill-current" />
+									{distance}
+								</span>
+							) : null}
+							{minutesLeft != null ? (
+								<span className="inline-flex items-center gap-1 tabular-nums">
+									<Hourglass className="h-3 w-3" />
+									{minutesLeft}m
+								</span>
+							) : null}
+						</div>
+					</div>
+					<DiscreetRequestButton
+						postId={item.id}
+						{...requestProps}
+						className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full ink-tint-8 text-[var(--right-now)] transition active:scale-90 active:ink-tint-16 hover:ink-tint-12"
+					/>
+				</div>
+				<p className={cn("mt-3 line-clamp-2 h-11 text-sm leading-[22px]", item.text ? "text-[var(--text)]" : "text-[var(--text-muted)]")}>
+					{item.text || t("right_now.discreet_post", { defaultValue: "Discreet post" })}
+				</p>
+			</div>
+		</div>
+	);
+}
+
+// Fades into the page background, so it doesn't read as a dark smudge in light mode.
+const BOTTOM_SCRIM_GRADIENT =
+	"linear-gradient(to top, color-mix(in srgb, var(--bg) 92%, transparent) 0%, color-mix(in srgb, var(--bg) 55%, transparent) 45%, transparent 100%)";
+
+const AVATAR_RING_CIRCUMFERENCE = 2 * Math.PI * 30.75;
+
+/** Preview of the post selected on the map — sheet-style glass card with the
+ * post, its session countdown and profile / message actions. */
+function RightNowMapCard({
+	item,
+	onMessage,
+	onSelect,
+	onOpenPhoto,
+	onReport,
+	onClose,
+}: {
+	item: RightNowFeedItem;
+	onMessage: (profileId: string) => void;
+	onSelect: (profileId: string) => void;
+	onOpenPhoto: (photos: string[], index: number, profileId: string | null) => void;
+	onReport: ReportHandler;
+	onClose: () => void;
+}) {
+	const { t } = useTranslation();
+	const { unitsPreset } = usePreferences();
+	const { rightNow: blurRightNowMedia } = useMediaBlur();
+	const heroReveal = useBlurReveal(blurRightNowMedia);
+	const name = getItemName(item, t);
+	const avatarUrl = getItemDisplayImageUrl(item);
+	const distance = item.distanceMeters != null ? formatDistance(item.distanceMeters, t, unitsPreset) : null;
+	const isOnline = isItemOnline(item);
+	const isEndingSoon = isOnline && isOnlineEndingSoon(item.onlineUntil);
+	const photos = useMemo(
+		() => (item.media || []).map((m) => m.data?.fullImageUrl || m.data?.thumbnailUrl || "").filter(Boolean),
+		[item.media],
+	);
+
+	const now = Date.now();
+	const sessionFraction =
+		item.postedAt != null && item.expiresAt != null && item.expiresAt > item.postedAt
+			? Math.max(0, Math.min(1, (item.expiresAt - now) / (item.expiresAt - item.postedAt)))
+			: null;
+	const minutesLeft = item.expiresAt != null ? Math.max(0, Math.ceil((item.expiresAt - now) / 60_000)) : null;
+
+	// A post photo becomes the card's hero image; the avatar then shows the
+	// profile photo so the two don't repeat.
+	const heroSrc = photos[0] ?? null;
+	const headerAvatarUrl = heroSrc ? getRightNowProfileImageUrl(item) ?? avatarUrl : avatarUrl;
+	const headerAvatarClassName = useAvatarPostMediaClass(item, headerAvatarUrl);
+
+	return (
+		<div className="relative mx-auto max-w-xl overflow-hidden rounded-3xl border border-[color-mix(in_srgb,var(--border)_60%,transparent)] bg-[color-mix(in_srgb,var(--surface)_72%,transparent)] shadow-[0_24px_48px_-12px_rgba(0,0,0,0.55),0_8px_16px_-6px_rgba(0,0,0,0.35)] backdrop-blur-xl animate-in fade-in slide-in-from-bottom-4 duration-300">
+			{/* Close, pinned to the card's corner (over the photo when there is one).
+			    Positioned by a wrapper: SHEET_ICON_BUTTON_CLASS's ink-tint sets
+			    position: relative, which would override an absolute on the button. */}
+			<div className="absolute end-3 top-3 z-10 flex items-center gap-2">
+				{onReport ? (
+					<ReportPostButton onReport={onReport} className={heroSrc ? REPORT_OVERLAY_BUTTON_CLASS : SHEET_ICON_BUTTON_CLASS} />
+				) : null}
+				<button
+					type="button"
+					onClick={onClose}
+					aria-label={t("common.close")}
+					className={
+						heroSrc
+							? "inline-flex h-8 w-8 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-md transition hover:bg-black/60"
+							: SHEET_ICON_BUTTON_CLASS
+					}
+				>
+					<X className="h-4 w-4" />
+				</button>
+			</div>
+
+			{heroSrc ? (
+				<button
+					type="button"
+					onClick={() => {
+						// A blurred photo is revealed by the first tap, like chat media.
+						if (heroReveal.revealOnTap(heroSrc)) return;
+						onOpenPhoto(photos, 0, item.profileId);
+					}}
+					{...heroReveal.hoverProps(heroSrc)}
+					className="relative block h-40 w-full overflow-hidden"
+				>
+					<img src={proxyMediaUrl(heroSrc)} alt="" className={cn("h-full w-full object-cover", PRIVACY_BLUR_TRANSITION_CLASS, heroReveal.isBlurred(heroSrc) && PRIVACY_BLUR_CLASS)} draggable={false} />
+					{/* Fades the photo into the card */}
+					<div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-[color-mix(in_srgb,var(--surface)_92%,transparent)]" />
+					{photos.length > 1 ? (
+						<span className="absolute bottom-12 end-3 rounded-full bg-black/55 px-2 py-0.5 text-[11px] font-semibold text-white backdrop-blur-md">
+							+{photos.length - 1}
+						</span>
+					) : null}
+				</button>
+			) : (
+				/* Right Now glow along the top edge */
+				<div
+					aria-hidden="true"
+					className="pointer-events-none absolute inset-x-0 top-0 h-24"
+					style={{ background: "radial-gradient(ellipse 70% 100% at 50% 0%, color-mix(in srgb, var(--right-now) 22%, transparent), transparent)" }}
+				/>
+			)}
+
+			<div className={cn("relative p-4", heroSrc && "-mt-10 pt-0")}>
+				{/* Header: avatar, name, meta, close */}
+				<div className="flex items-end gap-3">
+					<button type="button" onClick={() => onSelect(item.profileId)} className="relative shrink-0">
+						<div className="h-14 w-14 overflow-hidden rounded-full border border-[var(--bg)] bg-[var(--surface-2)] shadow-lg">
+							<ProfileImage src={headerAvatarUrl} alt={name} className={headerAvatarClassName} />
+						</div>
+						{/* Session countdown ring, same as the map markers */}
+						{/* overflow-visible: an SVG clips to its box by default, which cut off the ring's glow. */}
+						<svg className="pointer-events-none absolute -inset-[3px] h-[calc(100%+6px)] w-[calc(100%+6px)] -rotate-90 overflow-visible" viewBox="0 0 64 64" aria-hidden="true">
+							<circle cx="32" cy="32" r="30.75" fill="none" stroke="color-mix(in srgb, var(--right-now) 22%, transparent)" strokeWidth="2.5" />
+							<circle
+								cx="32"
+								cy="32"
+								r="30.75"
+								fill="none"
+								stroke="var(--right-now)"
+								strokeWidth="2.5"
+								strokeLinecap="round"
+								strokeDasharray={AVATAR_RING_CIRCUMFERENCE}
+								strokeDashoffset={AVATAR_RING_CIRCUMFERENCE * (1 - (sessionFraction ?? 1))}
+								style={{ filter: "drop-shadow(0 0 3px var(--right-now))" }}
+							/>
+						</svg>
+						{isOnline ? (
+							<span className={`absolute -bottom-0.5 -end-0.5 h-3.5 w-3.5 rounded-full border-2 border-[var(--surface)] ${isEndingSoon ? "bg-amber-500" : "bg-green-500"}`} />
+						) : null}
+					</button>
+
+					<button type="button" onClick={() => onSelect(item.profileId)} className={cn("min-w-0 flex-1 pb-0.5 text-start", !heroSrc && (onReport ? "pe-18" : "pe-8"))}>
+						<div className="flex min-w-0 items-center gap-1.5">
+							<p className="truncate text-base font-bold text-[var(--text)]">{name}</p>
+							{item.isFavorite && <Star className="h-3.5 w-3.5 shrink-0 fill-current text-[var(--accent)]" />}
+						</div>
+						<div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-[var(--text-muted)]">
+							{distance && distance !== "hidden" ? (
+								<span className="inline-flex items-center gap-1">
+									<Navigation className="h-3 w-3 fill-current" />
+									{distance}
+								</span>
+							) : null}
+							{item.hosting ? (
+								<span className="inline-flex items-center gap-1 rounded-full bg-[color-mix(in_srgb,var(--right-now)_16%,transparent)] px-2 py-0.5 font-semibold text-[var(--right-now)]">
+									<HomeFilled className="h-3 w-3" />
+									{t("right_now.hosting")}
+								</span>
+							) : null}
+							{minutesLeft != null ? (
+								<span className="inline-flex items-center gap-1 tabular-nums">
+									<Hourglass className="h-3 w-3" />
+									{minutesLeft}m
+								</span>
+							) : null}
+						</div>
+					</button>
+				</div>
+
+				{item.text ? (
+					<p className="mt-3 line-clamp-4 text-sm leading-relaxed text-[var(--text)]">{item.text}</p>
+				) : null}
+
+				{/* Actions */}
+				<div className="mt-4 flex gap-2">
+					<button
+						type="button"
+						onClick={() => onSelect(item.profileId)}
+						className={sheetButtonClass("secondary")}
+					>
+						<UserRound className="h-4 w-4" />
+						{t("chat.view_profile")}
+					</button>
+					<button
+						type="button"
+						onClick={() => onMessage(item.profileId)}
+						className={cn(sheetButtonClass("primary"), "shadow-[0_4px_14px_color-mix(in_srgb,var(--right-now)_35%,transparent)]")}
+						style={{ backgroundColor: "var(--right-now)", color: "white" }}
+					>
+						<MessageSquare className="h-4 w-4" />
+						{t("profile_details.message")}
+					</button>
+				</div>
+			</div>
+		</div>
+	);
+}
+
+function RightNowTileSkeleton() {
+	return (
+		<div className="native-card overflow-hidden !rounded-3xl">
+			<div className="h-40 w-full animate-pulse bg-[var(--surface-2)]" />
+			<div className="-mt-7 flex items-center gap-3 px-4">
+				<div className="h-14 w-14 shrink-0 animate-pulse rounded-full border border-[var(--bg)] bg-[var(--surface-2)]" />
+				<div className="flex flex-1 flex-col gap-2">
+					<div className="h-3.5 w-2/3 animate-pulse rounded-full bg-[var(--surface-2)]" />
+					<div className="h-2.5 w-1/3 animate-pulse rounded-full bg-[var(--border)]" />
+				</div>
+			</div>
+			<div className="mx-4 mb-4 mt-3 h-11" />
+		</div>
+	);
+}
+
+function RightNowSkeleton() {
+	return (
+		<div className="flex items-center gap-4 border-b border-[var(--surface-2)] py-3 ps-4 pe-4">
+			<div className="h-15 w-15 shrink-0 rounded-full overflow-hidden animate-pulse bg-[var(--surface-2)]" />
+			<div className="flex flex-1 flex-col gap-2">
+				<div className="flex items-center justify-between gap-3">
+					<div className="h-3 w-28 animate-pulse rounded-full bg-[var(--surface-2)]" />
+					<div className="h-2.5 w-10 animate-pulse rounded-full bg-[var(--border)]" />
+				</div>
+				<div className="h-2.5 w-40 animate-pulse rounded-full bg-[var(--border)]" />
+			</div>
+			<div className="h-10 w-10 shrink-0 animate-pulse rounded-full bg-[var(--surface-2)]" />
 		</div>
 	);
 }
 
 export function RightNowPage() {
+	// Right Now is always dark (the map is too); AMOLED still applies.
+	useForceDarkScheme();
 	const { t } = useTranslation();
-	const apiFunctions = useApiFunctions();
+	// Desktop shows the feed as a tile grid instead of rows.
+	const isDesktop = useDesktopBreakpoint();
 	const location = useLocation();
 	const navigate = useNavigate();
 	const persistedFilters = useMemo(() => loadRightNowFiltersDraft(), []);
 
-	const [items, setItems] = useState<RightNowFeedItem[]>([]);
-	const [isLoading, setIsLoading] = useState(true);
-	const [error, setError] = useState<string | null>(null);
 	const [sort, setSort] = useState<SortOption>(persistedFilters.sort);
 	const [hostingOnly, setHostingOnly] = useState(persistedFilters.hostingOnly);
+	const [favoritesOnly, setFavoritesOnly] = useState(persistedFilters.favoritesOnly);
+	const [viewMode, setViewMode] = useState<RightNowViewMode>(persistedFilters.viewMode);
+	const [selectedMapKey, setSelectedMapKey] = useState<string | null>(null);
 	const [ageMin, setAgeMin] = useState(persistedFilters.ageMin);
 	const [ageMax, setAgeMax] = useState(persistedFilters.ageMax);
 	const [positionFilter, setPositionFilter] = useState<string>(
 		persistedFilters.positionFilter,
 	);
+	const [hasRestoredScroll, setHasRestoredScroll] = useState(false);
+	const [lastSeenRightNow, setLastSeenRightNow] = useState(() => getRightNowLastSeen());
+
+	const queryParams = useMemo(() => ({
+		sort,
+		hosting: hostingOnly ? true : undefined,
+		ageMin: ageMin > 18 ? ageMin : undefined,
+		ageMax: ageMax < 99 ? ageMax : undefined,
+		sexualPositions: positionFilter || undefined,
+	}), [sort, hostingOnly, ageMin, ageMax, positionFilter]);
+
+	// Incognito: like the Grid, the feed doesn't load at all. Fetching it marks
+	// the account online (open-grind refreshes its online clock on every load).
+	const isIncognito = getIncognitoMode();
+	const { data: feed, isLoading: isFeedLoading, error, refetch } = useRightNowFeed(queryParams, !isIncognito);
+	const isLoading = isFeedLoading && !isIncognito;
+	const feedItems = feed?.items ?? EMPTY_FEED;
+	const { activeRightNowId, activeRightNowExpiresAt, rightNowRemaining, setPreferences, developerMode, showDebugInfo, rightNowTestMode, geohash, rightNowQuickFilters } = usePreferences();
+	const rightNowQuickFilterDefs = useRightNowQuickFilterDefs();
+
+	// Test mode feeds the map simulated positions around the browse location
+	// so its UI can be checked without real posts that share a location.
+	const testModeCenter = useMemo(() => {
+		if (geohash) {
+			try {
+				const { lat, lon } = decodeGeohash(geohash);
+				return { lat: (lat[0] + lat[1]) / 2, lon: (lon[0] + lon[1]) / 2 };
+			} catch {
+				// fall through
+			}
+		}
+		return { lat: 52.52, lon: 13.405 };
+	}, [geohash]);
+	// Authors we blocked or hid don't show, like on the grid (and like Open
+	// Grind): the feed itself doesn't leave them out. Discreet posts have no
+	// known author to match.
+	const { data: blockedProfileIdsData } = useBlockedProfileIds(!isIncognito);
+	const hiddenProfileIds = useHiddenProfileIds();
+	const { userId } = useAuth();
+	// Explicit photos (server `isNsfw`) are left out entirely unless the account
+	// setting "Explicit Images in Right Now" (viewRightNowNsfw) is on — also
+	// while the setting is still loading. Own posts always keep their photos.
+	const { data: mySettings } = useMySettings(!isIncognito);
+	const showNsfw = mySettings?.viewRightNowNsfw === true;
+	const items = useMemo(() => {
+		const source = rightNowTestMode ? simulateRightNowMapFeed(feedItems, testModeCenter, hostingOnly) : feedItems;
+		const blocked = new Set(blockedProfileIdsData ?? []);
+		return source
+			.filter((item) => {
+				if (item.kind === "discreet") return !favoritesOnly;
+				if (blocked.has(item.profileId) || hiddenProfileIds.has(item.profileId)) return false;
+				// Favorites is filtered here — the feed API has no parameter for it.
+				return !favoritesOnly || item.isFavorite;
+			})
+			.map((item) => {
+				if (showNsfw || (item.kind === "post" && userId != null && item.profileId === String(userId))) return item;
+				if (!item.media?.some((m) => m.data?.isNsfw === true)) return item;
+				return { ...item, media: item.media.filter((m) => m.data?.isNsfw !== true) };
+			});
+	}, [rightNowTestMode, feedItems, testModeCenter, hostingOnly, favoritesOnly, blockedProfileIdsData, hiddenProfileIds, showNsfw, userId]);
+	const queryClient = useQueryClient();
+	const api = useApiFunctions();
+
+	// Requests others sent to our post: the header's inbox shows how many wait
+	// for an answer. Requests only reach discreet posts, so the inbox is only
+	// there when the account can post discreetly (same gate as the post sheet).
+	const canPostDiscreetly = useFeatureFlag("right-now-discreet") || rightNowTestMode;
+	const { data: receivedRequests } = useReceivedRightNowRequests(canPostDiscreetly && !rightNowTestMode && !isIncognito);
+	const pendingRequests = useMemo(() => pendingRightNowRequests(receivedRequests), [receivedRequests]);
+	const [isRequestsOpen, setIsRequestsOpen] = useState(false);
+
+	// Requests to discreet posts: only polled while one is listed.
+	const hasDiscreetPosts = useMemo(() => items.some((item) => item.kind === "discreet"), [items]);
+	const { data: sentRequests } = useSentRightNowRequests(hasDiscreetPosts && !rightNowTestMode && !isIncognito);
+	const sendRequest = useMutation({
+		mutationFn: (postId: number) => api.sendRightNowRequest(postId),
+		onSuccess: () => {
+			toast.success(t("right_now.request_sent_toast", { defaultValue: "Request sent" }));
+			void queryClient.invalidateQueries({ queryKey: ["rightnow", "requests", "outbox"] });
+		},
+		onError: (requestError) => {
+			if (requestError instanceof RightNowRequestAlreadySentError) {
+				// Nothing went wrong: it's already waiting for an answer.
+				toast(t("right_now.request_already_sent", { defaultValue: "You already sent a request for this post" }));
+				void queryClient.invalidateQueries({ queryKey: ["rightnow", "requests", "outbox"] });
+				return;
+			}
+			if (requestError instanceof RightNowPostGoneError) {
+				toast.error(t("right_now.request_post_gone", { defaultValue: "This post is no longer available" }));
+				void queryClient.invalidateQueries({ queryKey: ["rightnow"] });
+				return;
+			}
+			if (requestError instanceof RightNowLimitError) {
+				toast.error(t("right_now.request_limit", { defaultValue: "You've reached your limit for requests. Try again later." }));
+				return;
+			}
+			toast.error(requestError instanceof Error ? requestError.message : t("right_now.request_error", { defaultValue: "Could not send the request" }));
+		},
+	});
+
+	const [viewerPhotos, setViewerPhotos] = useState<string[]>([]);
+	const [viewerIndex, setViewerIndex] = useState(0);
+	const [isViewerOpen, setIsViewerOpen] = useState(false);
+	const [viewerProfileId, setViewerProfileId] = useState<string | null>(null);
+
+	// The viewer gets its own history entry so system back closes it instead
+	// of leaving the Right Now page.
+	const viewerHistoryPushedRef = useRef(false);
+
+	const openPhotoViewer = useCallback((photos: string[], index: number, profileId: string | null) => {
+		setViewerPhotos(photos);
+		setViewerIndex(index);
+		setViewerProfileId(profileId);
+		setIsViewerOpen(true);
+		if (!viewerHistoryPushedRef.current) {
+			window.history.pushState({ ...window.history.state, rightNowViewer: true }, "");
+			viewerHistoryPushedRef.current = true;
+		}
+	}, []);
+
+	const closePhotoViewer = useCallback(() => {
+		setIsViewerOpen(false);
+		if (viewerHistoryPushedRef.current) {
+			// Cleared first so our own popstate handler ignores this pop.
+			viewerHistoryPushedRef.current = false;
+			window.history.back();
+		}
+	}, []);
+
+	useEffect(() => {
+		const handlePopState = () => {
+			if (!viewerHistoryPushedRef.current) return;
+			viewerHistoryPushedRef.current = false;
+			setIsViewerOpen(false);
+		};
+		window.addEventListener("popstate", handlePopState);
+		return () => window.removeEventListener("popstate", handlePopState);
+	}, []);
+
+	const [isPosting, setIsPosting] = useState(false);
+	const [isModalMounted, setIsModalMounted] = useState(false);
+	const [isFiltersOpen, setIsFiltersOpen] = useState(false);
+	const [isFiltersMounted, setIsFiltersMounted] = useState(false);
+	const [fabPhase, setFabPhase] = useState<RightNowFABPhase>("idle");
 	const feedContainerRef = useRef<HTMLDivElement | null>(null);
+	const headerRef = useRef<HTMLElement | null>(null);
+	// Viewport y of the header's bottom edge (its pill row can wrap). The map
+	// runs up behind the header to the screen top; its fits and overlays keep
+	// below this.
+	const [headerBottom, setHeaderBottom] = useState(0);
+
+	useLayoutEffect(() => {
+		const header = headerRef.current;
+		if (!header) return;
+		const measure = () => setHeaderBottom(Math.round(header.getBoundingClientRect().bottom));
+		measure();
+		const observer = "ResizeObserver" in window ? new ResizeObserver(measure) : null;
+		observer?.observe(header);
+		window.addEventListener("resize", measure);
+		return () => {
+			observer?.disconnect();
+			window.removeEventListener("resize", measure);
+		};
+	}, []);
+
+	const handlePostClick = useCallback(() => {
+		setIsPosting(true);
+		setIsModalMounted(true);
+	}, []);
+
+	const handlePostSuccess = useCallback((isEdit: boolean) => {
+		if (!isEdit) {
+			setFabPhase("loading");
+		}
+		setIsPosting(false);
+		// Reload the feed (every filter variant) so the new/edited own post and
+		// its photo show up. Once more shortly after, in case the server hadn't
+		// picked up the change yet on the first fetch.
+		const refreshFeed = () => void queryClient.invalidateQueries({ queryKey: ["rightnow", "feed"] });
+		refreshFeed();
+		setTimeout(refreshFeed, 2000);
+		// Unmounting happens in handleCloseModal once the sheet has animated out.
+	}, [queryClient]);
+
+	// The sheet only calls this once its close animation has finished.
+	const handleCloseModal = useCallback(() => {
+		setIsPosting(false);
+		setIsModalMounted(false);
+	}, []);
 
 	const positionFilterOptions = useMemo(
 		() => getSexualPositionFilterOptions(t, t("right_now.any_position")),
 		[t],
 	);
 
-	const ageLabel = `${ageMin}-${ageMax}${ageMax >= 102 ? "+" : ""}`;
+	const ageLabel = `${ageMin}-${ageMax}${ageMax >= 99 ? "+" : ""}`;
 	const activePositionFilter =
 		positionFilterOptions.find((option) => option.value === positionFilter) ??
 		positionFilterOptions[0];
-	const hasAdvancedFilters = positionFilter.length > 0 || ageMin !== 18 || ageMax !== 102;
+	const hasAdvancedFilters =
+		hostingOnly || favoritesOnly || positionFilter.length > 0 || ageMin !== 18 || ageMax !== 99;
+	const activeFilterCount =
+		(hostingOnly ? 1 : 0) +
+		(favoritesOnly ? 1 : 0) +
+		(positionFilter.length > 0 ? 1 : 0) +
+		(ageMin !== 18 || ageMax !== 99 ? 1 : 0);
 	const filterSummary = useMemo(
 		() =>
 			t("right_now.filter_summary", {
@@ -220,18 +1410,23 @@ export function RightNowPage() {
 			ageMin,
 			ageMax,
 			positionFilter,
+			hostingOnly,
+			favoritesOnly,
 		});
 
 		if (
 			next.ageMin !== ageMin ||
 			next.ageMax !== ageMax ||
-			next.positionFilter !== positionFilter
+			next.positionFilter !== positionFilter ||
+			next.hostingOnly !== hostingOnly ||
+			next.favoritesOnly !== favoritesOnly
 		) {
 			setAgeMin(next.ageMin);
 			setAgeMax(next.ageMax);
 			setPositionFilter(next.positionFilter);
+			setHostingOnly(next.hostingOnly);
+			setFavoritesOnly(next.favoritesOnly);
 
-			// Clear the state from the history entry so it doesn't re-apply when returning to this page
 			const safeState =
 				typeof location.state === "object" && location.state !== null
 					? (location.state as Record<string, unknown>)
@@ -241,65 +1436,168 @@ export function RightNowPage() {
 				state: { ...safeState, rightNowFiltersDraft: undefined },
 			});
 		}
-	}, [
-		location.key,
-		location.state,
-		navigate,
-		location.pathname,
-		location.search,
-		ageMin,
-		ageMax,
-		positionFilter,
-	]);
+	}, [location.key, location.state, navigate, location.pathname, location.search, ageMin, ageMax, positionFilter, hostingOnly, favoritesOnly]);
 
 	useEffect(() => {
 		saveRightNowFiltersDraft({
 			sort,
 			hostingOnly,
+			favoritesOnly,
+			viewMode,
 			ageMin,
 			ageMax,
 			positionFilter,
 		});
-	}, [sort, hostingOnly, ageMin, ageMax, positionFilter]);
+	}, [sort, hostingOnly, favoritesOnly, viewMode, ageMin, ageMax, positionFilter]);
 
-	const isMountedRef = useRef(true);
+	// Only posts shared with "Show me on map" carry lat/lon; everyone else is
+	// list-only.
+	const mapItems = useMemo(() => items.filter(hasMapPosition), [items]);
+	const mapFitKey = useMemo(() => JSON.stringify([queryParams, geohash]), [queryParams, geohash]);
+	const selectedMapItem = useMemo(
+		() => (selectedMapKey ? mapItems.find((item) => getRightNowItemKey(item) === selectedMapKey) ?? null : null),
+		[mapItems, selectedMapKey],
+	);
+	// Grindr rolls the map out per account; without the assignment (or test
+	// mode) the page stays list-only (the stored choice is kept for when it
+	// turns on).
+	const isMapFlagOn = useFeatureFlag("right-now-map");
+	const isMapAvailable = isMapFlagOn || rightNowTestMode;
+	const isMapView = isMapAvailable && viewMode === "map";
+	// The map runs on under the desktop nav rail; markers are framed beside it.
+	const railWidth = isDesktop
+		? parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--nav-rail-width")) || 0
+		: 0;
+	const isMapCardOpen = isMapView && selectedMapItem !== null;
+	// As on the grid map: the own profile (with the anchor at the real position)
+	// and, on the Free Grind server, the cruising spots.
+	const ownMapCard = useOwnMapCard();
+	const { selfMapPosition, selfFuzzRadiusMeters } = useOwnMapPresence(isMapView);
+	const cruisingMap = useCruisingMapState(isMapView && !isIncognito);
+	const { fullWidth: navFullWidth } = useNavStyle();
+	// Set by RightNowMap; the header's Center pill frames all markers through it.
+	const mapRecenterRef = useRef<(() => void) | null>(null);
+
+
+	const isSessionActive = useMemo(() => {
+		if (!activeRightNowId || !activeRightNowExpiresAt) return false;
+		return Date.now() < activeRightNowExpiresAt;
+	}, [activeRightNowId, activeRightNowExpiresAt]);
+
 	useEffect(() => {
-		isMountedRef.current = true;
-		return () => {
-			isMountedRef.current = false;
-		};
-	}, []);
+		const isClearlyActive = activeRightNowId && activeRightNowExpiresAt && (Date.now() < activeRightNowExpiresAt - 2000);
 
-	const loadFeed = useCallback(async () => {
-		setIsLoading(true);
-		setError(null);
-		try {
-			const result = await apiFunctions.getRightNowFeed({
-				sort,
-				hosting: hostingOnly ? true : undefined,
-				ageMin,
-				ageMax,
-				sexualPositions: positionFilter || undefined,
-			});
-			if (isMountedRef.current) {
-				setItems(result);
-			}
-		} catch (err) {
-			if (isMountedRef.current) {
-				setError(
-					err instanceof Error ? err.message : t("right_now.error_load"),
-				);
-			}
-		} finally {
-			if (isMountedRef.current) {
-				setIsLoading(false);
-			}
+		if (isClearlyActive && fabPhase === "idle" && !isPosting) {
+			setFabPhase("countdown");
+		} else if (!isSessionActive && fabPhase === "countdown" && !isPosting) {
+			setFabPhase("idle");
 		}
-	}, [apiFunctions, sort, hostingOnly, ageMin, ageMax, positionFilter]);
+	}, [isSessionActive, fabPhase, isPosting, activeRightNowId, activeRightNowExpiresAt]);
 
 	useEffect(() => {
-		void loadFeed();
-	}, [loadFeed]);
+		if (!isSessionActive && activeRightNowId) {
+			void setPreferences({
+				activeRightNowId: null,
+				activeRightNowExpiresAt: null,
+				activeRightNowHidden: false,
+			});
+		}
+	}, [isSessionActive, activeRightNowId, setPreferences]);
+
+	// Mark as seen whenever the user is on this page so the NavBar dot clears
+	useEffect(() => {
+		if (items.length > 0) {
+			const maxTs = Math.max(...items.map(i => i.postedAt ?? 0));
+			const at = Math.max(Date.now(), maxTs);
+			markRightNowSeen(at);
+			setLastSeenRightNow(at);
+		}
+	}, [items]);
+
+	// Clear scroll memory for RightNow when NEW activity is detected in real-time
+	const prevMaxPostedAt = useRef(lastSeenRightNow);
+
+	useEffect(() => {
+		const maxPostedAt = items.length > 0 ? Math.max(...items.map(i => i.postedAt ?? 0)) : 0;
+		if (maxPostedAt > prevMaxPostedAt.current) {
+			sessionStorage.removeItem("rightnow-scroll");
+			feedContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+		}
+		if (maxPostedAt > 0) prevMaxPostedAt.current = maxPostedAt;
+	}, [items]);
+
+	// Scroll Memory logic
+	useEffect(() => {
+		const container = feedContainerRef.current;
+		if (!container) return;
+
+		const handleScroll = () => {
+			const scrollData = {
+				top: container.scrollTop,
+				timestamp: Date.now(),
+				// A position only makes sense in the area it was scrolled in.
+				geohash,
+			};
+			sessionStorage.setItem("rightnow-scroll", JSON.stringify(scrollData));
+		};
+
+		container.addEventListener("scroll", handleScroll, { passive: true });
+		return () => container.removeEventListener("scroll", handleScroll);
+	}, [viewMode, geohash]);
+
+	// Like open-grind: a new location starts the feed over from the top.
+	const prevGeohashRef = useRef(geohash);
+	useEffect(() => {
+		if (prevGeohashRef.current === geohash) return;
+		prevGeohashRef.current = geohash;
+		sessionStorage.removeItem("rightnow-scroll");
+		feedContainerRef.current?.scrollTo(0, 0);
+	}, [geohash]);
+
+	useLayoutEffect(() => {
+		if (items.length > 0 && !isLoading && !hasRestoredScroll && feedContainerRef.current) {
+			const storageKey = "rightnow-scroll";
+
+			// If there's new activity since the last time we "saw" this page,
+			// don't restore the scroll position - stay at the top.
+			const maxTs = Math.max(...items.map(i => i.postedAt ?? 0));
+			if (maxTs > lastSeenRightNow) {
+				sessionStorage.removeItem(storageKey);
+				feedContainerRef.current.scrollTop = 0;
+				setHasRestoredScroll(true);
+				return;
+			}
+
+			const saved = sessionStorage.getItem(storageKey);
+			if (saved) {
+				try {
+					const parsed = JSON.parse(saved);
+					// Safety check: is it our new object format or just an old number?
+					if (parsed && typeof parsed === "object" && "top" in parsed) {
+						const { top, timestamp, geohash: savedGeohash } = parsed as { top: number; timestamp: number; geohash?: string | null };
+						if (Date.now() - timestamp < SCROLL_RESTORATION_TIMEOUT_MS && (savedGeohash ?? null) === (geohash ?? null)) {
+							feedContainerRef.current.scrollTop = top;
+						} else {
+							sessionStorage.removeItem(storageKey);
+							feedContainerRef.current.scrollTop = 0;
+						}
+					} else {
+						// Old numeric format, clear it
+						sessionStorage.removeItem(storageKey);
+						feedContainerRef.current.scrollTop = 0;
+					}
+				} catch (e) {
+					sessionStorage.removeItem(storageKey);
+					feedContainerRef.current.scrollTop = 0;
+				}
+			} else {
+				// No saved scroll, ensure we start at the top
+				feedContainerRef.current.scrollTop = 0;
+			}
+			setHasRestoredScroll(true);
+		}
+	}, [items.length, isLoading, hasRestoredScroll, lastSeenRightNow, items, geohash]);
+
 
 	const handleMessage = useCallback(
 		(profileId: string) => {
@@ -310,129 +1608,537 @@ export function RightNowPage() {
 		[navigate],
 	);
 
+	// Reports: not our own post, and only posts the server gave an id.
+	const [reportTarget, setReportTarget] = useState<RightNowReportTarget | null>(null);
+	const [isReportOpen, setIsReportOpen] = useState(false);
+	const reportHandlerFor = (item: RightNowFeedEntry): ReportHandler => {
+		if (item.id == null || rightNowTestMode) return undefined;
+		if (item.kind === "discreet") {
+			if (item.id === activeRightNowId) return undefined;
+			const postId = item.id;
+			return () => {
+				setReportTarget({ profileId: null, postId });
+				setIsReportOpen(true);
+			};
+		}
+		if (userId != null && item.profileId === String(userId)) return undefined;
+		const target = { profileId: item.profileId, postId: item.id };
+		return () => {
+			setReportTarget(target);
+			setIsReportOpen(true);
+		};
+	};
+
 	const handleSelect = useCallback(
 		(profileId: string) => {
 			navigate(`/profile/${profileId}`, {
-				state: { returnTo: location.pathname },
+				state: {
+					returnTo: location.pathname,
+					// The profile sits over Right Now — keep the page rendered
+					// underneath (see App.tsx) so closing it doesn't reload it,
+					// same as the inbox.
+					backgroundLocation: location,
+				},
 			});
 		},
-		[navigate, location.pathname],
+		[navigate, location],
 	);
 
 	const toggleSort = useCallback(() => {
-		setSort((prev) => (prev === "DISTANCE" ? "RECENCY" : "DISTANCE"));
+		setSort((prev) => (prev === "DISTANCE" ? "NEWEST" : "DISTANCE"));
+		sessionStorage.removeItem("rightnow-scroll");
+		setHasRestoredScroll(true);
+		feedContainerRef.current?.scrollTo(0, 0);
 	}, []);
 
+	const toggleHostingOnly = useCallback(() => {
+		setHostingOnly((previous) => !previous);
+		sessionStorage.removeItem("rightnow-scroll");
+		setHasRestoredScroll(true);
+		feedContainerRef.current?.scrollTo(0, 0);
+	}, []);
+
+	const toggleFavoritesOnly = useCallback(() => {
+		setFavoritesOnly((previous) => !previous);
+		sessionStorage.removeItem("rightnow-scroll");
+		setHasRestoredScroll(true);
+		feedContainerRef.current?.scrollTo(0, 0);
+	}, []);
+
+	const changeViewMode = useCallback((mode: RightNowViewMode) => {
+		setViewMode(mode);
+		setSelectedMapKey(null);
+	}, []);
+
+	const viewModeTabs: IconTabConfig<RightNowViewMode>[] = useMemo(
+		() => [
+			// Desktop shows the feed as a card grid, not a list.
+			isDesktop
+				? { key: "list", label: t("right_now.view_grid", { defaultValue: "Grid" }), icon: LayoutGridFilled }
+				: { key: "list", label: t("right_now.view_list", { defaultValue: "List" }), icon: ListIcon },
+			{ key: "map", label: t("right_now.view_map", { defaultValue: "Map" }), icon: MapFilled },
+		],
+		[t, isDesktop],
+	);
+
 	const openFilters = useCallback(() => {
-		navigate("/right-now/filters", {
-			state: {
-				rightNowFiltersDraft: {
-					ageMin,
-					ageMax,
-					positionFilter,
-				},
-				returnTo: "/right-now",
-			},
-		});
-	}, [navigate, ageMin, ageMax, positionFilter]);
+		setIsFiltersOpen(true);
+		setIsFiltersMounted(true);
+	}, []);
+
+	const handleApplyFilters = useCallback((draft: RightNowFiltersDraft) => {
+		setAgeMin(draft.ageMin);
+		setAgeMax(draft.ageMax);
+		setPositionFilter(draft.positionFilter);
+		setHostingOnly(draft.hostingOnly);
+		setFavoritesOnly(draft.favoritesOnly);
+		sessionStorage.removeItem("rightnow-scroll");
+		setHasRestoredScroll(true);
+		feedContainerRef.current?.scrollTo(0, 0);
+	}, []);
+
+	// The sheet only calls this once its close animation has finished.
+	const handleCloseFilters = useCallback(() => {
+		setIsFiltersOpen(false);
+		setIsFiltersMounted(false);
+	}, []);
 
 	return (
+		<>
 		<PullToRefreshContainer
-			className="app-screen flex flex-col"
+			className="right-now-scope app-screen flex h-dvh flex-col w-full !px-0 !pb-0 overflow-x-hidden"
 			contentClassName="flex flex-1 flex-col min-h-0"
-			onRefresh={loadFeed}
-			isDisabled={isLoading}
+			style={{ overflow: "visible", overflowX: "hidden" }}
+			onRefresh={async () => {
+				sessionStorage.removeItem("rightnow-scroll");
+				setHasRestoredScroll(true);
+				feedContainerRef.current?.scrollTo(0, 0);
+				// Awaited so the spinner stays until the feed is actually back.
+				await refetch();
+			}}
+			isDisabled={isLoading || isMapView || isIncognito}
 			isAtTop={() => (feedContainerRef.current?.scrollTop ?? 0) <= 0}
 			refreshingLabel={t("right_now.refreshing")}
+			spinnerColor="var(--right-now)"
+			spinnerIconColor="white"
 		>
-			{/* Header */}
-			<header className="mb-2 grid gap-3 px-[var(--app-px)]">
-				<h1 className="app-title">{t("right_now.title")}</h1>
-
-				<div className="flex flex-wrap items-center gap-2 pb-1">
-					{/* Sort by Distance / Recency */}
-					<button
-						type="button"
-						onClick={toggleSort}
-						className={cn(
-							"flex shrink-0 items-center gap-1.5 rounded-full px-4 py-2 text-sm font-medium transition-colors",
-							"bg-[var(--surface-2)] text-[var(--text)]",
+			<header ref={headerRef} className="relative z-20 grid gap-3 pointer-events-none">
+				<PageHeaderBackground color="var(--right-now)" />
+				{/* Only the controls take clicks: the map runs on behind the whole header,
+				    so its markers stay clickable around the title and pills. */}
+				<div className="grid gap-3 mx-auto w-full max-w-4xl rail:max-w-none px-[var(--app-px)]">
+					<div className="flex items-center justify-between gap-3">
+						<h1 className="app-title min-w-0">{t("right_now.title")}</h1>
+						{/* Same as the inbox header's icon buttons: -my-2 keeps the row at the title's height. */}
+						{canPostDiscreetly && !isIncognito && (
+						<div className="pointer-events-auto -my-2 flex shrink-0 items-center gap-0.5">
+							<button
+								type="button"
+								onClick={() => setIsRequestsOpen(true)}
+								title={t("right_now.requests_title", { defaultValue: "Requests" })}
+								aria-label={
+									pendingRequests.length > 0
+										? `${t("right_now.requests_title", { defaultValue: "Requests" })}: ${pendingRequests.length}`
+										: t("right_now.requests_title", { defaultValue: "Requests" })
+								}
+								className="header-icon-btn relative rounded-xl p-2 text-[var(--text-muted)] transition hover:text-[var(--text)]"
+							>
+								<Inbox className="h-5 w-5" />
+								{pendingRequests.length > 0 ? (
+									<span className="absolute end-0.5 top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--right-now)] px-1 text-[9px] font-bold leading-none tabular-nums text-white">
+										{pendingRequests.length > 99 ? "99+" : pendingRequests.length}
+									</span>
+								) : null}
+							</button>
+						</div>
 						)}
-					>
-						<ArrowUpDown className="h-3.5 w-3.5" />
-						{sort === "DISTANCE" ? t("right_now.distance") : t("right_now.recent")}
-					</button>
+					</div>
 
-					{/* Hosting toggle */}
-					<button
-						type="button"
-						onClick={() => setHostingOnly((v) => !v)}
-						className={cn(
-							"shrink-0 rounded-full px-4 py-2 text-sm font-medium transition-colors",
-							hostingOnly
-								? "bg-[var(--accent)] text-[var(--accent-contrast)]"
-								: "bg-[var(--surface-2)] text-[var(--text)]",
+					<div className="flex flex-wrap items-center gap-2 pb-4 [&>*]:pointer-events-auto">
+						{isMapAvailable && (
+							// Same segmented control as the Interest tabs, in Right Now color.
+							<IconTabs
+								activeTab={isMapView ? "map" : "list"}
+								tabs={viewModeTabs}
+								onTabClick={changeViewMode}
+								color="var(--right-now)"
+								contrastColor="white"
+							/>
 						)}
-					>
-						{t("right_now.hosting")}
-					</button>
 
-					<button
-						type="button"
-						onClick={openFilters}
-						className={cn(
-							"inline-flex min-h-10 items-center gap-1.5 rounded-full px-4 text-sm font-medium transition-colors",
-							hasAdvancedFilters
-								? "bg-[var(--accent)] text-[var(--accent-contrast)]"
-								: "bg-[var(--surface-2)] text-[var(--text)]",
+						<button
+							type="button"
+							onClick={openFilters}
+							title={t("right_now.filters")}
+							aria-label={hasAdvancedFilters ? `${t("right_now.filters")}: ${filterSummary}` : t("right_now.filters")}
+							className={cn(
+								"glass-pill inline-flex shrink-0 items-center justify-center gap-1.5 py-2 text-sm font-bold active:scale-95",
+								// Icon-only keeps the text line height so it matches the label pills (same as the grid).
+								hasAdvancedFilters ? "px-3" : "px-[11px]",
+								hasAdvancedFilters
+									? "bg-[var(--right-now)] border-[var(--right-now)] text-white shadow-lg shadow-[var(--right-now)]/40"
+									: "text-[var(--right-now)] hover:border-[var(--right-now)]/60 hover:bg-[var(--right-now)]/20",
+							)}
+							style={!hasAdvancedFilters ? {
+								"--pill-color": "var(--right-now)",
+							} as React.CSSProperties : undefined}
+						>
+							<span className="flex h-5 items-center">
+								<PhosphorSlidersHorizontal weight="fill" className="h-3.5 w-3.5" />
+							</span>
+							{hasAdvancedFilters ? (
+								<span className="ms-0.5 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-white px-1 text-[9px] font-bold text-[var(--right-now)]">
+									{activeFilterCount}
+								</span>
+							) : null}
+						</button>
+
+						{/* Order only matters in the list; the map shows everyone at once. */}
+						{!isMapView && (
+						<button
+							type="button"
+							onClick={toggleSort}
+							className={cn(
+								"flex shrink-0 items-center gap-1.5 rounded-full border px-4 py-2 text-sm font-bold transition-all active:scale-95",
+								"bg-[var(--right-now)] border-[var(--right-now)] text-white shadow-lg shadow-[var(--right-now)]/40",
+							)}
+						>
+							<ArrowUpDown className="h-3.5 w-3.5" />
+							{sort === "DISTANCE" ? t("right_now.distance") : t("right_now.recent")}
+						</button>
 						)}
-					>
-						<SlidersHorizontal className="h-3.5 w-3.5" />
-						{t("right_now.filters")}
-					</button>
 
-					<span className="text-xs text-[var(--text-muted)] sm:text-sm">
-						{filterSummary}
-					</span>
+						{sanitizeQuickFilters(rightNowQuickFilters, RIGHT_NOW_QUICK_FILTER_KEYS).map((key) => {
+							const def = rightNowQuickFilterDefs[key];
+							return (
+								<FilterPill
+									key={key}
+									icon={def.renderIcon("h-3.5 w-3.5")}
+									label={def.label}
+									active={key === "hostingOnly" ? hostingOnly : favoritesOnly}
+									onClick={key === "hostingOnly" ? toggleHostingOnly : toggleFavoritesOnly}
+									color="right-now"
+								/>
+							);
+						})}
+
+						{isMapView && mapItems.length > 0 && (
+						<button
+							type="button"
+							onClick={() => mapRecenterRef.current?.()}
+							title={t("right_now.map_recenter")}
+							className="glass-pill inline-flex shrink-0 items-center gap-1.5 px-4 py-2 text-sm font-bold text-[var(--right-now)] hover:border-[var(--right-now)]/60 hover:bg-[var(--right-now)]/20 active:scale-95"
+							style={{ "--pill-color": "var(--right-now)" } as React.CSSProperties}
+						>
+							<Crosshair className="h-3.5 w-3.5" />
+							{t("right_now.map_center", { defaultValue: "Center" })}
+						</button>
+						)}
+					</div>
 				</div>
 			</header>
 
-			{/* Feed */}
-			<div ref={feedContainerRef} className="flex-1 overflow-y-auto">
-				{isLoading ? (
-					<div className="flex items-center justify-center py-16">
-						<Loader2 className="h-6 w-6 animate-spin text-[var(--text-muted)]" />
-					</div>
-				) : error ? (
-					<div className="px-[var(--app-px)] py-8 text-center">
-						<p className="mb-3 text-sm text-[var(--text-muted)]">{error}</p>
-						<button
-							type="button"
-							onClick={() => void loadFeed()}
-							className="rounded-full bg-[var(--surface-2)] px-4 py-2 text-sm font-medium text-[var(--text)]"
+			{/* A failed load keeps the map up; it then just shows nobody nearby. */}
+			{isMapView && !isIncognito ? (
+				<div
+					// Full bleed, running up behind the header and, on desktop, on under
+					// the (unfilled) nav rail instead of being cut off at its edge.
+					// Placed absolutely (not after the header in the flow) so a growing
+					// header can't push it down for a frame before headerBottom catches
+					// up. The content layer (transformed, so the containing block)
+					// starts at --header-top.
+					className="absolute inset-x-0 bottom-0 top-[calc(-1*var(--header-top))] rail:-start-[var(--nav-rail-width)]"
+				>
+					<RightNowMap
+						items={mapItems}
+						selectedKey={selectedMapItem ? selectedMapKey : null}
+						onSelectKey={setSelectedMapKey}
+						fitKey={mapFitKey}
+						topInset={headerBottom}
+						leftInset={railWidth}
+						recenterRef={mapRecenterRef}
+						selfCard={ownMapCard}
+						selfMapPosition={selfMapPosition}
+						selfFuzzRadiusMeters={selfFuzzRadiusMeters}
+						onSelectSelf={ownMapCard ? () => handleSelect(String(ownMapCard.profileId)) : undefined}
+						spots={cruisingMap.spots}
+						selectedSpotId={cruisingMap.selectedSpotId}
+						checkedInSpotId={cruisingMap.checkIn?.spotId ?? null}
+						onSelectSpot={(spotId) => {
+							setSelectedMapKey(null);
+							cruisingMap.setSelectedSpotId(spotId);
+						}}
+						onCenterChange={cruisingMap.handleCenterChange}
+					/>
+
+					{/* Keeps the rail's tabs readable over the map, like the mobile nav bar's fade. */}
+					<div
+						aria-hidden="true"
+						className="pointer-events-none absolute inset-y-0 start-0 z-10 hidden w-[calc(var(--nav-rail-width)+4rem)] rail:block"
+						style={{ background: "linear-gradient(to right, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0.75) 55%, transparent 100%)" }}
+					/>
+					{/* The page's bottom scrim behind the action pill, here inside the map so it
+					    spans the full bleed (under the rail too) instead of starting at the rail. */}
+					<div
+						aria-hidden="true"
+						className="pointer-events-none absolute inset-x-0 bottom-0 z-10 hidden h-36 rail:block"
+						style={{ background: BOTTOM_SCRIM_GRADIENT }}
+					/>
+
+					{!isLoading && mapItems.length === 0 && (
+						<div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-8">
+							<p className="rounded-2xl border border-[var(--border)] bg-[var(--surface)]/90 px-4 py-3 text-center text-sm text-[var(--text-muted)] shadow-lg backdrop-blur">
+								{items.length === 0 || error
+									? t("right_now.empty")
+									: t("right_now.map_no_positions", {
+										defaultValue: "Nobody nearby is sharing their location on the map right now.",
+									})}
+							</p>
+						</div>
+					)}
+
+					{selectedMapItem && (
+						<div
+							className={cn(
+								// Desktop: centered in the part of the map beside the rail.
+								"absolute inset-x-0 z-20 px-3 rail:ps-[calc(var(--nav-rail-width)+0.75rem)]",
+								// Clear of the nav bar, a bit more room above the floating one.
+								navFullWidth
+									? "bottom-[calc(var(--nav-height,var(--safe-area-bottom))+0.75rem)]"
+									: "bottom-[calc(var(--nav-height,var(--safe-area-bottom))+1rem)]",
+							)}
 						>
-							{t("right_now.try_again")}
-						</button>
-					</div>
-				) : items.length === 0 ? (
-					<div className="px-[var(--app-px)] py-16 text-center">
-						<p className="text-sm text-[var(--text-muted)]">{t("right_now.empty")}</p>
-					</div>
-				) : (
-					<div className="divide-y divide-[var(--surface-2)]">
-						{items.map((item) => (
-							<RightNowRow
-								key={item.profileId}
-								item={item}
+							<RightNowMapCard
+								key={selectedMapKey}
+								item={selectedMapItem}
 								onMessage={handleMessage}
 								onSelect={handleSelect}
+								onOpenPhoto={openPhotoViewer}
+								onReport={reportHandlerFor(selectedMapItem)}
+								onClose={() => setSelectedMapKey(null)}
 							/>
+						</div>
+					)}
+				</div>
+			) : (
+			<FeedScrollContainer ref={feedContainerRef}>
+				{isIncognito ? (
+					<div className="flex flex-col items-center justify-center gap-4 px-[var(--app-px)] text-center" style={{ minHeight: "60dvh" }}>
+						<div className="rounded-2xl bg-[var(--surface-2)] p-4">
+							<Ghost className="h-7 w-7 text-[var(--right-now)]" />
+						</div>
+						<div className="grid max-w-xs gap-1.5">
+							<p className="text-base font-semibold text-[var(--text)]">{t("browse_page.incognito_active_title")}</p>
+							<p className="text-sm text-[var(--text-muted)]">
+								{t("right_now.incognito_active_desc", {
+									defaultValue: "Right Now won't load while incognito mode is on, so you won't show up as online to others.",
+								})}
+							</p>
+						</div>
+						<Button variant="primary" onClick={() => navigate("/settings/privacy")} leftIcon={<Ghost className="h-4 w-4" />}>
+							{t("browse_page.incognito_active_button")}
+						</Button>
+					</div>
+				) : isLoading && isDesktop ? (
+					<div className="grid grid-cols-[repeat(auto-fill,minmax(max(300px,calc((100%-4*0.75rem)/5)),1fr))] gap-3 px-[var(--app-px)] pb-[calc(var(--safe-area-bottom)+120px)] rail:pb-[calc(var(--page-bottom)+4rem)]">
+						{Array.from({ length: 12 }).map((_, i) => (
+							<RightNowTileSkeleton key={i} />
+						))}
+					</div>
+				) : isLoading ? (
+					<div className="mx-auto max-w-4xl divide-y divide-[var(--surface-2)] pb-[calc(var(--safe-area-bottom)+120px)] rail:pb-[calc(var(--page-bottom)+4rem)]">
+						{Array.from({ length: 6 }).map((_, i) => (
+							<div key={i}>
+								<RightNowSkeleton />
+							</div>
+						))}
+					</div>
+				) : error ? (
+					<FeedErrorState
+						title={t("right_now.error_load")}
+						description={error instanceof Error ? error.message : String(error)}
+						onRetry={() => void refetch()}
+						retryLabel={t("right_now.try_again")}
+						color="var(--right-now)"
+					/>
+				) : items.length === 0 ? (
+					<FeedEmptyState
+						icon={<RightNowIcon />}
+						title={t("right_now.empty")}
+						description={t("right_now.empty_desc", { defaultValue: "People who post Right Now near you will show up here." })}
+						color="var(--right-now)"
+						contrastColor="white"
+					/>
+				) : isDesktop ? (
+					<div className="grid grid-cols-[repeat(auto-fill,minmax(max(300px,calc((100%-4*0.75rem)/5)),1fr))] gap-3 px-[var(--app-px)] pb-[calc(var(--safe-area-bottom)+120px)] rail:pb-[calc(var(--page-bottom)+4rem)]">
+						{items.map((item) =>
+							item.kind === "discreet" ? (
+								<RightNowDiscreetTile
+									key={getRightNowEntryKey(item)}
+									item={item}
+									onOpenPhoto={openPhotoViewer}
+									onReport={reportHandlerFor(item)}
+									request={sentRequests?.get(item.id)}
+									isSending={sendRequest.isPending && sendRequest.variables === item.id}
+									onRequest={(postId) => sendRequest.mutate(postId)}
+									onMessage={handleMessage}
+								/>
+							) : (
+								<RightNowTile
+									key={getRightNowEntryKey(item)}
+									item={item}
+									onMessage={handleMessage}
+									onSelect={handleSelect}
+									onOpenPhoto={openPhotoViewer}
+									onReport={reportHandlerFor(item)}
+								/>
+							),
+						)}
+					</div>
+				) : (
+					<div className="mx-auto max-w-4xl pb-[calc(var(--safe-area-bottom)+120px)] rail:pb-[calc(var(--page-bottom)+4rem)]">
+						{items.map((item) => (
+							<div key={getRightNowEntryKey(item)} className="px-0">
+								{item.kind === "discreet" ? (
+									<RightNowDiscreetRow
+										item={item}
+										onOpenPhoto={openPhotoViewer}
+										onReport={reportHandlerFor(item)}
+										request={sentRequests?.get(item.id)}
+										isSending={sendRequest.isPending && sendRequest.variables === item.id}
+										onRequest={(postId) => sendRequest.mutate(postId)}
+										onMessage={handleMessage}
+									/>
+								) : (
+									<RightNowRow
+										item={item}
+										onMessage={handleMessage}
+										onSelect={handleSelect}
+										onOpenPhoto={openPhotoViewer}
+										onReport={reportHandlerFor(item)}
+									/>
+								)}
+							</div>
 						))}
 					</div>
 				)}
-			</div>
-
+			</FeedScrollContainer>
+			)}
 		</PullToRefreshContainer>
+
+		{/* Desktop: darken the bottom edge behind the action pill, like a bottom
+		    sheet's scrim, so the pill stands out from the feed scrolling under it. */}
+		<div
+			aria-hidden="true"
+			// The map view draws its own, full-bleed one.
+			className={cn("pointer-events-none fixed bottom-0 start-[var(--nav-rail-width,0px)] end-0 z-[55] hidden h-36", !isMapView && "rail:block")}
+			style={{ background: BOTTOM_SCRIM_GRADIENT }}
+		/>
+		{/* Cruising spots on the map: at page level (not inside the full-bleed map
+		    wrapper), so the bar centers like the post pill below. */}
+		{isMapView && !isIncognito ? (
+			<CruisingMapOverlay
+				state={cruisingMap}
+				onOpenProfile={handleSelect}
+				onBeforeSuggest={() => setSelectedMapKey(null)}
+				// One row above Right Now's own post button.
+				barClassName="bottom-[calc(var(--nav-height,var(--safe-area-bottom))+5.25rem)] rail:bottom-[calc(var(--page-bottom)+4.5rem)]"
+				hideBar={isMapCardOpen || isPosting || isFiltersOpen || isRequestsOpen}
+			/>
+		) : null}
+		<div className="fixed start-[var(--nav-rail-width,0px)] end-0 bottom-[calc(var(--nav-height,var(--safe-area-bottom))+0.75rem)] rail:bottom-[var(--page-bottom)] z-[60] pointer-events-none">
+			<div className="relative mx-auto h-full w-full max-w-4xl rail:max-w-none px-4 md:px-10">
+				{developerMode && showDebugInfo && (
+					<div
+						className={cn(
+							"absolute bottom-0 start-4 transition-all duration-300 pointer-events-auto",
+							(isPosting || isFiltersOpen || isMapCardOpen || isRequestsOpen) ? "pointer-events-none opacity-0 translate-y-4" : "opacity-100 translate-y-0",
+						)}
+					>
+						<button
+							type="button"
+							onClick={() => void setPreferences({ rightNowTestMode: !rightNowTestMode })}
+							className={cn(
+								"flex h-12 items-center gap-2 rounded-full border px-4 text-xs font-black shadow-xl transition-all active:scale-90",
+								rightNowTestMode
+									? "bg-blue-600 border-blue-600 text-white shadow-blue-600/40"
+									: "bg-[var(--surface-2)] border-[var(--border)] text-[var(--text)]"
+							)}
+						>
+							<div className={cn(
+								"h-2 w-2 rounded-full",
+								rightNowTestMode ? "bg-white animate-pulse" : "bg-blue-500"
+							)} />
+							{rightNowTestMode ? "TEST MODE" : "LIVE MODE"}
+						</button>
+					</div>
+				)}
+
+				<div
+					className={cn(
+						// Mobile: round button above the bottom nav, thumb-reachable; desktop: a
+						// labelled pill centered at the bottom.
+						"absolute bottom-0 right-[16%] translate-x-1/2 rail:right-1/2 transition-opacity duration-300 pointer-events-auto",
+						(isPosting || isFiltersOpen || isMapCardOpen || isRequestsOpen || isIncognito) ? "pointer-events-none opacity-0" : "opacity-100",
+					)}
+				>
+					{isDesktop ? (
+						<RightNowPostPill
+							onClick={handlePostClick}
+							phase={fabPhase}
+							onPhaseChange={setFabPhase}
+							isEditMode={isSessionActive}
+							expiresAt={activeRightNowExpiresAt ?? null}
+							rightNowRemaining={rightNowRemaining}
+							isTestMode={rightNowTestMode}
+						/>
+					) : (
+						<RightNowPostFAB
+							onClick={handlePostClick}
+							phase={fabPhase}
+							onPhaseChange={setFabPhase}
+							isEditMode={isSessionActive}
+							expiresAt={activeRightNowExpiresAt}
+							rightNowRemaining={rightNowRemaining}
+							isTestMode={rightNowTestMode}
+						/>
+					)}
+				</div>
+			</div>
+		</div>
+		{isModalMounted && (
+			<RightNowPostPage
+				onClose={handleCloseModal}
+				onPost={handlePostSuccess}
+			/>
+		)}
+		{isRequestsOpen && (
+			<RightNowRequestsSheet requests={pendingRequests} onClose={() => setIsRequestsOpen(false)} />
+		)}
+		{isFiltersMounted && (
+			<RightNowFiltersPage
+				initialDraft={{ ageMin, ageMax, positionFilter, hostingOnly, favoritesOnly }}
+				onClose={handleCloseFilters}
+				onApply={handleApplyFilters}
+			/>
+		)}
+		{reportTarget && (
+			<ReportProfileDialog
+				isOpen={isReportOpen}
+				profileId={reportTarget.profileId}
+				rightNowPostId={reportTarget.postId}
+				onClose={() => setIsReportOpen(false)}
+			/>
+		)}
+		{isViewerOpen && (
+			<PhotoViewer
+				isOpen={true}
+				onClose={closePhotoViewer}
+				photos={viewerPhotos}
+				initialIndex={viewerIndex}
+				conversationId={viewerProfileId}
+			/>
+		)}
+	</>
 	);
 }
-

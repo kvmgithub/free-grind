@@ -43,7 +43,9 @@ export type BrowseFiltersDraft = {
 	heightCmMax: string;
 	weightGramsMin: string;
 	weightGramsMax: string;
+	genders: number[];
 	tribes: number[];
+	tribesImInto: number[];
 	lookingFor: number[];
 	relationshipStatuses: number[];
 	bodyTypes: number[];
@@ -51,6 +53,7 @@ export type BrowseFiltersDraft = {
 	meetAt: number[];
 	nsfwPics: number[];
 	tags: string[];
+	nicknameFilter: string;
 };
 
 type BrowseFiltersDraftInput = {
@@ -62,7 +65,9 @@ type BrowseFiltersDraftInput = {
 	heightCmMax?: string;
 	weightGramsMin?: string;
 	weightGramsMax?: string;
+	genders?: number[];
 	tribes?: number[];
+	tribesImInto?: number[];
 	lookingFor?: number[];
 	relationshipStatuses?: number[];
 	bodyTypes?: number[];
@@ -70,9 +75,17 @@ type BrowseFiltersDraftInput = {
 	meetAt?: number[];
 	nsfwPics?: number[];
 	tags?: string[];
+	nicknameFilter?: string;
 };
 
-const STORAGE_KEY = "open-grind:browse-filters";
+import { getSetting, setSetting } from "../../services/chatDb";
+
+const STORAGE_KEY = "browseFilters";
+
+// v2: default sort switched from server order ("default") to "distance".
+// Drafts saved before that stored "default" without the user picking it, so
+// migrate them once; drafts saved at v2+ keep an explicit "default" choice.
+const STORAGE_VERSION = 2;
 
 function isNumberArray(value: unknown): value is number[] {
 	return Array.isArray(value) && value.every((item) => typeof item === "number");
@@ -84,7 +97,7 @@ function isStringArray(value: unknown): value is string[] {
 
 export function getDefaultBrowseFiltersDraft(): BrowseFiltersDraft {
 	return {
-		sortBy: "default",
+		sortBy: "distance",
 		browseFilters: { ...defaultBrowseFilters },
 		ageMin: "",
 		ageMax: "",
@@ -92,7 +105,9 @@ export function getDefaultBrowseFiltersDraft(): BrowseFiltersDraft {
 		heightCmMax: "",
 		weightGramsMin: "",
 		weightGramsMax: "",
+		genders: [],
 		tribes: [],
+		tribesImInto: [],
 		lookingFor: [],
 		relationshipStatuses: [],
 		bodyTypes: [],
@@ -100,6 +115,7 @@ export function getDefaultBrowseFiltersDraft(): BrowseFiltersDraft {
 		meetAt: [],
 		nsfwPics: [],
 		tags: [],
+		nicknameFilter: "",
 	};
 }
 
@@ -141,7 +157,11 @@ export function normalizeBrowseFiltersDraft(
 			typeof draft.weightGramsMax === "string"
 				? draft.weightGramsMax
 				: defaults.weightGramsMax,
+		genders: isNumberArray(draft.genders) ? draft.genders : defaults.genders,
 		tribes: isNumberArray(draft.tribes) ? draft.tribes : defaults.tribes,
+		tribesImInto: isNumberArray(draft.tribesImInto)
+			? draft.tribesImInto
+			: defaults.tribesImInto,
 		lookingFor: isNumberArray(draft.lookingFor)
 			? draft.lookingFor
 			: defaults.lookingFor,
@@ -155,34 +175,40 @@ export function normalizeBrowseFiltersDraft(
 		meetAt: isNumberArray(draft.meetAt) ? draft.meetAt : defaults.meetAt,
 		nsfwPics: isNumberArray(draft.nsfwPics) ? draft.nsfwPics : defaults.nsfwPics,
 		tags: isStringArray(draft.tags) ? draft.tags : defaults.tags,
+		nicknameFilter: typeof draft.nicknameFilter === "string" ? draft.nicknameFilter : defaults.nicknameFilter,
 	};
 }
 
-export function loadBrowseFiltersDraft(): BrowseFiltersDraft {
-	if (typeof window === "undefined") {
-		return getDefaultBrowseFiltersDraft();
-	}
+// GridPage fully unmounts/remounts on every in-app navigation away from and
+// back to "/", so its local filter state normally has to reset to defaults
+// and wait on an async chatDb round trip to reload the real draft — visible
+// to the user as filters flashing "gone" for a moment. This module-level
+// cache survives that remount (but not a full page reload), so GridPage can
+// seed its initial state from the last known-good draft instead of defaults.
+let lastKnownBrowseFiltersDraft: BrowseFiltersDraft | null = null;
 
+export function getCachedBrowseFiltersDraft(): BrowseFiltersDraft | null {
+	return lastKnownBrowseFiltersDraft;
+}
+
+export async function loadBrowseFiltersDraft(): Promise<BrowseFiltersDraft> {
 	try {
-		const raw = window.localStorage.getItem(STORAGE_KEY);
-		if (!raw) {
-			return getDefaultBrowseFiltersDraft();
+		const stored = await getSetting<BrowseFiltersDraftInput & { version?: number }>(STORAGE_KEY);
+		const normalized = normalizeBrowseFiltersDraft(stored);
+		if (stored && (stored.version ?? 1) < 2 && normalized.sortBy === "default") {
+			normalized.sortBy = "distance";
 		}
-
-		const parsed = JSON.parse(raw) as BrowseFiltersDraftInput;
-		return normalizeBrowseFiltersDraft(parsed);
+		lastKnownBrowseFiltersDraft = normalized;
+		return normalized;
 	} catch {
 		return getDefaultBrowseFiltersDraft();
 	}
 }
 
-export function saveBrowseFiltersDraft(draft: BrowseFiltersDraft): void {
-	if (typeof window === "undefined") {
-		return;
-	}
-
+export async function saveBrowseFiltersDraft(draft: BrowseFiltersDraft): Promise<void> {
+	lastKnownBrowseFiltersDraft = draft;
 	try {
-		window.localStorage.setItem(STORAGE_KEY, JSON.stringify(draft));
+		await setSetting(STORAGE_KEY, { ...draft, version: STORAGE_VERSION });
 	} catch {
 		// Ignore storage failures to avoid blocking filter interactions.
 	}

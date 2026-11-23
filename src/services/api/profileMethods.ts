@@ -9,14 +9,96 @@ import {
 import type {
 	ManagedGender,
 	ManagedPronoun,
+	MySettings,
 	ProfileImageUploadResult,
 } from "../../types/api-functions";
 import type { RestFetcher } from "../../types/chat-service";
 import type { VisitingMode } from "../../types/visiting";
 import { isVisitingMode } from "../../types/visiting";
-import { ApiFunctionError, assertSuccess, parseJsonSafe } from "../apiHelpers";
+import { travelPlansResponseSchema, type TravelPlan, type TravelPlanPayload } from "../../types/travel";
+import { homeLocationSchema, type HomeLocation } from "../../types/home-location";
+import type { ProfileReportRequest, SubmittedReport } from "../../types/reports";
+import { invoke } from "@tauri-apps/api/core";
+import { uploadStagedVideo, type UploadProgress } from "../stagedVideoUpload";
+import { uploadProgressReporter } from "../videoReencode";
+import {
+	ApiFunctionError,
+	assertSuccess,
+	BannedTermsError,
+	mediaUploadErrorToApiFunctionError,
+	parseBannedTerms,
+	parseJsonSafe,
+} from "../apiHelpers";
+import { awaitHomeLocation } from "../../grindr-workarounds";
+import { rememberProfileSnapshot } from "../profileSnapshotPrefetch";
+import { listServerHiddenProfileIds } from "../profileHide";
+import { getProfileSnapshot } from "../chatDb";
+import { classifyProfileAccess } from "../../utils/profileAccessStatus";
+import { profileDetailItemSchema } from "../../types/grid";
+import { getIncognitoMode, isRecordProfileViewsEnabled } from "../../utils/privacy";
+import { appLog } from "../../utils/logger";
+import { isRecaptchaAvailable, mintRecaptchaToken } from "../recaptcha";
 
-export function createProfileMethods(fetchRest: RestFetcher, t: (key: string) => string) {
+export function createProfileMethods(fetchRest: RestFetcher, t: (key: string, options?: { defaultValue?: string }) => string) {
+	/**
+	 * GET /v1/hides — the profiles hidden through the API, oldest first.
+	 * `mediaHash` is unreliable upstream (seen as a literal "hash"), so
+	 * callers should validate it before using it as a photo.
+	 */
+	async function getHiddenProfiles(): Promise<{ profileId: string; displayName: string | null; mediaHash: string | null }[]> {
+		const response = await fetchRest("/v1/hides");
+		await assertSuccess(response, t("settings_hidden.error_load"));
+		const payload = await parseJsonSafe(response);
+		const hides = typeof payload === "object" && payload !== null ? (payload as { hides?: unknown }).hides : null;
+		if (!Array.isArray(hides)) return [];
+		return hides.flatMap((entry) => {
+			if (typeof entry !== "object" || entry === null) return [];
+			const { profileId, displayName, mediaHash } = entry as { profileId?: unknown; displayName?: unknown; mediaHash?: unknown };
+			if (typeof profileId !== "string" && typeof profileId !== "number") return [];
+			return [{
+				profileId: String(profileId),
+				displayName: typeof displayName === "string" && displayName.trim() ? displayName.trim() : null,
+				mediaHash: typeof mediaHash === "string" && mediaHash ? mediaHash : null,
+			}];
+		});
+	}
+
+	/**
+	 * GET /v7/profiles/{id} answers both a block and a hide through /v1/hides
+	 * with the same stub (profileType "ERROR", displayName "4"). POST
+	 * /v3/profiles tells them apart: it leaves out a profile that blocked us
+	 * but still returns one we only hid — with fewer fields (no about text,
+	 * tags, stats…), so it's laid over the local snapshot when there is one.
+	 *
+	 * Checked whatever the hide mode: a hide made on another device or in the
+	 * official app stubs the profile too, and would otherwise read as "they
+	 * blocked you" in the chat's block detection. Null when the profile isn't
+	 * on the hide list or /v3 doesn't return it: then the stub means blocked.
+	 *
+	 * /v3 also returns profiles *we* blocked, so a profile both blocked and
+	 * hidden by us loads here too. Callers that care check our own block list
+	 * first (conversationArchive's self-block steps, ChatPage's 403 handling,
+	 * GridProfilePage's isBlocked), so this only decides "they blocked us".
+	 */
+	async function loadHiddenProfileDetail(profileId: string): Promise<ProfileDetail | null> {
+		if (!(await listServerHiddenProfileIds({ getHiddenProfiles })).includes(profileId)) return null;
+		try {
+			const response = await fetchRest("/v3/profiles", { method: "POST", body: { targetProfileIds: [Number(profileId)] } });
+			if (response.status < 200 || response.status >= 300) return null;
+			const payload = await parseJsonSafe(response);
+			const profiles = typeof payload === "object" && payload !== null ? (payload as { profiles?: unknown }).profiles : null;
+			const raw = Array.isArray(profiles) ? profiles.find((p) => String((p as { profileId?: unknown })?.profileId) === profileId) : null;
+			const fresh = profileDetailItemSchema.safeParse(raw);
+			if (!fresh.success || classifyProfileAccess(fresh.data) !== "accessible") return null;
+			const stored = await getProfileSnapshot(profileId).catch(() => null);
+			const snapshot = stored ? profileDetailItemSchema.safeParse(JSON.parse(stored.data)) : null;
+			return snapshot?.success ? { ...snapshot.data, ...fresh.data } : fresh.data;
+		} catch (error) {
+			appLog.warn("[profile-hide] loading hidden profile via /v3/profiles failed", profileId, error);
+			return null;
+		}
+	}
+
 	return {
 		async getBlockedProfileIds(): Promise<string[]> {
 			const response = await fetchRest("/v3.1/me/blocks");
@@ -68,6 +150,95 @@ export function createProfileMethods(fetchRest: RestFetcher, t: (key: string) =>
 			return { ok: true };
 		},
 
+		async unblockAllProfiles(): Promise<{ ok: true }> {
+			const response = await fetchRest("/v3/me/blocks", { method: "DELETE" });
+			await assertSuccess(response, t("settings_blocked.unblock_all_failed", { defaultValue: "Failed to unblock all profiles." }));
+			return { ok: true };
+		},
+
+		getHiddenProfiles,
+
+		async hideProfile(profileId: string): Promise<{ ok: true }> {
+			const response = await fetchRest(`/v1/me/hides/${encodeURIComponent(profileId)}`, { method: "POST" });
+			await assertSuccess(response, t("profile_details.hide_failed", { defaultValue: "Failed to hide profile." }));
+			return { ok: true };
+		},
+
+		async unhideProfile(profileId: string): Promise<{ ok: true }> {
+			const response = await fetchRest(`/v1/hides/${encodeURIComponent(profileId)}`, { method: "DELETE" });
+			await assertSuccess(response, t("profile_details.unhide_failed", { defaultValue: "Failed to unhide profile." }));
+			return { ok: true };
+		},
+
+		async unhideAllProfiles(): Promise<{ ok: true }> {
+			const response = await fetchRest("/v1/hides", { method: "DELETE" });
+			await assertSuccess(response, t("settings_hidden.unhide_all_failed", { defaultValue: "Failed to unhide all profiles." }));
+			return { ok: true };
+		},
+
+		/**
+		 * Files a report with Grindr's moderation. Like Open Grind: v5 with a
+		 * reCAPTCHA token when one can be minted (Android), otherwise — or
+		 * when v5 refuses it with a 4xx — the ungated v3.1 endpoint.
+		 */
+		async reportProfile(profileId: string, report: ProfileReportRequest): Promise<{ ok: true }> {
+			const id = encodeURIComponent(profileId);
+			// Grindr asks for a reCAPTCHA token on reports (/v5); without one, /v3.1.
+			if (isRecaptchaAvailable()) {
+				const captchaToken = await mintRecaptchaToken("report").catch((error) => {
+					appLog.warn("[Report] reCAPTCHA token unavailable, using v3.1", error);
+					return null;
+				});
+				if (captchaToken !== null) {
+					const v5 = await fetchRest(`/v5/flags/${id}`, {
+						method: "POST",
+						body: { ...report, captchaToken },
+					});
+					if (v5.status < 400 || v5.status >= 500) {
+						await assertSuccess(v5, t("profile_details.report.failed"));
+						return { ok: true };
+					}
+					appLog.warn("[Report] v5 refused the report, using v3.1", { status: v5.status });
+				}
+			}
+			const response = await fetchRest(
+				`/v3.1/flags/${id}`,
+				{ method: "POST", body: report },
+			);
+			await assertSuccess(response, t("profile_details.report.failed"));
+			return { ok: true };
+		},
+
+		/**
+		 * Reports a Right Now post whose author is unknown (a discreet post).
+		 * When the author is known, reportProfile with `rightNowInfo` is used
+		 * instead, like the official client. No reCAPTCHA token here.
+		 */
+		async reportRightNowPost(postId: number, report: ProfileReportRequest): Promise<{ ok: true }> {
+			const body = { reason: report.reason, comment: report.comment, locations: report.locations };
+			const response = await fetchRest(
+				`/v1/flags/right-now/${encodeURIComponent(String(postId))}`,
+				{ method: "POST", body },
+			);
+			await assertSuccess(response, t("profile_details.report.failed"));
+			return { ok: true };
+		},
+
+		/** Our earlier report on a discreet Right Now post, or null when there is none (404). */
+		async getRightNowPostReport(postId: number): Promise<SubmittedReport | null> {
+			const response = await fetchRest(`/v1/flags/right-now/${encodeURIComponent(String(postId))}`);
+			if (response.status === 404) return null;
+			await assertSuccess(response, t("profile_details.report.failed"));
+			const payload = await parseJsonSafe(response);
+			const report = typeof payload === "object" && payload !== null ? (payload as { flagReport?: unknown }).flagReport : null;
+			if (typeof report !== "object" || report === null) return null;
+			const { status, createTime } = report as { status?: unknown; createTime?: unknown };
+			return {
+				status: typeof status === "string" ? status : null,
+				createTime: typeof createTime === "number" ? createTime : null,
+			};
+		},
+
 		async getManagedGenders(): Promise<ManagedGender[]> {
 			const response = await fetchRest("/public/v2/genders");
 			await assertSuccess(response, t("api.errors.load_genders"));
@@ -83,9 +254,13 @@ export function createProfileMethods(fetchRest: RestFetcher, t: (key: string) =>
 						typeof (entry as { genderId?: unknown }).genderId === "number" &&
 						typeof (entry as { gender?: unknown }).gender === "string"
 					) {
+						const displayGroup = (entry as { displayGroup?: unknown }).displayGroup;
+						const sortFilter = (entry as { sortFilter?: unknown }).sortFilter;
 						return {
 							genderId: (entry as { genderId: number }).genderId,
 							gender: (entry as { gender: string }).gender,
+							displayGroup: typeof displayGroup === "number" ? displayGroup : 0,
+							sortFilter: typeof sortFilter === "number" ? sortFilter : null,
 						};
 					}
 					return null;
@@ -133,6 +308,8 @@ export function createProfileMethods(fetchRest: RestFetcher, t: (key: string) =>
 
 		async getBrowseCards(params: {
 			geohash: string;
+			/** Browse a different area via cascade's exploreGeoHash instead of nearbyGeoHash — geohash (your real/reported location) stays untouched either way, see the exploreGeoHash/nearbyGeoHash mutual-exclusion note below. */
+			exploreGeohash?: string;
 			page?: number;
 			filters?: {
 				onlineOnly?: boolean;
@@ -151,7 +328,9 @@ export function createProfileMethods(fetchRest: RestFetcher, t: (key: string) =>
 				heightCmMax?: number;
 				weightGramsMin?: number;
 				weightGramsMax?: number;
+				genders?: string;
 				tribes?: string;
+				tribesImInto?: string;
 				lookingFor?: string;
 				relationshipStatuses?: string;
 				bodyTypes?: string;
@@ -161,9 +340,15 @@ export function createProfileMethods(fetchRest: RestFetcher, t: (key: string) =>
 				tags?: string;
 			};
 		}): Promise<{ cards: BrowseCard[]; nextPage: number | null }> {
-			const queryParams = new URLSearchParams({
-				nearbyGeoHash: params.geohash,
-			});
+			// Cascade rejects nearbyGeoHash + exploreGeoHash together with
+			// CAS-4001 — exploring apparently relies on the server's own
+			// last-known (real) location for "nearby" once exploreGeoHash is
+			// present, so send only one or the other, never both.
+			const queryParams = new URLSearchParams(
+				params.exploreGeohash
+					? { exploreGeoHash: params.exploreGeohash }
+					: { nearbyGeoHash: params.geohash },
+			);
 
 			if (typeof params.page === "number") {
 				queryParams.set("pageNumber", String(params.page));
@@ -198,7 +383,10 @@ export function createProfileMethods(fetchRest: RestFetcher, t: (key: string) =>
 			if (typeof params.filters?.weightGramsMax === "number") {
 				queryParams.set("weightGramsMax", String(params.filters.weightGramsMax));
 			}
+			if (params.filters?.genders) queryParams.set("genders", params.filters.genders);
 			if (params.filters?.tribes) queryParams.set("tribes", params.filters.tribes);
+			if (params.filters?.tribesImInto)
+				queryParams.set("tribesImInto", params.filters.tribesImInto);
 			if (params.filters?.lookingFor)
 				queryParams.set("lookingFor", params.filters.lookingFor);
 			if (params.filters?.relationshipStatuses)
@@ -213,6 +401,8 @@ export function createProfileMethods(fetchRest: RestFetcher, t: (key: string) =>
 			if (params.filters?.tags) queryParams.set("tags", params.filters.tags);
 
 			const url = `/v4/cascade?${queryParams.toString()}`;
+			// Not while a Grindr workaround has the server-side location elsewhere.
+			await awaitHomeLocation();
 			const response = await fetchRest(url);
 			await assertSuccess(response, t("api.errors.load_browse_profiles"));
 			const parsed = cascadeResponseSchema.parse(await parseJsonSafe(response));
@@ -238,11 +428,70 @@ export function createProfileMethods(fetchRest: RestFetcher, t: (key: string) =>
 			const parsed = profileDetailResponseSchema.parse(
 				await parseJsonSafe(response),
 			);
-			return parsed.profiles[0];
+
+			let profile = parsed.profiles[0];
+			if (profile && classifyProfileAccess(profile) === "blocked") {
+				profile = (await loadHiddenProfileDetail(profileId)) ?? profile;
+			}
+			// Every live load refreshes the local snapshot (stubs are skipped), so
+			// a profile stays viewable after a block without extra requests.
+			if (profile) rememberProfileSnapshot(profileId, profile);
+			return profile;
 		},
 
 		async getRawProfile(profileId: number | string): Promise<unknown> {
 			const response = await fetchRest(`/v7/profiles/${profileId}`);
+			await assertSuccess(response, t("api.errors.load_profile"));
+			return parseJsonSafe(response);
+		},
+
+		/**
+		 * GET /v4/me/profile — the read counterpart of updateMyProfile/
+		 * updateMyProfileImages (both write to /v4 or /v3 "me/profile*"
+		 * endpoints). Unlike GET /v7/profiles/:id (a different read path,
+		 * used for viewing arbitrary profiles), this one reliably reflects
+		 * edits made through those endpoints immediately — no read-after-
+		 * write lag — so the profile editor reloads through this after
+		 * saving photos/profile fields rather than getRawProfile.
+		 */
+		async getMyOwnProfile(): Promise<unknown> {
+			const response = await fetchRest("/v4/me/profile");
+			await assertSuccess(response, t("api.errors.load_profile"));
+			return parseJsonSafe(response);
+		},
+
+		async recordProfileView(profileId: number | string): Promise<void> {
+			if (!isRecordProfileViewsEnabled() || getIncognitoMode()) {
+				return;
+			}
+
+			try {
+				const response = await fetchRest(`/v4/views/${encodeURIComponent(String(profileId))}`, {
+					method: "POST",
+				});
+				if (response.status < 200 || response.status >= 300) {
+					appLog.warn(`Failed to record profile view: ${response.status}`);
+				}
+			} catch (error) {
+				appLog.error("Profile view recording error:", error);
+			}
+		},
+
+		/**
+		 * Batch-fetch profile cards for many ids in one request via the cascade
+		 * endpoint (POST /v3/profiles). Unlike GET /v7/profiles/{id}, this returns
+		 * displayName + media for profiles you've blocked, where the single-profile
+		 * endpoint comes back restricted/empty. Returns the raw `{ profiles: [...] }`
+		 * payload.
+		 */
+		async getProfilesByIds(profileIds: (number | string)[]): Promise<unknown> {
+			const targetProfileIds = profileIds
+				.map((id) => Number(id))
+				.filter((id) => !Number.isNaN(id));
+			const response = await fetchRest("/v3/profiles", {
+				method: "POST",
+				body: { targetProfileIds },
+			});
 			await assertSuccess(response, t("api.errors.load_profile"));
 			return parseJsonSafe(response);
 		},
@@ -276,12 +525,112 @@ export function createProfileMethods(fetchRest: RestFetcher, t: (key: string) =>
 			return { ok: true };
 		},
 
+		async getHomeLocation(): Promise<HomeLocation> {
+			const response = await fetchRest("/v1/visiting/home");
+			await assertSuccess(response, t("api.errors.load_home_location"));
+			return homeLocationSchema.parse(await parseJsonSafe(response));
+		},
+
+		async updateHomeLocation(location: { lat: number; lon: number }): Promise<{ ok: true }> {
+			const response = await fetchRest("/v1/visiting/home", {
+				method: "PUT",
+				body: { lat: location.lat, lon: location.lon },
+			});
+			await assertSuccess(response, t("api.errors.save_home_location"));
+			return { ok: true };
+		},
+
+		async getTravelPlans(profileId: number | string): Promise<TravelPlan[]> {
+			const response = await fetchRest(`/v6/profiles/travel/${profileId}`);
+			await assertSuccess(response, t("api.errors.load_travel_plans"));
+			const payload = await parseJsonSafe(response);
+			return travelPlansResponseSchema.parse(payload).travelPlans;
+		},
+
+		async createTravelPlan(payload: TravelPlanPayload): Promise<{ ok: true }> {
+			const { travelPlanId: _ignored, ...body } = payload;
+			const response = await fetchRest("/v6/profiles/travel", {
+				method: "POST",
+				body,
+			});
+			await assertSuccess(response, t("api.errors.save_travel_plan"));
+			return { ok: true };
+		},
+
+		async updateTravelPlan(payload: TravelPlanPayload & { travelPlanId: number }): Promise<{ ok: true }> {
+			const response = await fetchRest("/v6/profiles/travel/update", {
+				method: "POST",
+				body: payload,
+			});
+			await assertSuccess(response, t("api.errors.save_travel_plan"));
+			return { ok: true };
+		},
+
+		async deleteTravelPlan(travelPlanId: number): Promise<{ ok: true }> {
+			const response = await fetchRest(`/v6/profiles/travel/${travelPlanId}`, {
+				method: "DELETE",
+			});
+			await assertSuccess(response, t("api.errors.delete_travel_plan"));
+			return { ok: true };
+		},
+
 		async updateMyProfile(payload: unknown): Promise<{ ok: true }> {
 			const response = await fetchRest("/v4/me/profile", {
 				method: "PATCH",
 				body: payload,
 			});
 			await assertSuccess(response, t("api.errors.save_profile"));
+			return { ok: true };
+		},
+
+		// Account-level prefs (incognito, hideViewedMe, approximateDistance,
+		// viewRightNowNsfw, …), returned as a flat object.
+		async getMySettings(): Promise<MySettings> {
+			const response = await fetchRest("/v3/me/prefs/settings");
+			await assertSuccess(response, t("api.errors.load_profile"));
+			const payload = (await parseJsonSafe(response)) as Record<string, unknown> | null;
+			return {
+				viewRightNowNsfw: payload?.viewRightNowNsfw === true,
+				showOnMap: payload?.showOnMap === true,
+				mapLocationFuzzRadius: typeof payload?.mapLocationFuzzRadius === "number" ? payload.mapLocationFuzzRadius : null,
+				incognito: payload?.incognito === true,
+			};
+		},
+
+		// Fields left out stay untouched, so callers send only what changed —
+		// the official app's distance screen sends just `approximateDistance`.
+		async updateMySettings(settings: Partial<MySettings> & { approximateDistance?: boolean }): Promise<{ ok: true }> {
+			const response = await fetchRest("/v3/me/prefs/settings", {
+				method: "PUT",
+				body: { settings },
+			});
+			await assertSuccess(response, t("api.errors.save_profile"));
+			return { ok: true };
+		},
+
+		// PATCH /v4/me/profile silently ignores explicit `null` values meant to
+		// clear a field (e.g. resetting bodyType/ethnicity to "not set"). Doing a
+		// full replace avoids that partial-merge behavior.
+		async replaceMyProfile(payload: unknown): Promise<{ ok: true }> {
+			const response = await fetchRest("/v3.1/me/profile", {
+				method: "PUT",
+				body: payload,
+			});
+			try {
+				await assertSuccess(response, t("api.errors.save_profile"));
+			} catch (error) {
+				const banned = error instanceof ApiFunctionError && error.status === 400 ? parseBannedTerms(error.payload) : null;
+				if (banned) {
+					throw new BannedTermsError(
+						t("api.errors.profile_banned_terms", {
+							defaultValue: "Your profile contains words that aren't allowed. Nothing was saved.",
+						}),
+						(error as ApiFunctionError).payload,
+						banned,
+					);
+				}
+				throw error;
+			}
 			return { ok: true };
 		},
 
@@ -297,6 +646,42 @@ export function createProfileMethods(fetchRest: RestFetcher, t: (key: string) =>
 			return { ok: true };
 		},
 
+		/**
+		 * GET /v3.1/me/profile/images — the full pool of images uploaded to the
+		 * account, independent of which ones are currently selected into the
+		 * profile's photo slots (that selection lives in `medias`/
+		 * `profileImageMediaHash` on the profile itself). Used by the profile
+		 * picture drawer to let a user pick from previously-uploaded images
+		 * without re-uploading them.
+		 */
+		async getProfileImages(): Promise<{ mediaHash: string; type: number; state: number | null }[]> {
+			const response = await fetchRest("/v3.1/me/profile/images");
+			await assertSuccess(response, t("api.errors.load_photos"));
+			const payload = await parseJsonSafe(response);
+			const medias =
+				typeof payload === "object" && payload !== null
+					? (payload as { medias?: unknown }).medias
+					: null;
+			if (!Array.isArray(medias)) {
+				return [];
+			}
+
+			return medias
+				.map((item) => {
+					if (typeof item !== "object" || item === null) return null;
+					const hashRaw = (item as { mediaHash?: unknown }).mediaHash;
+					if (typeof hashRaw !== "string" || !hashRaw) return null;
+					const typeRaw = (item as { type?: unknown }).type;
+					const stateRaw = (item as { state?: unknown }).state;
+					return {
+						mediaHash: hashRaw,
+						type: typeof typeRaw === "number" ? typeRaw : 0,
+						state: typeof stateRaw === "number" ? stateRaw : null,
+					};
+				})
+				.filter((item): item is { mediaHash: string; type: number; state: number | null } => item !== null);
+		},
+
 		async deleteMyProfileImages(mediaHashes: string[]): Promise<{ ok: true }> {
 			const response = await fetchRest("/v3/me/profile/images", {
 				method: "DELETE",
@@ -306,26 +691,55 @@ export function createProfileMethods(fetchRest: RestFetcher, t: (key: string) =>
 			return { ok: true };
 		},
 
-		async uploadProfileImage(params: {
-			path: string;
+		/**
+		 * Profile photo upload through a dedicated command that picks the
+		 * endpoint: in-app captures go to the device-key-signed /v5 upload
+		 * (signed Rust-side by grindr.rs), gallery photos to the unsigned /v4
+		 * one. `thumbCoords` is the `"bottom,left,right,top"` crop string.
+		 */
+		async uploadProfilePhoto(params: {
 			body: Uint8Array;
 			contentType: string;
+			thumbCoords?: string;
+			takenOnGrindr: boolean;
 		}): Promise<ProfileImageUploadResult> {
-			const response = await fetchRest(params.path, {
-				method: "POST",
-				rawBody: params.body,
-				contentType: params.contentType,
-			});
-			await assertSuccess(response, t("api.errors.upload_image"));
-			const payload = await parseJsonSafe(response);
-			if (typeof payload !== "object" || payload === null) {
-				throw new ApiFunctionError(
-					t("api.errors.invalid_upload_profile_response"),
-					response.status,
-					payload,
-				);
+			try {
+				return await invoke<ProfileImageUploadResult>("upload_profile_image", {
+					body: Array.from(params.body),
+					contentType: params.contentType,
+					thumbCoords: params.thumbCoords ?? null,
+					takenOnGrindr: params.takenOnGrindr,
+				});
+			} catch (error) {
+				throw mediaUploadErrorToApiFunctionError(error, t("api.errors.upload_image"), t);
 			}
-			return payload as ProfileImageUploadResult;
+		},
+
+		/**
+		 * Profile video (self-hosted server, assignment "profile_videos"):
+		 * streamed from disk like chat/album videos (see stagedVideoUpload),
+		 * metadata stripped Rust-side. The server transcodes it and makes the
+		 * poster; the result is a pool media hash like an uploaded photo.
+		 */
+		async uploadProfileVideo(params: {
+			file: File;
+			maxBodySize?: number | null;
+			onProgress?: (progress: UploadProgress) => void;
+		}): Promise<ProfileImageUploadResult | null> {
+			const report = uploadProgressReporter(null, params.onProgress);
+			return uploadStagedVideo(
+				params.file,
+				(stagedId) =>
+					invoke<ProfileImageUploadResult>("upload_staged_profile_video", {
+						stagedId,
+						maxBodySize: params.maxBodySize ?? null,
+						edit: null,
+						onProgress: report.channel(),
+					}),
+				t("api.errors.upload_image"),
+				t,
+				(fraction) => report("preparing", fraction),
+			);
 		},
 	};
 }

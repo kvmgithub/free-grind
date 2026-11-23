@@ -1,7 +1,10 @@
 import { useCallback, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import toast from "react-hot-toast";
 import { useTranslation } from "react-i18next";
 import type { ProfileDetail } from "../../GridPage.types";
+import { usePreferences } from "../../../../contexts/PreferencesContext";
+import { registerTapForSinMode, triggerSinModeUnlock } from "../../../../utils/sinModeEasterEgg";
 
 type TapVisualState = { visualState: "single" | "mutual"; sentAt: number; tapId: number };
 
@@ -37,6 +40,8 @@ export function useTapProfile({
 	TAP_WINDOW_MS,
 }: UseTapProfileParams) {
 	const { t } = useTranslation();
+	const { setPreferences } = usePreferences();
+	const queryClient = useQueryClient();
 	const [tappingProfileId, setTappingProfileId] = useState<string | null>(null);
 	const [tapVisualStates, setTapVisualStates] = useState<
 		Record<string, TapVisualState>
@@ -80,16 +85,28 @@ export function useTapProfile({
 		return sentFromServer || sentLocally;
 	}, [activeProfile, activeProfileId, tapVisualStates, TAP_WINDOW_MS]);
 
+	// Synchronous pre-check so callers (e.g. the grid tile double tap) can
+	// decide on optimistic feedback before the request goes out.
+	const canTapProfile = useCallback(
+		(profileId: string) => {
+			if (tappingProfileId === profileId) {
+				return false;
+			}
+			const sentFromServer =
+				activeProfile?.profileId === profileId && activeProfile.tapped === true;
+			const sentLocally = isWithinWindow(tapVisualStates[profileId]?.sentAt, TAP_WINDOW_MS);
+			return !sentFromServer && !sentLocally;
+		},
+		[activeProfile, tapVisualStates, tappingProfileId, TAP_WINDOW_MS],
+	);
+
 	const handleTapProfile = useCallback(
 		async (profileId: string, tapId: number = 1) => {
 			if (tappingProfileId === profileId) {
 				return;
 			}
 
-			const sentFromServer =
-				activeProfile?.profileId === profileId && activeProfile.tapped === true;
-			const sentLocally = isWithinWindow(tapVisualStates[profileId]?.sentAt, TAP_WINDOW_MS);
-			if (sentFromServer || sentLocally) {
+			if (!canTapProfile(profileId)) {
 				toast(t("browse_page.toasts.tap_limit"));
 				return;
 			}
@@ -118,11 +135,15 @@ export function useTapProfile({
 						tapId,
 					},
 				}));
-				toast.success(
-					result.isMutual
-						? t("browse_page.toasts.tap_mutual")
-						: t("browse_page.toasts.tap_sent"),
-				);
+				// Sent-taps list backs the Interest "sent" tab and the grid tile badges.
+				void queryClient.invalidateQueries({ queryKey: ["interest", "list"] });
+				// No success toast: the tap animation (fly burst / tile burst,
+				// with its mutual variant) is the confirmation.
+
+				if (await registerTapForSinMode(tapId, profileId)) {
+					void setPreferences({ developerMode: true });
+					triggerSinModeUnlock();
+				}
 			} catch (error) {
 				toast.error(
 					error instanceof Error
@@ -135,7 +156,7 @@ export function useTapProfile({
 				);
 			}
 		},
-		[activeProfile, tap, tapVisualStates, tappingProfileId, TAP_WINDOW_MS, t],
+		[canTapProfile, tap, tappingProfileId, setActiveProfile, queryClient, t, setPreferences],
 	);
 
 	return {
@@ -143,6 +164,7 @@ export function useTapProfile({
 		tapVisualStates,
 		resolvedTapVisualState,
 		hasSentTapRecently,
+		canTapProfile,
 		handleTapProfile,
 	};
 }

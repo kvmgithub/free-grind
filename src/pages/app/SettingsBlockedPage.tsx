@@ -1,171 +1,131 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { UserX } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { Loader2, ShieldCheck, ShieldOff, UserX } from "lucide-react";
 import toast from "react-hot-toast";
 import { useTranslation } from "react-i18next";
-import { BackToSettings } from "../../components/BackToSettings";
+import { useNavigate, useLocation } from "react-router-dom";
+import { PageHeader } from "../../components/PageHeader";
 import { PullToRefreshContainer } from "./components/PullToRefreshContainer";
 import { useApiFunctions } from "../../hooks/useApiFunctions";
+import { useBlockedProfileIds, useUnblockProfile } from "../../hooks/queries/useProfileQueries";
+import { applySelfBlockAction } from "../../services/conversationArchive";
 import { getThumbImageUrl, validateMediaHash } from "../../utils/media";
-import blankProfileImage from "../../images/blank-profile.png";
+import { ProfileImage } from "../../components/ui/profile-image";
+import { ConfirmDialog } from "../../components/ui/confirm-dialog";
+import { ErrorState } from "../../components/ui/states";
+import { DrawerEmptyState } from "./chat/drawerUi";
 
 type BlockedProfileListItem = {
 	profileId: string;
 	displayName: string;
-	avatarUrl: string;
+	avatarUrl: string | null;
 };
 
 export function SettingsBlockedPage() {
 	const { t } = useTranslation();
+	const navigate = useNavigate();
+	const location = useLocation();
 	const apiFunctions = useApiFunctions();
+	const { data: blockedIdsData, isLoading: isLoadingIds, refetch: refetchIds } = useBlockedProfileIds();
+	const { mutateAsync: unblockProfileMutation, isPending: isUnblocking } = useUnblockProfile();
+
 	const [blockedProfiles, setBlockedProfiles] = useState<BlockedProfileListItem[]>([]);
-	const [isLoading, setIsLoading] = useState(true);
+	const [isLoadingDetails, setIsLoadingDetails] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [mutatingProfileId, setMutatingProfileId] = useState<string | null>(null);
+	const [isUnblockingAll, setIsUnblockingAll] = useState(false);
+	const [confirmUnblockAll, setConfirmUnblockAll] = useState(false);
 
-	const extractBlockedProfileMeta = useCallback(
-		(rawProfilePayload: unknown, profileId: string) => {
-			const fallbackName = t("profile_details.profile_fallback", { id: profileId });
-			if (typeof rawProfilePayload !== "object" || rawProfilePayload === null) {
-				return {
-					displayName: fallbackName,
-					avatarUrl: blankProfileImage,
-				};
-			}
-
-			const profiles = (rawProfilePayload as { profiles?: unknown }).profiles;
-			if (!Array.isArray(profiles) || profiles.length === 0) {
-				return {
-					displayName: fallbackName,
-					avatarUrl: blankProfileImage,
-				};
-			}
-
-			const first = profiles[0];
-			if (typeof first !== "object" || first === null) {
-				return {
-					displayName: fallbackName,
-					avatarUrl: blankProfileImage,
-				};
-			}
-
-			const displayNameRaw = (first as { displayName?: unknown }).displayName;
-			const displayName =
-				typeof displayNameRaw === "string" && displayNameRaw.trim().length > 0
-					? displayNameRaw.trim()
-					: fallbackName;
-
-			const hashRaw = (first as { profileImageMediaHash?: unknown }).profileImageMediaHash;
-			const avatarUrl =
-				typeof hashRaw === "string" && validateMediaHash(hashRaw)
-					? getThumbImageUrl(hashRaw, "75x75")
-					: blankProfileImage;
-
-			return { displayName, avatarUrl };
-		},
-		[t],
-	);
-
-	const loadBlockedProfiles = useCallback(
-		async (asRefresh = false) => {
-			if (!asRefresh) {
-				setIsLoading(true);
-			}
+	const loadBlockedProfileDetails = useCallback(
+		async (blockedIds: string[]) => {
+			setIsLoadingDetails(true);
 			setError(null);
 
 			try {
-				const blockedIds = await apiFunctions.getBlockedProfileIds();
 				if (blockedIds.length === 0) {
 					setBlockedProfiles([]);
 					return;
 				}
 
-				const profileResults = await Promise.allSettled(
-					blockedIds.map(async (profileId) => {
-						const raw = await apiFunctions.getRawProfile(profileId);
-						const { displayName, avatarUrl } = extractBlockedProfileMeta(
-							raw,
-							profileId,
-						);
-						return {
-							profileId,
-							displayName,
-							avatarUrl,
-						} satisfies BlockedProfileListItem;
+				// Batch-fetch details via the cascade endpoint in chunks of 50,
+				// rather than one GET /v7/profiles per id. The single-profile
+				// endpoint returns restricted data for blocked users (so names and
+				// avatars come back empty); POST /v3/profiles returns them.
+				const CHUNK_SIZE = 50;
+				const chunks: string[][] = [];
+				for (let i = 0; i < blockedIds.length; i += CHUNK_SIZE) {
+					chunks.push(blockedIds.slice(i, i + CHUNK_SIZE));
+				}
+
+				const detailsById = new Map<string, { displayName: string; avatarUrl: string | null }>();
+				await Promise.all(
+					chunks.map(async (chunk) => {
+						try {
+							const raw = await apiFunctions.getProfilesByIds(chunk);
+							const profiles =
+								raw && typeof raw === "object" && Array.isArray((raw as { profiles?: unknown }).profiles)
+									? (raw as { profiles: unknown[] }).profiles
+									: [];
+							for (const p of profiles) {
+								if (!p || typeof p !== "object") continue;
+								const idRaw = (p as { profileId?: unknown }).profileId;
+								if (idRaw == null) continue;
+								const profileId = String(idRaw);
+								const nameRaw = (p as { displayName?: unknown }).displayName;
+								const displayName =
+									typeof nameRaw === "string" && nameRaw.trim().length > 0
+										? nameRaw.trim()
+										: t("common.unknown_display_name");
+								const hashRaw = (p as { profileImageMediaHash?: unknown }).profileImageMediaHash;
+								const avatarUrl =
+									typeof hashRaw === "string" && validateMediaHash(hashRaw)
+										? getThumbImageUrl(hashRaw, "75x75")
+										: null;
+								detailsById.set(profileId, { displayName, avatarUrl });
+							}
+						} catch {
+							// Chunk failed — its ids fall back to id-only below.
+						}
 					}),
 				);
 
-				const successful = profileResults
-					.filter(
-						(
-							result,
-						): result is PromiseFulfilledResult<BlockedProfileListItem> =>
-							result.status === "fulfilled",
-					)
-					.map((result) => result.value);
-
-				const successfulIds = new Set(successful.map((profile) => profile.profileId));
-				const fallbackItems = blockedIds
-					.filter((profileId) => !successfulIds.has(profileId))
-					.map((profileId) => ({
-						profileId,
-						displayName: t("profile_details.profile_fallback", { id: profileId }),
-						avatarUrl: blankProfileImage,
-					}));
-
-				setBlockedProfiles([...successful, ...fallbackItems]);
+				setBlockedProfiles(
+					blockedIds.map((profileId) => {
+						const meta = detailsById.get(profileId);
+						return {
+							profileId,
+							displayName: meta?.displayName ?? t("common.unknown_display_name"),
+							avatarUrl: meta?.avatarUrl ?? null,
+						} satisfies BlockedProfileListItem;
+					}),
+				);
 			} catch (loadError) {
 				setBlockedProfiles([]);
-				setError(
-					loadError instanceof Error
-						? loadError.message
-						: t("settings_blocked.error_load"),
-				);
+				setError(loadError instanceof Error ? loadError.message : t("settings_blocked.error_load"));
 			} finally {
-				setIsLoading(false);
+				setIsLoadingDetails(false);
 			}
 		},
-		[apiFunctions, extractBlockedProfileMeta, t],
+		[apiFunctions, t],
 	);
 
 	useEffect(() => {
-		void loadBlockedProfiles();
-	}, [loadBlockedProfiles]);
+		if (blockedIdsData) {
+			void loadBlockedProfileDetails(blockedIdsData);
+		}
+	}, [blockedIdsData, loadBlockedProfileDetails]);
 
-	const blockedCountLabel = useMemo(
-		() =>
-			blockedProfiles.length === 1
-				? t("settings_blocked.count_one", { count: blockedProfiles.length })
-				: t("settings_blocked.count_other", { count: blockedProfiles.length }),
-		[blockedProfiles.length, t],
-	);
+	const isLoading = isLoadingIds || isLoadingDetails;
 
 	const handleUnblock = async (profileId: string) => {
-		if (mutatingProfileId) {
-			return;
-		}
-
-		const requiresConfirm = window.matchMedia(
-			"(hover: hover) and (pointer: fine)",
-		).matches;
-		const confirmed = requiresConfirm
-			? window.confirm(t("profile_details.unblock_confirm"))
-			: true;
-		if (!confirmed) {
-			return;
-		}
+		if (isUnblocking) return;
 
 		setMutatingProfileId(profileId);
 		try {
-			await apiFunctions.unblockProfile(profileId);
-			setBlockedProfiles((prev) =>
-				prev.filter((profile) => profile.profileId !== profileId),
-			);
+			await unblockProfileMutation(profileId);
 			toast.success(t("profile_details.unblock_success"));
 		} catch (unblockError) {
 			toast.error(
-				unblockError instanceof Error
-					? unblockError.message
-					: t("profile_details.unblock_failed"),
+				unblockError instanceof Error ? unblockError.message : t("profile_details.unblock_failed"),
 			);
 		} finally {
 			setMutatingProfileId(null);
@@ -173,100 +133,169 @@ export function SettingsBlockedPage() {
 	};
 
 	const handleUnblockPress = (profileId: string) => {
-		if (mutatingProfileId) {
-			return;
-		}
+		if (mutatingProfileId) return;
 		void handleUnblock(profileId);
+	};
+
+	const handleUnblockAll = async () => {
+		setIsUnblockingAll(true);
+		try {
+			const unblockedIds = blockedIdsData ?? [];
+			await apiFunctions.unblockAllProfiles();
+			toast.success(t("settings_blocked.unblock_all_success", { defaultValue: "All users unblocked." }));
+			void refetchIds();
+			// Doesn't go through useUnblockProfile, so take any archived
+			// conversations with these profiles out of archive here too.
+			void Promise.all(unblockedIds.map((profileId) => applySelfBlockAction(profileId, "unblock")));
+		} catch (err) {
+			toast.error(err instanceof Error ? err.message : t("settings_blocked.unblock_all_failed", { defaultValue: "Failed to unblock all profiles." }));
+		} finally {
+			setIsUnblockingAll(false);
+			setConfirmUnblockAll(false);
+		}
 	};
 
 	return (
 		<PullToRefreshContainer
-			className="app-screen"
-			onRefresh={() => loadBlockedProfiles(true)}
+			className="app-screen flex flex-col"
+			contentClassName="flex flex-1 flex-col"
+			onRefresh={() => refetchIds()}
 			isDisabled={isLoading}
 			refreshingLabel={t("settings_blocked.refreshing")}
 		>
-			<BackToSettings />
-			<header className="mb-6">
-				<h1 className="app-title mb-2">{t("settings_blocked.title")}</h1>
-				<p className="app-subtitle">{t("settings_blocked.subtitle")}</p>
-				{!isLoading ? (
-					<p className="mt-2 text-xs font-medium text-[var(--text-muted)]">
-						{blockedCountLabel}
-					</p>
-				) : null}
-			</header>
+			<PageHeader
+				backTo="/settings"
+				title={t("settings_blocked.title")}
+				subtitle={t("settings_blocked.subtitle")}
+			/>
 
-			<div className="grid gap-4">
+			{/* Fills the rest of the screen so the empty state can sit centered in it. */}
+			<div className={`grid flex-1 gap-6 ${!isLoading && !error && blockedProfiles.length === 0 ? "content-center" : "content-start"}`}>
 				{isLoading ? (
-					<div className="surface-card p-5 text-sm text-[var(--text-muted)]">
-						{t("settings_blocked.loading")}
-					</div>
-				) : null}
-
-				{!isLoading && error ? (
-					<div className="surface-card p-5 text-sm text-[var(--text-muted)]">
-						{error}
-					</div>
-				) : null}
-
-				{!isLoading && !error && blockedProfiles.length === 0 ? (
-					<div className="surface-card p-5 text-sm text-[var(--text-muted)]">
-						{t("settings_blocked.empty")}
-					</div>
-				) : null}
-
-				{!isLoading && !error && blockedProfiles.length > 0
-					? blockedProfiles.map((profile) => {
-						const isMutating = mutatingProfileId === profile.profileId;
-						return (
-							<div
-								key={profile.profileId}
-								className="surface-card flex items-center justify-between gap-3 p-4 sm:p-5"
-							>
-								<div className="flex min-w-0 items-center gap-3">
-									<img
-										src={profile.avatarUrl}
-										alt={t("profile_details.photo_alt", {
-											name: profile.displayName,
-										})}
-										className="h-11 w-11 shrink-0 rounded-full object-cover"
-									/>
-									<div className="min-w-0">
-										<p className="truncate text-sm font-semibold text-[var(--text)] sm:text-base">
-											{profile.displayName}
-										</p>
-										<p className="text-xs text-[var(--text-muted)]">
-											{t("settings_blocked.profile_id", {
-												id: profile.profileId,
-											})}
-										</p>
+					<div>
+						<div className="mb-2 flex items-center gap-2 px-1">
+							<div className="h-3 w-16 animate-pulse rounded-full ink-tint-10" />
+							{!isLoadingIds && blockedIdsData && blockedIdsData.length > 0 && (
+								<div className="h-3.5 w-5 animate-pulse rounded-full ink-tint-10" />
+							)}
+						</div>
+						<div className="native-group">
+							{Array.from({ length: isLoadingIds ? 4 : (blockedIdsData?.length ?? 4) }).map((_, i) => (
+								<div key={i} className="flex items-center gap-3 px-4 py-3">
+									<div className="h-11 w-11 shrink-0 animate-pulse rounded-full overflow-hidden ink-tint-10" />
+									<div className="min-w-0 flex-1 space-y-1.5">
+										<div className="h-3.5 w-28 animate-pulse rounded-full ink-tint-10" />
+										<div className="h-3 w-16 animate-pulse rounded-full ink-tint-10" />
 									</div>
+									<div className="h-8 w-24 animate-pulse rounded-full ink-tint-10" />
 								</div>
-
-								<button
-									type="button"
-									onClick={() => handleUnblockPress(profile.profileId)}
-									onPointerUp={(event) => {
-										if (event.pointerType === "mouse") {
-											return;
-										}
-										event.preventDefault();
-										handleUnblockPress(profile.profileId);
-									}}
-									disabled={isMutating}
-									className="inline-flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm font-semibold text-[var(--text)] transition hover:border-[var(--accent)] disabled:opacity-70"
-								>
-									<UserX className="h-4 w-4" />
-									{isMutating
-										? t("profile_details.unblock_in_progress")
-										: t("profile_details.unblock")}
-								</button>
-							</div>
-						);
-					})
-					: null}
+							))}
+						</div>
+					</div>
+				) : error ? (
+					<ErrorState
+						title={t("settings_blocked.error_load")}
+						description={error}
+						onRetry={() => void refetchIds()}
+					/>
+				) : blockedProfiles.length === 0 ? (
+					<DrawerEmptyState
+						icon={<ShieldCheck />}
+						fanned={false}
+						title={t("settings_blocked.empty")}
+						hint={t("settings_blocked.empty_desc", { defaultValue: "Accounts you block won't be able to see you or message you." })}
+					/>
+				) : (
+					<div>
+						<div className="mb-2 flex items-center gap-2 px-1">
+							<p className="text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">
+								{t("settings_blocked.section_label", { defaultValue: "Blocked" })}
+							</p>
+							<span className="rounded-full ink-tint-10 px-2 py-0.5 text-[10px] font-bold tabular-nums text-[var(--text-muted)]">
+								{blockedProfiles.length}
+							</span>
+						</div>
+						<div className="native-group">
+							{blockedProfiles.map((profile) => {
+								const isMutating = mutatingProfileId === profile.profileId;
+								return (
+									<div key={profile.profileId} className="flex items-center gap-3 px-4 py-3">
+										<button
+											type="button"
+											className="flex min-w-0 flex-1 items-center gap-3 text-start"
+											onClick={() => navigate(`/profile/${profile.profileId}`, { state: { returnTo: location.pathname } })}
+										>
+											<div className="h-11 w-11 shrink-0 rounded-full overflow-hidden bg-[var(--surface-2)] drop-shadow-sm">
+												<ProfileImage
+													className="bg-slate-500/15 text-slate-400"
+													src={profile.avatarUrl}
+													alt={t("profile_details.photo_alt", { name: profile.displayName })}
+												/>
+											</div>
+											<div className="min-w-0 flex-1">
+												<p className="truncate text-sm font-semibold">
+													{profile.displayName}
+												</p>
+												<p className="text-xs text-[var(--text-muted)]">
+													{t("settings_blocked.profile_id", { id: profile.profileId })}
+												</p>
+											</div>
+										</button>
+										<button
+											type="button"
+											onClick={() => handleUnblockPress(profile.profileId)}
+											onPointerUp={(event) => {
+												if (event.pointerType === "mouse") return;
+												event.preventDefault();
+												handleUnblockPress(profile.profileId);
+											}}
+											disabled={isMutating}
+											className="inline-flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full ink-tint-10 px-3 text-xs font-semibold text-[var(--text)] transition-[transform,background-color,color] duration-150 hover:bg-red-500/12 hover:text-red-500 active:scale-[0.96] disabled:opacity-50"
+										>
+											{isMutating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <UserX className="h-3.5 w-3.5" />}
+											{isMutating
+												? t("profile_details.unblock_in_progress")
+												: t("profile_details.unblock")}
+										</button>
+									</div>
+								);
+							})}
+						</div>
+					</div>
+				)}
+				{/* Unblock all: a borderless red-tinted action button of its own,
+				    with its explanation as a footnote. */}
+				{!isLoading && !error && blockedProfiles.length > 0 && (
+					<div>
+						<button
+								type="button"
+								onClick={() => setConfirmUnblockAll(true)}
+								disabled={isUnblockingAll}
+								className="flex w-full items-center justify-center gap-2 rounded-[20px] bg-red-500/12 px-4 py-3.5 text-sm font-semibold text-red-500 transition-colors hover:bg-red-500/18 active:bg-red-500/24 disabled:opacity-60"
+							>
+								{isUnblockingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldOff className="h-4 w-4" />}
+								{isUnblockingAll
+									? t("settings_blocked.unblocking_all", { defaultValue: "Unblocking…" })
+									: t("settings_blocked.unblock_all_title", { defaultValue: "Unblock All" })}
+							</button>
+						<p className="mt-2 px-4 text-xs leading-relaxed text-[var(--text-muted)]">
+							{t("settings_blocked.unblock_all_desc", { defaultValue: "Remove all blocked accounts at once. This cannot be undone." })}
+						</p>
+					</div>
+				)}
 			</div>
+
+			<ConfirmDialog
+				isOpen={confirmUnblockAll}
+				title={t("settings_blocked.unblock_all_title", { defaultValue: "Unblock All" })}
+				message={t("settings_blocked.unblock_all_confirm", { defaultValue: "This will unblock all blocked accounts. Are you sure?" })}
+				confirmLabel={isUnblockingAll ? t("settings_blocked.unblocking_all", { defaultValue: "Unblocking…" }) : t("settings_blocked.unblock_all_title", { defaultValue: "Unblock All" })}
+				cancelLabel={t("settings_blocked.cancel", { defaultValue: "Cancel" })}
+				onConfirm={() => void handleUnblockAll()}
+				onCancel={() => setConfirmUnblockAll(false)}
+				isProcessing={isUnblockingAll}
+				confirmTone="danger"
+			/>
 		</PullToRefreshContainer>
 	);
 }

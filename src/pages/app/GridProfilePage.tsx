@@ -9,34 +9,76 @@ import { useTranslation } from "react-i18next";
 import z from "zod";
 import toast from "react-hot-toast";
 import { useApiFunctions } from "../../hooks/useApiFunctions";
-import { usePreferences } from "../../contexts/PreferencesContext";
-import { decodeGeohash, encodeGeohash } from "../../utils/geohash";
-import { validateMediaHash } from "../../utils/media";
-import { ProfileDetailsModal } from "./gridpage/components/ProfileDetailsModal";
+import { useDesktopBreakpoint } from "../../hooks/useDesktopBreakpoint";
+import { useManagedGenders, useManagedPronouns, useBlockedProfileIds, useBlockProfile, useUnblockProfile } from "../../hooks/queries/useProfileQueries";
+import { extractMediaHashFromUrl, getProfileImageUrl, validateMediaHash } from "../../utils/media";
+import { ProfileDetailsModal, type ProfileSwipePreview } from "./gridpage/components/ProfileDetailsModal";
 import { useTapProfile } from "./gridpage/hooks/useTapProfile";
+import { useLocateProfile } from "../../grindr-workarounds";
+import { loadBrowseFiltersDraft } from "./browse-filters-storage";
 import {
-	getCachedGenderOptions,
+	getAllCachedBrowseCardsById,
 	getCachedProfileDetail,
-	getCachedPronounOptions,
-	setCachedGenderOptions,
+	removeProfileFromBrowseCache,
 	setCachedProfileDetail,
-	setCachedPronounOptions,
 } from "./gridpage/cache";
 import {
-	type ManagedOption,
 	type ProfileDetail,
 } from "./GridPage.types";
-import { getChatContactIndexForProfiles } from "../../services/chatContactIndex";
+import { getChatContactIndexForProfiles, getLocalNicknamesForProfiles } from "../../services/chatContactIndex";
 import type { ChatContactIndexRecord } from "../../types/chat-contact-index";
+import {
+	findConversationByProfileId,
+	getBlockStatesByProfileIds,
+	getProfileSnapshot,
+	insertSystemMessage,
+} from "../../services/chatDb";
+import { profileDetailItemSchema } from "../../types/grid";
+import { hideProfile, listHiddenProfileIds, unhideProfile } from "../../services/profileHide";
+import { useProfileHideMode } from "../../services/profileHideMode";
+import { unarchiveConversation, claimBlockStateTransition } from "../../services/conversationArchive";
 import { appLog } from "../../utils/logger";
+import { consumeSelfBlockAction } from "../../utils/selfBlockActions";
+import { classifyProfileAccess } from "../../utils/profileAccessStatus";
 import { ConfirmDialog } from "../../components/ui/confirm-dialog";
-
-const SKIP_BLOCK_CONFIRM_KEY = "profile_skip_block_confirm";
-const SKIP_UNBLOCK_CONFIRM_KEY = "profile_skip_unblock_confirm";
+import { SKIP_BLOCK_CONFIRM_KEY, isBlockConfirmSkipped } from "../../utils/blockConfirm";
+import { navigateBackTo } from "../../utils/navigateBack";
 
 const profileRouteParamsSchema = z.object({
 	profileId: z.string().min(1),
 });
+
+// Successfully loading someone's full profile here is evidence we're not
+// blocked by them anymore — a real signal independent of the WS
+// chat.v1.conversation.delete event, which can be missed (app not running,
+// connection drop) when an unblock actually happens.
+function unarchiveConversationIfArchived(profileId: string) {
+	void findConversationByProfileId(profileId)
+		.then(async (stored) => {
+			// A profile we blocked can still load fine — that says nothing about
+			// an unblock; our own unblock is handled by the mutation.
+			if (!stored?.archived || stored.blockState === "blocked_by_me") {
+				return;
+			}
+			const isSelf = consumeSelfBlockAction(stored.conversationId, "unblock");
+			const claimed = await claimBlockStateTransition(stored.conversationId, null).catch(
+				() => false,
+			);
+			if (!claimed) {
+				return;
+			}
+			void unarchiveConversation(stored.conversationId);
+			void insertSystemMessage(
+				stored.conversationId,
+				isSelf ? "SystemUnblockedBySelf" : "SystemUnblocked",
+			).catch((error) => {
+				appLog.error("[grid-profile] failed to insert system message", error);
+			});
+		})
+		.catch((error) => {
+			appLog.warn("[grid-profile] failed to check archived conversation", error);
+		});
+}
 
 export function GridProfilePage() {
 	const { t } = useTranslation();
@@ -46,7 +88,30 @@ export function GridProfilePage() {
 	const params = useParams();
 	const [searchParams] = useSearchParams();
 	const apiFunctions = useApiFunctions();
-	const { geohash } = usePreferences();
+	const hideMode = useProfileHideMode();
+
+	const { data: managedGenders } = useManagedGenders();
+	const { data: managedPronouns } = useManagedPronouns();
+	const { data: blockedProfileIdsData } = useBlockedProfileIds();
+	const { mutateAsync: blockProfileMutation, isPending: isBlockingProfile } = useBlockProfile();
+	const { mutateAsync: unblockProfileMutation, isPending: isUnblockingProfile } = useUnblockProfile();
+
+	const blockedProfileIds = useMemo(() => new Set(blockedProfileIdsData ?? []), [blockedProfileIdsData]);
+
+	const genderOptions = useMemo(() => {
+		return managedGenders?.map((item) => ({
+			value: item.genderId,
+			label: item.gender,
+		})) ?? [];
+	}, [managedGenders]);
+
+	const pronounOptions = useMemo(() => {
+		return managedPronouns?.map((item) => ({
+			value: item.pronounId,
+			label: item.pronoun,
+		})) ?? [];
+	}, [managedPronouns]);
+
 	const [activeProfile, setActiveProfile] = useState<ProfileDetail | null>(
 		null,
 	);
@@ -54,60 +119,75 @@ export function GridProfilePage() {
 	const [activeProfileError, setActiveProfileError] = useState<string | null>(
 		null,
 	);
-	const [isLocatingProfile, setIsLocatingProfile] = useState(false);
-	const [genderOptions, setGenderOptions] = useState<ManagedOption[]>([]);
-	const [pronounOptions, setPronounOptions] = useState<ManagedOption[]>([]);
 	const [chatContactStatus, setChatContactStatus] = useState<ChatContactIndexRecord | null>(null);
-	const [blockedProfileIds, setBlockedProfileIds] = useState<Set<string>>(
-		() => new Set(),
-	);
-	const [mutatingBlockProfileId, setMutatingBlockProfileId] = useState<string | null>(
-		null,
-	);
+	const [localNickname, setLocalNickname] = useState<string | null>(null);
+	const [isSnapshotProfile, setIsSnapshotProfile] = useState(false);
+	const [profileReloadKey, setProfileReloadKey] = useState(0);
+
 	const [mutatingFavoriteProfileId, setMutatingFavoriteProfileId] = useState<string | null>(
 		null,
 	);
 	const [pendingProfileConfirm, setPendingProfileConfirm] = useState<{
-		action: "block" | "unblock";
+		action: "block";
 		profileId: string;
 	} | null>(null);
 	const [dontAskAgainChecked, setDontAskAgainChecked] = useState(false);
-	const [skipBlockConfirm, setSkipBlockConfirm] = useState(() => {
-		if (typeof window === "undefined") {
-			return false;
-		}
-		return localStorage.getItem(SKIP_BLOCK_CONFIRM_KEY) === "true";
-	});
-	const [skipUnblockConfirm, setSkipUnblockConfirm] = useState(() => {
-		if (typeof window === "undefined") {
-			return false;
-		}
-		return localStorage.getItem(SKIP_UNBLOCK_CONFIRM_KEY) === "true";
-	});
+	const [isHidden, setIsHidden] = useState(false);
+	const [isBlockedByOther, setIsBlockedByOther] = useState(false);
+
+	const isDesktopLike = useDesktopBreakpoint();
+
+	const { handleTriangleProfile, locateLabelFor } = useLocateProfile();
 
 	const parsedParams = profileRouteParamsSchema.safeParse(params);
 	const profileId = parsedParams.success ? parsedParams.data.profileId : null;
 
-	useEffect(() => {
-		let cancelled = false;
-		void apiFunctions
-			.getBlockedProfileIds()
-			.then((profileIds) => {
-				if (cancelled) {
-					return;
-				}
-				setBlockedProfileIds(new Set(profileIds));
-			})
-			.catch(() => {
-				if (!cancelled) {
-					setBlockedProfileIds(new Set());
-				}
-			});
+	// Show what's already cached for this profile in the very first frame, on
+	// open and on a swipe to a neighbour, instead of waiting for the load
+	// effect below: that runs after paint, so the loading placeholder (or the
+	// previous profile) would flash for a frame first. Updating state during
+	// render makes React redo the render before anything is painted.
+	const [shownProfileId, setShownProfileId] = useState<string | null>(null);
+	if (profileId && shownProfileId !== profileId) {
+		setShownProfileId(profileId);
+		const cachedProfile = getCachedProfileDetail(profileId);
+		if (cachedProfile) {
+			setActiveProfile(cachedProfile);
+			setIsSnapshotProfile(false);
+			setActiveProfileError(null);
+			setIsLoadingActiveProfile(false);
+		} else {
+			setIsLoadingActiveProfile(true);
+		}
+	}
 
+	useEffect(() => {
+		if (!profileId) {
+			setIsHidden(false);
+			return;
+		}
+		let cancelled = false;
+		void listHiddenProfileIds(apiFunctions).then((ids) => {
+			if (!cancelled) setIsHidden(ids.includes(profileId));
+		});
 		return () => {
 			cancelled = true;
 		};
-	}, [apiFunctions]);
+	}, [profileId, apiFunctions, hideMode]);
+
+	useEffect(() => {
+		if (!profileId) {
+			setIsBlockedByOther(false);
+			return;
+		}
+		let cancelled = false;
+		void getBlockStatesByProfileIds([profileId]).then((blockStates) => {
+			if (!cancelled) setIsBlockedByOther(blockStates.get(profileId) === "blocked_by_other");
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, [profileId]);
 
 	useEffect(() => {
 		if (!profileId) {
@@ -136,6 +216,33 @@ export function GridProfilePage() {
 		};
 	}, [profileId]);
 
+	useEffect(() => {
+		if (!profileId) {
+			setLocalNickname(null);
+			return;
+		}
+
+		setLocalNickname(null);
+		let cancelled = false;
+		void getLocalNicknamesForProfiles([profileId])
+			.then((nicknames) => {
+				if (cancelled) {
+					return;
+				}
+				setLocalNickname(nicknames[profileId] ?? null);
+			})
+			.catch((error) => {
+				if (!cancelled) {
+					setLocalNickname(null);
+				}
+				appLog.warn("[chat-index] failed to hydrate profile local nickname", error);
+			});
+
+		return () => {
+			cancelled = true;
+		};
+	}, [profileId]);
+
 	const {
 		tappingProfileId,
 		resolvedTapVisualState,
@@ -151,7 +258,16 @@ export function GridProfilePage() {
 
 	const isTappingProfile = tappingProfileId === profileId;
 
-	const locationState = (location.state as { returnTo?: unknown; profileIds?: unknown } | null) ?? {};
+	const locationState =
+		(location.state as { returnTo?: unknown; profileIds?: unknown; fromChat?: unknown; backgroundLocation?: unknown; editOwnProfile?: unknown; stacked?: unknown } | null) ?? {};
+	// Opened from a chat thread, which sits directly below in history.
+	const openedFromChat = locationState.fromChat === true;
+	// Shown as a modal over the page that opened it (see App.tsx), which is
+	// also directly below in history.
+	const isOverBackground = locationState.backgroundLocation != null;
+	// Opened from another profile or page that sits directly below in history
+	// (e.g. a linked profile); closing pops back to it.
+	const isStacked = locationState.stacked === true;
 	const returnToFromState =
 		typeof locationState.returnTo === "string" ? locationState.returnTo : null;
 	const profileIds: string[] = Array.isArray(locationState.profileIds)
@@ -164,11 +280,46 @@ export function GridProfilePage() {
 		returnTo.startsWith("/") &&
 		!returnTo.startsWith("//")
 			? returnTo
-			: "/browse";
+			: "/";
 
 	const currentIndex = profileId ? profileIds.indexOf(profileId) : -1;
 	const prevProfileId = currentIndex > 0 ? profileIds[currentIndex - 1] : null;
 	const nextProfileId = currentIndex >= 0 && currentIndex < profileIds.length - 1 ? profileIds[currentIndex + 1] : null;
+
+	// Photo, name and status of the neighbouring profiles, from whatever the grid or an
+	// earlier visit already cached — shown beside the page while swiping.
+	const [prevProfilePreview, nextProfilePreview] = useMemo(() => {
+		if (!prevProfileId && !nextProfileId) return [null, null];
+		const cards = getAllCachedBrowseCardsById();
+		const toPreview = (id: string | null): ProfileSwipePreview | null => {
+			if (!id) return null;
+			const detail = getCachedProfileDetail(id);
+			const card = cards.get(id);
+			const hash =
+				detail?.medias.map((item) => item.mediaHash ?? "").find((h) => validateMediaHash(h)) ??
+				detail?.profileImageMediaHash ??
+				(card?.primaryImageUrl ? extractMediaHashFromUrl(card.primaryImageUrl) : null);
+			// Same signal as the profile itself (an active post); the grid only knows hosting or not.
+			const hasRightNowPost = typeof detail?.rightNowPosted === "number" && detail.rightNowPosted > 0;
+			const rightNowState = hasRightNowPost ? detail?.rightNow : card?.rightNow;
+			const rightNow =
+				rightNowState === "HOSTING" ? "hosting"
+				: hasRightNowPost || rightNowState === "NOT_HOSTING" ? "active"
+				: null;
+			return {
+				imageUrl: hash ? getProfileImageUrl(hash, "1024x1024") : (card?.primaryImageUrl ?? null),
+				name: detail?.displayName ?? card?.displayName ?? null,
+				age: detail?.age ?? card?.age ?? null,
+				distance: detail?.distance ?? card?.distanceMeters ?? null,
+				lastSeen: detail?.seen ?? card?.lastOnline ?? null,
+				onlineUntil: detail?.onlineUntil ?? card?.onlineUntil ?? null,
+				isFavorite: detail?.isFavorite ?? card?.favorite ?? false,
+				rightNow,
+				detail,
+			};
+		};
+		return [toPreview(prevProfileId), toPreview(nextProfileId)];
+	}, [prevProfileId, nextProfileId]);
 
 	const handlePrevProfile = prevProfileId
 		? () => navigate(`/profile/${prevProfileId}`, { replace: true, state: { returnTo: safeReturnTo, profileIds } })
@@ -178,69 +329,38 @@ export function GridProfilePage() {
 		: undefined;
 
 	useEffect(() => {
-		const loadManagedOptions = async () => {
-			const cachedGenders = getCachedGenderOptions();
-			const cachedPronouns = getCachedPronounOptions();
-
-			if (cachedGenders) {
-				setGenderOptions(cachedGenders);
-			}
-
-			if (cachedPronouns) {
-				setPronounOptions(cachedPronouns);
-			}
-
-			if (cachedGenders && cachedPronouns) {
-				return;
-			}
-
-			try {
-				const [genders, pronouns] = await Promise.all([
-					apiFunctions.getManagedGenders(),
-					apiFunctions.getManagedPronouns(),
-				]);
-
-				const nextGenderOptions = genders.map((item) => ({
-					value: item.genderId,
-					label: item.gender,
-				}));
-				setGenderOptions(nextGenderOptions);
-				setCachedGenderOptions(nextGenderOptions);
-
-				const nextPronounOptions = pronouns.map((item) => ({
-					value: item.pronounId,
-					label: item.pronoun,
-				}));
-				setPronounOptions(nextPronounOptions);
-				setCachedPronounOptions(nextPronounOptions);
-			} catch {
-				if (!cachedGenders) {
-					setGenderOptions([]);
-				}
-				if (!cachedPronouns) {
-					setPronounOptions([]);
-				}
-			}
-		};
-
-		void loadManagedOptions();
-	}, [apiFunctions]);
+		if (profileId) {
+			void apiFunctions.recordProfileView(profileId);
+		}
+	}, [apiFunctions, profileId]);
 
 	useEffect(() => {
 		if (!profileId) {
 			setActiveProfile(null);
 			setActiveProfileError(t("api.errors.invalid_profile_id"));
 			setIsLoadingActiveProfile(false);
+			setIsSnapshotProfile(false);
 			return;
 		}
 
 		let cancelled = false;
+		setIsSnapshotProfile(false);
+
+		const loadLocalSnapshot = async (): Promise<ProfileDetail | null> => {
+			const stored = await getProfileSnapshot(profileId).catch(() => null);
+			if (!stored) {
+				return null;
+			}
+			const parsed = profileDetailItemSchema.safeParse(JSON.parse(stored.data));
+			return parsed.success ? parsed.data : null;
+		};
 
 		const loadProfileDetails = async () => {
 			const cachedProfile = getCachedProfileDetail(profileId);
 
 			if (cachedProfile) {
 				setActiveProfile(cachedProfile);
+				setIsSnapshotProfile(false);
 				setIsLoadingActiveProfile(false);
 			} else {
 				setIsLoadingActiveProfile(true);
@@ -252,12 +372,41 @@ export function GridProfilePage() {
 				const parsed = await apiFunctions.getProfileDetail(profileId);
 
 				if (!cancelled) {
-					setActiveProfile(parsed);
-					setCachedProfileDetail(profileId, parsed);
+					// GET /v7/profiles/:id always returns 200, even for a blocked or
+					// deleted profile — it comes back as a stub (see
+					// classifyProfileAccess). A successful fetch alone is therefore
+					// NOT evidence of being unblocked — only a real profile is.
+					if (classifyProfileAccess(parsed) === "accessible") {
+						setActiveProfile(parsed);
+						setIsSnapshotProfile(false);
+						// The local snapshot is refreshed by getProfileDetail itself.
+						setCachedProfileDetail(profileId, parsed);
+						unarchiveConversationIfArchived(profileId);
+					} else {
+						// Live data is just the blocked/gone stub — prefer the last
+						// known-good local snapshot over showing a blank profile, if
+						// one exists.
+						const snapshot = await loadLocalSnapshot();
+						if (!cancelled) {
+							if (snapshot) {
+								setActiveProfile(snapshot);
+								setIsSnapshotProfile(true);
+							} else {
+								setActiveProfile(parsed);
+								setIsSnapshotProfile(false);
+							}
+						}
+					}
 				}
 			} catch (error) {
-				if (!cancelled) {
-					if (!cachedProfile) {
+				if (!cancelled && !cachedProfile) {
+					// No fresh in-memory data already on screen — try the durable
+					// snapshot before giving up and showing an error.
+					const snapshot = await loadLocalSnapshot();
+					if (!cancelled && snapshot) {
+						setActiveProfile(snapshot);
+						setIsSnapshotProfile(true);
+					} else if (!cancelled) {
 						setActiveProfile(null);
 						setActiveProfileError(
 							error instanceof Error
@@ -278,7 +427,7 @@ export function GridProfilePage() {
 		return () => {
 			cancelled = true;
 		};
-	}, [apiFunctions, profileId]);
+	}, [apiFunctions, profileId, profileReloadKey]);
 
 	const activeProfilePhotoHashes = useMemo(() => {
 		if (!activeProfile) {
@@ -303,42 +452,61 @@ export function GridProfilePage() {
 	}, [activeProfile]);
 
 	const handleMessageProfile = (targetProfileId: string) => {
+		if (openedFromChat) {
+			navigateBackTo(navigate, safeReturnTo);
+			return;
+		}
+		// Back from the chat should land on this profile again.
+		const profileParams = new URLSearchParams();
+		profileParams.set("returnTo", safeReturnTo);
 		const nextParams = new URLSearchParams();
 		nextParams.set("targetProfileId", targetProfileId);
-		nextParams.set("returnTo", safeReturnTo);
-        appLog.info("Profile", targetProfileId);
+		nextParams.set("returnTo", `${location.pathname}?${profileParams.toString()}`);
 		navigate(`/chat?${nextParams.toString()}`);
 	};
 
-	const performBlockProfile = async (targetProfileId: string) => {
-		setMutatingBlockProfileId(targetProfileId);
+	const handleSendQuickMessage = async (targetProfileId: string, text: string) => {
 		try {
-			await apiFunctions.blockProfile(targetProfileId);
-			setBlockedProfileIds((prev) => {
-				const next = new Set(prev);
-				next.add(targetProfileId);
-				return next;
+			await apiFunctions.sendText({ targetProfileId: Number(targetProfileId), text });
+			toast.success(t("chat.toasts.message_sent", { defaultValue: "Message sent" }));
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : t("chat.errors.send_failed"));
+		}
+	};
+
+	const handleSendProfilePhotoReply = async (targetProfileId: string, imageHash: string, text: string) => {
+		try {
+			await apiFunctions.sendMessage({
+				type: "ProfilePhotoReply",
+				target: { type: "Direct", targetId: Number(targetProfileId) },
+				body: { imageHash, photoContentReply: text },
 			});
+			toast.success(t("chat.toasts.photo_reply_sent", { defaultValue: "Reply sent" }));
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : t("chat.errors.send_failed"));
+		}
+	};
+
+	const performBlockProfile = async (targetProfileId: string) => {
+		try {
+			await blockProfileMutation(targetProfileId);
+			removeProfileFromBrowseCache(targetProfileId);
 			toast.success(t("profile_details.block_success"));
 			navigate(safeReturnTo, { replace: true });
 		} catch (error) {
 			toast.error(
 				error instanceof Error ? error.message : t("profile_details.block_failed"),
 			);
-		} finally {
-			setMutatingBlockProfileId(null);
 		}
 	};
 
 	const performUnblockProfile = async (targetProfileId: string) => {
-		setMutatingBlockProfileId(targetProfileId);
 		try {
-			await apiFunctions.unblockProfile(targetProfileId);
-			setBlockedProfileIds((prev) => {
-				const next = new Set(prev);
-				next.delete(targetProfileId);
-				return next;
-			});
+			await unblockProfileMutation(targetProfileId);
+			// While blocked, the live fetch only returned a stub, so we're showing
+			// the local snapshot (which hides the chat bar) — refetch now that the
+			// real profile is readable again.
+			setProfileReloadKey((key) => key + 1);
 			toast.success(t("profile_details.unblock_success"));
 		} catch (error) {
 			toast.error(
@@ -346,16 +514,14 @@ export function GridProfilePage() {
 					? error.message
 					: t("profile_details.unblock_failed"),
 			);
-		} finally {
-			setMutatingBlockProfileId(null);
 		}
 	};
 
 	const handleBlockProfile = async (targetProfileId: string) => {
-		if (mutatingBlockProfileId) {
+		if (isBlockingProfile || isUnblockingProfile) {
 			return;
 		}
-		if (skipBlockConfirm) {
+		if (isBlockConfirmSkipped()) {
 			await performBlockProfile(targetProfileId);
 			return;
 		}
@@ -364,15 +530,33 @@ export function GridProfilePage() {
 	};
 
 	const handleUnblockProfile = async (targetProfileId: string) => {
-		if (mutatingBlockProfileId) {
+		if (isBlockingProfile || isUnblockingProfile) {
 			return;
 		}
-		if (skipUnblockConfirm) {
-			await performUnblockProfile(targetProfileId);
-			return;
-		}
-		setDontAskAgainChecked(false);
-		setPendingProfileConfirm({ action: "unblock", profileId: targetProfileId });
+		// Unblocking isn't destructive, so it never needs a confirmation prompt.
+		await performUnblockProfile(targetProfileId);
+	};
+
+	const handleHideProfile = (targetProfileId: string) => {
+		void hideProfile(apiFunctions, targetProfileId, activeProfile?.displayName ?? null, activeProfile?.profileImageMediaHash ?? null).then((ok) => {
+			if (!ok) {
+				toast.error(t("profile_details.hide_failed", { defaultValue: "Failed to hide profile." }));
+				return;
+			}
+			setIsHidden(true);
+			toast.success(t("profile_details.hide_success"));
+		});
+	};
+
+	const handleUnhideProfile = (targetProfileId: string) => {
+		void unhideProfile(apiFunctions, targetProfileId).then((ok) => {
+			if (!ok) {
+				toast.error(t("profile_details.unhide_failed", { defaultValue: "Failed to unhide profile." }));
+				return;
+			}
+			setIsHidden(false);
+			toast.success(t("profile_details.unhide_success"));
+		});
 	};
 
 	const handleToggleFavoriteProfile = async (
@@ -418,249 +602,74 @@ export function GridProfilePage() {
 	};
 
 	const handleCancelProfileConfirm = () => {
-		if (mutatingBlockProfileId) {
+		if (isBlockingProfile || isUnblockingProfile) {
 			return;
 		}
 		setPendingProfileConfirm(null);
 	};
 
 	const handleConfirmProfileAction = async () => {
-		if (!pendingProfileConfirm || mutatingBlockProfileId) {
+		if (!pendingProfileConfirm || isBlockingProfile || isUnblockingProfile) {
 			return;
 		}
 
-		const { action, profileId } = pendingProfileConfirm;
+		const { profileId } = pendingProfileConfirm;
 		if (dontAskAgainChecked && typeof window !== "undefined") {
-			if (action === "block") {
-				localStorage.setItem(SKIP_BLOCK_CONFIRM_KEY, "true");
-				setSkipBlockConfirm(true);
-			} else {
-				localStorage.setItem(SKIP_UNBLOCK_CONFIRM_KEY, "true");
-				setSkipUnblockConfirm(true);
-			}
+			localStorage.setItem(SKIP_BLOCK_CONFIRM_KEY, "true");
 		}
 
 		setPendingProfileConfirm(null);
-		if (action === "block") {
-			await performBlockProfile(profileId);
-			return;
-		}
-		await performUnblockProfile(profileId);
+		await performBlockProfile(profileId);
 	};
 
-    const solveTrilateration = (points: { lat: number, lon: number, dist: number }[]) => {
-        // 1. Convert Lat/Lon to a simple XY grid (meters) relative to the first point
-        // This avoids floating point errors with large coordinate numbers
-        const p1 = points[0];
-        const p2 = points[1];
-        const p3 = points[2];
-
-        // Rough conversion: 1 degree lat = 111320m
-        const latToM = 111320;
-        const lonToM = 111320 * Math.cos(p1.lat * (Math.PI / 180));
-
-        const x2 = (p2.lon - p1.lon) * lonToM;
-        const y2 = (p2.lat - p1.lat) * latToM;
-        const x3 = (p3.lon - p1.lon) * lonToM;
-        const y3 = (p3.lat - p1.lat) * latToM;
-
-        const r1 = p1.dist;
-        const r2 = p2.dist;
-        const r3 = p3.dist;
-
-        // 2. Standard Trilateration Formula for 2D intersection
-        // Derived from (x-x1)^2 + (y-y1)^2 = r1^2 ... etc
-        const A = 2 * x2;
-        const B = 2 * y2;
-        const C = Math.pow(r1, 2) - Math.pow(r2, 2) + Math.pow(x2, 2) + Math.pow(y2, 2);
-        const D = 2 * x3;
-        const E = 2 * y3;
-        const F = Math.pow(r1, 2) - Math.pow(r3, 2) + Math.pow(x3, 2) + Math.pow(y3, 2);
-
-        const denom = A * E - D * B;
-        if (Math.abs(denom) < 1e-10) {
-            throw new Error("Trilateration failed: measurement points are collinear or too close together. Try again with a larger initial offset.");
-        }
-        const x = (C * E - F * B) / denom;
-        const y = (A * F - D * C) / denom;
-
-        // 3. Convert XY back to Lat/Lon
-        return {
-            lat: p1.lat + (y / latToM),
-            lon: p1.lon + (x / lonToM)
-        };
-    };
-
-    const handleTriangleProfile = async (targetProfileId: string) => {
-        if (!geohash) {
-            toast.error(t("browse_page.errors.location_required"));
-            return;
-        }
-
-        if (isLocatingProfile) {
-            return;
-        }
-
-        const confirmed = window.confirm(t("profile_details.location_finder_confirm"));
-        if (!confirmed) {
-            return;
-        }
-
-        setIsLocatingProfile(true);
-
-        let originalLat: number;
-        let originalLon: number;
-
-        try {
-            // Decode starting position
-            const decoded = decodeGeohash(geohash);
-            originalLat = (decoded.lat[0] + decoded.lat[1]) / 2;
-            originalLon = (decoded.lon[0] + decoded.lon[1]) / 2;
-        } catch (error) {
-            toast.error(
-                error instanceof Error
-                    ? error.message
-                    : t("browse_page.errors.location_read_failed"),
-            );
-            setIsLocatingProfile(false);
-            return;
-        }
-
-        const waitMs = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-        const putServerLocation = async (lat: number, lon: number, targetGeohash: string) => {
-            const payloads = [
-                { lat, lon },
-                { latitude: lat, longitude: lon },
-                { geohash: targetGeohash },
-                { nearbyGeoHash: targetGeohash },
-            ];
-
-            for (const payload of payloads) {
-                try {
-                    const response = await apiFunctions.request("/v4/location", {
-                        method: "PUT",
-                        body: payload,
-                    });
-                    if (response.status >= 200 && response.status < 300) return;
-                } catch (e) {
-                    continue;
-                }
-            }
-            throw new Error("Failed to update server location across all payload types.");
-        };
-
-        const getDistanceFromProfile = async (): Promise<number | null> => {
-            try {
-                const profile = await apiFunctions.getProfileDetail(targetProfileId);
-                return typeof profile.distance === "number" && Number.isFinite(profile.distance)
-                    ? profile.distance
-                    : null;
-            } catch {
-                return null;
-            }
-        };
-
-        try {
-            const initialDist = await getDistanceFromProfile();
-            if (initialDist === null) {
-                toast.error(t("profile_details.location_finder_error_distance"));
-                return;
-            }
-
-            let currentLat = originalLat;
-            let currentLon = originalLon;
-            const targetPrecision = 15;
-            let rounds = Math.ceil(Math.log(initialDist / targetPrecision) / Math.log(3));
-            rounds = Math.max(2, Math.min(rounds, 6));
-
-            // Degrees per meter (approximate)
-            let offset = (initialDist*1.5) / 111320;
-
-            toast.success(t("profile_details.location_finder_start", { distance: Math.round(initialDist), rounds }));
-
-            for (let i = 0; i < rounds; i++) {
-                const points = [
-                    { lat: currentLat + offset, lon: currentLon }, // Top
-                    { lat: currentLat - (offset / 2), lon: currentLon + (offset * 0.866) }, // Bottom Right
-                    { lat: currentLat - (offset / 2), lon: currentLon - (offset * 0.866) }, // Bottom Left
-                ];
-
-                const results: { lat: number, lon: number, dist: number }[] = [];
-
-                for (const p of points) {
-                    await putServerLocation(p.lat, p.lon, encodeGeohash(p.lat, p.lon));
-                    await waitMs(5000); // Wait for distance calculation to propagate on server
-                    const d = await getDistanceFromProfile();
-                    if (d !== null) results.push({ lat: p.lat, lon: p.lon, dist: d });
-                }
-
-                if (results.length === 3) {
-                    const estimate = solveTrilateration(results);
-                    currentLat = estimate.lat;
-                    currentLon = estimate.lon;
-                    offset /= 3; // Zoom in for the next round
-
-                    toast.success(t("profile_details.location_finder_round_complete", {
-                        round: i + 1,
-                        lat: currentLat.toFixed(6),
-                        lon: currentLon.toFixed(6),
-                        distance: Math.round(results[0].dist)
-                    }));
-
-                    toast.success(t("profile_details.location_finder_error_estimate", {
-                        round: i + 1,
-                        error: Math.round(offset * 111320)
-                    }));
-                }
-            }
-
-            const finalCoords = `${currentLat.toFixed(6)}, ${currentLon.toFixed(6)}`;
-            toast.success(t("profile_details.location_finder_final_location", {
-                lat: currentLat.toFixed(6),
-                lon: currentLon.toFixed(6),
-                error: Math.round(offset * 111320)
-            }));
-
-            try {
-                await navigator.clipboard.writeText(finalCoords);
-                toast.success(t("profile_details.location_finder_location_copied"));
-            } catch (err) {
-                appLog.error("Failed to copy location to clipboard", err);
-            }
-        } catch (error) {
-            toast.error(error instanceof Error ? error.message : t("profile_details.location_finder_error_general"));
-        } finally {
-            await waitMs(10000);
-            await putServerLocation(originalLat, originalLon, geohash);
-            setIsLocatingProfile(false);
-        }
-    };
+	const handleTagClick = async (tag: string) => {
+		const persistedDraft = await loadBrowseFiltersDraft();
+		navigate("/", {
+			state: { browseFiltersDraft: { ...persistedDraft, tags: [tag] } },
+		});
+		toast.success(t("browse_page.toasts.tag_filter_applied", { tag }));
+	};
 
 	return (
 		<>
 			<ProfileDetailsModal
-				variant="page"
+				variant={isDesktopLike ? "modal" : "page"}
+				isOverBackground={isOverBackground}
 				isOpen
+				// Settings' profile row opens your own profile straight in edit mode.
+				initialEditMode={locationState.editOwnProfile === true}
 				onClose={() => {
-					navigate(safeReturnTo, { replace: true });
+					if (openedFromChat || isOverBackground || isStacked) {
+						navigateBackTo(navigate, safeReturnTo);
+					} else {
+						navigate(safeReturnTo, { replace: true });
+					}
 				}}
 				onPrevProfile={handlePrevProfile}
 				onNextProfile={handleNextProfile}
+				prevProfilePreview={prevProfilePreview}
+				nextProfilePreview={nextProfilePreview}
 				onMessageProfile={handleMessageProfile}
+				onTagClick={handleTagClick}
+				onSendQuickMessage={handleSendQuickMessage}
+				onSendProfilePhotoReply={handleSendProfilePhotoReply}
 				onTriangleProfile={handleTriangleProfile}
 				onBlockProfile={handleBlockProfile}
 				onUnblockProfile={handleUnblockProfile}
+				onHideProfile={handleHideProfile}
+				onUnhideProfile={handleUnhideProfile}
+				isHidden={isHidden}
 				onToggleFavoriteProfile={handleToggleFavoriteProfile}
 				isFavorite={Boolean(activeProfile?.isFavorite)}
 				isTogglingFavorite={Boolean(
 					profileId && mutatingFavoriteProfileId === profileId,
 				)}
 				isBlocked={profileId ? blockedProfileIds.has(profileId) : false}
-				isBlockingProfile={Boolean(
-					profileId && mutatingBlockProfileId === profileId,
-				)}
-				isLocatingProfile={isLocatingProfile}
+				isBlockedByOther={isBlockedByOther}
+				isSnapshotProfile={isSnapshotProfile}
+				isChatLinkedProfile={Boolean(chatContactStatus?.hasChatted)}
+				isBlockingProfile={isBlockingProfile || isUnblockingProfile}
+				locateLabel={locateLabelFor(profileId)}
 				onTapProfile={handleTapProfile}
 				isTappingProfile={isTappingProfile}
 				isTapBlocked={hasSentTapRecently}
@@ -671,34 +680,22 @@ export function GridProfilePage() {
 				activeProfileError={activeProfileError}
 				activeProfilePhotoHashes={activeProfilePhotoHashes}
 				chatContactStatus={chatContactStatus}
+				localNickname={localNickname}
+				onLocalNicknameChange={(_profileId, nickname) => setLocalNickname(nickname)}
 				genderOptions={genderOptions}
 				pronounOptions={pronounOptions}
 			/>
 
 			<ConfirmDialog
 				isOpen={pendingProfileConfirm !== null}
-				title={
-					pendingProfileConfirm?.action === "unblock"
-						? t("profile_details.unblock")
-						: t("profile_details.block")
-				}
-				message={
-					pendingProfileConfirm?.action === "unblock"
-						? t("profile_details.unblock_confirm")
-						: t("profile_details.block_confirm")
-				}
-				confirmLabel={
-					pendingProfileConfirm?.action === "unblock"
-						? t("profile_details.unblock")
-						: t("profile_details.block")
-				}
+				title={t("profile_details.block")}
+				message={t("profile_details.block_confirm")}
+				confirmLabel={t("profile_details.block")}
 				cancelLabel={t("chat.actions.cancel")}
 				onConfirm={handleConfirmProfileAction}
 				onCancel={handleCancelProfileConfirm}
-				isProcessing={Boolean(mutatingBlockProfileId)}
-				confirmTone={
-					pendingProfileConfirm?.action === "unblock" ? "default" : "danger"
-				}
+				isProcessing={isBlockingProfile || isUnblockingProfile}
+				confirmTone="danger"
 				dontAskAgainLabel={t("profile_details.dont_ask_again")}
 				dontAskAgainChecked={dontAskAgainChecked}
 				onDontAskAgainChange={setDontAskAgainChecked}

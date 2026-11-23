@@ -1,3 +1,5 @@
+import { stagingRanges } from "./videoEdit";
+import { invoke } from "@tauri-apps/api/core";
 import z from "zod";
 import {
 	chatMessageMutationSchema,
@@ -21,6 +23,8 @@ import {
 	type ShareAlbumPayload,
 } from "../types/chat";
 import { albumsResponseSchema, type Album } from "../types/albums";
+import { notifyOwnAlbumsChanged, rememberOwnAlbumList } from "./ownAlbumsChanged";
+import { createProfileMethods } from "./api/profileMethods";
 import type {
 	AlbumDetailsResponse,
 	CreateAlbumResponse,
@@ -29,55 +33,41 @@ import type {
 	SearchProfilesParams,
 	SearchProfilesResponse,
 	SharedConversationImage,
-	UploadAlbumContentParams,
-	UploadAlbumContentResponse,
 	UploadChatMediaParams,
 	UploadChatMediaResponse,
+	UploadChatVideoParams,
 } from "../types/chat-service";
 
-export class ChatApiError extends Error {
-	status: number;
-	payload: unknown;
+import { runAutomationRulesForSender } from "../utils/automationRules";
+import {
+	getIncognitoMode,
+	isReadLocallyUpTo,
+	isReadReceiptsHidden,
+	noteServerUnreadCount,
+	setLocalReadMarker,
+} from "../utils/privacy";
+import { ApiFunctionError, assertSuccess, mediaUploadErrorToApiFunctionError, parseJsonSafe } from "./apiHelpers";
+import { sendViaRealtime } from "./chatRealtime";
+import { MAX_CHAT_MEDIA_BYTES, uploadStagedVideo } from "./stagedVideoUpload";
+import { assertUploadFits, stagedEdit, uploadProgressReporter } from "./videoReencode";
+import { isPaywallError } from "./paywall";
+import { retryPaidAction } from "../grindr-workarounds";
+import { expiringKindOfMessage, markExpiringAllowanceStale } from "./expiringAllowance";
 
-	constructor(message: string, status: number, payload: unknown) {
-		super(message);
-		this.name = "ChatApiError";
-		this.status = status;
-		this.payload = payload;
-	}
-}
+export { ApiFunctionError as ChatApiError };
 
-async function parseJsonSafe(response: RestResponse): Promise<unknown> {
-	try {
-		return response.json();
-	} catch {
-		return null;
-	}
-}
+// The official app's own fixed page size for GET .../message (it hardcodes
+// this too — not something the server picks on its own). Exported so local
+// (chatDb-backed) pagination — archived conversations, and the "server
+// exhausted" fallthrough for live ones — can match it instead of drifting.
+export const MESSAGE_PAGE_LIMIT = 20;
 
-async function assertSuccess(
-	response: RestResponse,
-	fallbackMessage: string,
-): Promise<void> {
-	if (response.status >= 200 && response.status < 300) {
-		return;
-	}
-
-	const payload = await parseJsonSafe(response);
-	const parsed = z
-		.object({
-			message: z.string().optional(),
-			error: z.string().optional(),
-		})
-		.safeParse(payload);
-
-	const message =
-		parsed.success && (parsed.data.message || parsed.data.error)
-			? parsed.data.message || parsed.data.error || fallbackMessage
-			: fallbackMessage;
-
-	throw new ChatApiError(message, response.status, payload);
-}
+const uploadChatMediaResponseSchema = z.object({
+	mediaId: z.coerce.number().int(),
+	mediaHash: z.string().nullable().optional().default(null),
+	url: z.string().nullable().optional().default(null),
+	expiresAt: z.coerce.number().nullable().optional().default(null),
+});
 
 function sortConversations(entries: ConversationEntry[]): ConversationEntry[] {
 	return [...entries].sort((a, b) => {
@@ -97,7 +87,29 @@ function sortMessages(messages: Message[]): Message[] {
 	return [...messages].sort((a, b) => a.timestamp - b.timestamp);
 }
 
-export function createChatService(fetchRest: RestFetcher, t: (key: string) => string) {
+const drawerMediaItemSchema = z.object({
+	id: z.coerce.number().int(),
+	url: z.string(),
+	contentType: z.string(),
+	createdTs: z.coerce.number().int(),
+	used: z.boolean().optional().default(false),
+	takenOnGrindr: z.boolean().optional().default(false),
+});
+
+async function parseDrawerMediaResponse(
+	response: RestResponse,
+	t: (key: string) => string,
+): Promise<Array<z.infer<typeof drawerMediaItemSchema>>> {
+	await assertSuccess(response, t("chat.errors.load_drawer_media"));
+	const payload = await parseJsonSafe(response);
+	const parsed = z.array(drawerMediaItemSchema).safeParse(payload);
+	return parsed.success ? parsed.data : [];
+}
+
+export function createChatService(
+	fetchRest: RestFetcher,
+	t: (key: string, options?: { defaultValue?: string }) => string,
+) {
 	return {
 		async searchProfiles(
 			params: SearchProfilesParams,
@@ -208,9 +220,96 @@ export function createChatService(fetchRest: RestFetcher, t: (key: string) => st
 			});
 			await assertSuccess(response, t("chat.errors.load_inbox"));
 			const parsed = inboxResponseSchema.parse(await parseJsonSafe(response));
+			const safeEntries: ConversationEntry[] = [];
+			for (const entry of parsed.entries) {
+				const data: any = entry.data;
+
+				const displayName = data.name || (data.participants && data.participants[0]?.displayName) || "";
+				const aboutMe = data.participants?.[0]?.aboutMe || "";
+				const lastMessageText = data.previewText || (data.lastMessage?.body?.text) || "";
+				const profileAge = data.participants?.[0]?.age;
+
+				// Custom automation rules — reconciles conversations that arrived
+				// while the app was closed, since inbox sync lands here on launch
+				// rather than through the live WS handler. Uses the age/photo
+				// hash already present on the preview, no extra profile request.
+				// "new_chat" (and "message_received") only fire when they messaged
+				// us, not when we started the conversation — gate on the preview's
+				// last message being theirs.
+				const previewProfileId = data.participants?.[0]?.profileId;
+				const lastMessageSenderId = data.preview?.senderId ?? data.lastMessage?.senderId;
+				const lastMessageIsIncoming =
+					lastMessageSenderId != null && String(lastMessageSenderId) === String(previewProfileId);
+				if (previewProfileId && lastMessageIsIncoming) {
+					const automationRunner = {
+						blockProfile: (profileId: string) =>
+							fetchRest(`/v3/me/blocks/${encodeURIComponent(profileId)}`, { method: "POST" }),
+						sendText: (payload: SendTextPayload) => this.sendText(payload),
+						shareAlbum: (payload: ShareAlbumPayload) => this.shareAlbum(payload),
+						tap: (profileId: string | number, tapType: number) =>
+							fetchRest("/v2/taps/add", {
+								method: "POST",
+								body: { recipientId: typeof profileId === "number" ? profileId : Number(profileId), tapType },
+							}),
+						// The inbox-preview snapshot below doesn't carry `tapped` (server
+						// truth for "already tapped, manually or otherwise") — the
+						// "send_tap" action needs a fresh fetch to check that before firing,
+						// to avoid a duplicate tap (the API rejects/ignores those and
+						// repeated attempts risk a ban).
+						getProfileDetail: (profileId: string) => createProfileMethods(fetchRest, t).getProfileDetail(profileId),
+					};
+					const profileSnapshot = {
+						age: profileAge,
+						profileImageMediaHash: data.participants?.[0]?.primaryMediaHash ?? null,
+						aboutMe: aboutMe || null,
+						displayName: displayName || null,
+					};
+					const lastMessageId: string | undefined =
+						data.preview?.messageId ?? data.lastMessage?.messageId ?? undefined;
+
+					const { blocked: blockedByNewChat } = await runAutomationRulesForSender(
+						String(previewProfileId),
+						"new_chat",
+						automationRunner,
+						profileSnapshot,
+						lastMessageText || null,
+					).catch(() => ({ blocked: false, matchedRuleNames: [] }));
+					if (blockedByNewChat) continue; // Do NOT show them in the inbox!
+
+					if (lastMessageId) {
+						const { blocked: blockedByMessage } = await runAutomationRulesForSender(
+							String(previewProfileId),
+							"message_received",
+							automationRunner,
+							profileSnapshot,
+							lastMessageText || null,
+							lastMessageId,
+						).catch(() => ({ blocked: false, matchedRuleNames: [] }));
+						if (blockedByMessage) continue;
+					}
+				}
+
+				// Read here with read receipts hidden — the server was never told
+				// (see markRead), so its unread count is stale for us.
+				const readLocally = isReadLocallyUpTo(entry.data.conversationId, entry.data.preview?.messageId);
+				noteServerUnreadCount(
+					entry.data.conversationId,
+					previewProfileId != null ? String(previewProfileId) : null,
+					entry.data.unreadCount,
+					readLocally,
+				);
+				if (entry.data.unreadCount > 0 && readLocally) {
+					safeEntries.push({ ...entry, data: { ...entry.data, unreadCount: 0 } });
+					continue;
+				}
+
+				safeEntries.push(entry);
+			}
+			// ---------------------------------
+
 			return {
 				...parsed,
-				entries: sortConversations(parsed.entries),
+				entries: sortConversations(safeEntries),
 			};
 		},
 
@@ -226,6 +325,10 @@ export function createChatService(fetchRest: RestFetcher, t: (key: string) => st
 			if (params.includeProfile) {
 				query.set("profile", "true");
 			}
+			// Matches the official app's fixed page size for this endpoint — it was
+			// never sent here before, leaving the server's own (unknown, possibly
+			// inconsistent) default in charge of the actual page size.
+			query.set("limit", String(MESSAGE_PAGE_LIMIT));
 
 			const suffix = query.toString() ? `?${query.toString()}` : "";
 			const response = await fetchRest(
@@ -254,14 +357,56 @@ export function createChatService(fetchRest: RestFetcher, t: (key: string) => st
 				.parse(await parseJsonSafe(response)).message;
 		},
 
+		/**
+		 * Refresh messages: current bodies of the given messages (oldest first;
+		 * ids that don't exist are left out). Used for dynamic (album) messages
+		 * after chat.v1.refresh_dynamic.
+		 */
+		async refreshMessages(params: {
+			conversationId: string;
+			messageIds: string[];
+		}): Promise<Message[]> {
+			if (!params.messageIds.length) return [];
+			const response = await fetchRest(
+				`/v4/chat/conversation/${params.conversationId}/message-by-id`,
+				{ method: "POST", body: { messageIds: params.messageIds } },
+			);
+			await assertSuccess(response, t("chat.errors.load_messages"));
+			return z
+				.object({ messages: z.array(messageSchema) })
+				.parse(await parseJsonSafe(response)).messages;
+		},
+
 		async sendMessage(payload: SendMessagePayload): Promise<Message> {
 			const safePayload = sendMessagePayloadSchema.parse(payload);
-			const response = await fetchRest("/v4/chat/message/send", {
-				method: "POST",
-				body: safePayload,
-			});
-			await assertSuccess(response, t("chat.errors.send_failed"));
-			return messageSchema.parse(await parseJsonSafe(response));
+			const send = async () => {
+				try {
+					const result = await sendViaRealtime("chat.v1.message.send", safePayload);
+					return messageSchema.parse(result);
+				} catch {
+					// replyToMessageId is WS-only — HTTP returns 400 if included.
+					// Don't fall back for replies: stripping it would silently send
+					// a plain message instead of the reply the user asked for.
+					if (safePayload.replyToMessageId) {
+						throw new Error(t("chat.errors.reply_requires_realtime"));
+					}
+					const { replyToMessageId: _r, ...httpPayload } = safePayload;
+					const response = await fetchRest("/v4/chat/message/send", {
+						method: "POST",
+						body: httpPayload,
+					});
+					await assertSuccess(response, t("chat.errors.send_failed"));
+					return messageSchema.parse(await parseJsonSafe(response));
+				}
+			};
+			const expiringKind = expiringKindOfMessage(safePayload.type, safePayload.body);
+			const sent = retryPaidAction(
+				expiringKind === "pics" ? "expiring_photo" : expiringKind === "videos" ? "expiring_video" : "message",
+				send,
+			);
+			// Sent or refused, the counters shown next to the expiry toggles changed.
+			if (expiringKind) void sent.then(() => markExpiringAllowanceStale(expiringKind), () => markExpiringAllowanceStale(expiringKind));
+			return sent;
 		},
 
 		async sendText(payload: SendTextPayload): Promise<Message> {
@@ -273,6 +418,7 @@ export function createChatService(fetchRest: RestFetcher, t: (key: string) => st
 					targetId: safePayload.targetProfileId,
 				},
 				body: { text: safePayload.text },
+				replyToMessageId: safePayload.replyToMessageId,
 			});
 		},
 
@@ -327,22 +473,86 @@ export function createChatService(fetchRest: RestFetcher, t: (key: string) => st
 		},
 
 		async markRead(conversationId: string, messageId: string): Promise<void> {
-			const response = await fetchRest(
-				`/v4/chat/conversation/${conversationId}/read/${messageId}`,
-				{
-					method: "POST",
-				},
-			);
-			await assertSuccess(response, t("chat.errors.mark_read_failed"));
-		},
+			// An open group invite's inbox row (messageId "invite:<groupId>") has nothing to read yet.
+			if (messageId.startsWith("invite:")) return;
+ 		// --- READ RECEIPTS CHECK ---
+ 		if (isReadReceiptsHidden(conversationId) || getIncognitoMode()) {
+ 			// Silently do nothing server-side. They will never know you read it!
+ 			// Only remembered locally, so the inbox doesn't keep showing it unread.
+ 			setLocalReadMarker(conversationId, messageId);
+ 			return;
+ 		}
+ 		// ---------------------------
+
+ 		const response = await fetchRest(
+ 			`/v4/chat/conversation/${conversationId}/read/${messageId}`,
+ 			{ method: "POST" },
+ 		);
+ 		await assertSuccess(response, t("chat.errors.mark_read_failed"));
+ 	},
 
 		async unsendMessage(payload: ChatMessageMutation) {
 			const safePayload = chatMessageMutationSchema.parse(payload);
-			const response = await fetchRest("/v4/chat/message/unsend", {
+			try {
+				await retryPaidAction(
+					"unsend",
+					async () => {
+						const response = await fetchRest("/v4/chat/message/unsend", {
+							method: "POST",
+							body: safePayload,
+						});
+						await assertSuccess(response, t("chat.errors.unsend_failed"));
+					},
+				);
+			} catch (error) {
+				// The upstream 402 bodies carry no message, so they'd surface as
+				// the generic "Failed to unsend". Name the actual reason instead:
+				// TieredFeatureProblemResponse (featureValue UnsentMessage) or
+				// EntitlementLimitProblemResponse (daily allowance used up).
+				if (error instanceof ApiFunctionError && isPaywallError(error)) {
+					const type = (error.payload as { type?: unknown }).type;
+					const key = type === "urn:gr:err:entitlement_limit" ? "chat.errors.unsend_daily_limit" : "chat.errors.unsend_not_available";
+					throw new ApiFunctionError(t(key), error.status, error.payload);
+				}
+				throw error;
+			}
+		},
+
+		/**
+		 * POST /v4/chat/message/edit (Free Grind server, flag chat-message-edit):
+		 * replaces the text of one of my Text messages. Answers the updated
+		 * message (with `editedAt`); the other side gets it as chat.v1.message_sent.
+		 */
+		async editMessage(payload: ChatMessageMutation & { text: string }): Promise<Message> {
+			const { text, ...mutation } = payload;
+			const safePayload = chatMessageMutationSchema.parse(mutation);
+			const response = await fetchRest("/v4/chat/message/edit", {
+				method: "POST",
+				body: { ...safePayload, body: { text } },
+			});
+			// Free Grind server: past chat.edit.maxAgeMinutes.
+			if (response.status === 403) throw new ApiFunctionError(t("chat.errors.edit_window_expired"), 403, await parseJsonSafe(response));
+			await assertSuccess(response, t("chat.errors.edit_failed"));
+			const parsed = z.object({ message: messageSchema }).safeParse(await parseJsonSafe(response));
+			if (!parsed.success) throw new ApiFunctionError(t("chat.errors.edit_failed"), response.status, null);
+			return parsed.data.message;
+		},
+
+		/**
+		 * POST /v5/chat/translate: the server translates one message. Paid on
+		 * Grindr's server (402); a Free Grind server answers 503 when it has no
+		 * translation set up.
+		 */
+		async translateChatMessage(payload: { conversationId: string; messageId: string; targetLanguageCode: string }): Promise<string> {
+			const safePayload = chatMessageMutationSchema.extend({ targetLanguageCode: z.string().min(2) }).parse(payload);
+			const response = await fetchRest("/v5/chat/translate", {
 				method: "POST",
 				body: safePayload,
 			});
-			await assertSuccess(response, t("chat.errors.unsend_failed"));
+			await assertSuccess(response, t("auto_translate.error_server_failed"));
+			const parsed = z.object({ translatedText: z.string() }).safeParse(await parseJsonSafe(response));
+			if (!parsed.success) throw new ApiFunctionError(t("auto_translate.error_server_failed"), response.status, null);
+			return parsed.data.translatedText;
 		},
 
 		async deleteMessage(payload: ChatMessageMutation) {
@@ -352,6 +562,13 @@ export function createChatService(fetchRest: RestFetcher, t: (key: string) => st
 				body: safePayload,
 			});
 			await assertSuccess(response, t("chat.errors.delete_failed"));
+		},
+
+		async sendTypingStatus(conversationId: string, status: "Typing" | "Cleared"): Promise<void> {
+			await fetchRest("/v4/chatstatus/typing", {
+				method: "POST",
+				body: { conversationId, status },
+			});
 		},
 
 		async reactToMessage(payload: ChatReactionPayload) {
@@ -396,6 +613,7 @@ export function createChatService(fetchRest: RestFetcher, t: (key: string) => st
 			const response = await fetchRest("/v1/albums");
 			await assertSuccess(response, t("chat.errors.load_albums"));
 			const parsed = albumsResponseSchema.parse(await parseJsonSafe(response));
+			rememberOwnAlbumList(parsed.albums);
 			return parsed.albums;
 		},
 
@@ -405,34 +623,97 @@ export function createChatService(fetchRest: RestFetcher, t: (key: string) => st
 				body: { albumName },
 			});
 			await assertSuccess(response, t("chat.errors.create_album_failed"));
-			return z
+			const created = z
 				.object({
 					albumId: z.coerce.number().int(),
 				})
 				.parse(await parseJsonSafe(response));
+			notifyOwnAlbumsChanged();
+			return created;
 		},
 
 		async getAlbum(albumId: number | string): Promise<AlbumDetailsResponse> {
-			const response = await fetchRest(`/v1/albums/${albumId}`);
+			const albumDetailsSchema = z.object({
+				albumId: z.coerce.number().int(),
+				albumName: z.string().nullable().optional().default(null),
+				content: z
+					.array(
+						z.object({
+							contentId: z.coerce.number().int(),
+							contentType: z.string().nullable().optional().default(null),
+							thumbUrl: z.string().nullable().optional().default(null),
+							url: z.string().nullable().optional().default(null),
+							coverUrl: z.string().nullable().optional().default(null),
+							processing: z.boolean().optional().default(false),
+						}),
+					)
+					.optional()
+					.default([]),
+			});
+
+			const v2Response = await fetchRest(`/v2/albums/${albumId}`);
+			await assertSuccess(v2Response, t("chat.errors.load_album_details"));
+			const v2Result = albumDetailsSchema.parse(await parseJsonSafe(v2Response));
+
+			// v2 can come back with an empty content array for expired/locked albums
+            // check v1 as a supplement in that case, but keep the (already fetched) v2 result 
+            // as the fallback if v1 doesn't support this route (405) for this account/album.
+			if (v2Result.content.length === 0) {
+				const v1Response = await fetchRest(`/v1/albums/${albumId}`);
+				if (v1Response.status === 405) {
+					return v2Result;
+				}
+				await assertSuccess(v1Response, t("chat.errors.load_album_details"));
+				return albumDetailsSchema.parse(await parseJsonSafe(v1Response));
+			}
+
+			return v2Result;
+		},
+
+		async getSharedAlbums(profileId: number | string): Promise<{
+			albumId: number;
+			albumName: string | null;
+			contentCount: { imageCount: number; videoCount: number };
+			previewContent: { contentId: number; thumbUrl: string | null; blurredUrl: string | null } | null;
+		}[]> {
+			const response = await fetchRest(`/v2/albums/shares/${profileId}`);
 			await assertSuccess(response, t("chat.errors.load_album_details"));
-            
+			const parsed = z
+				.object({
+					albums: z.array(
+						z.object({
+							albumId: z.coerce.number().int(),
+							albumName: z.string().nullable().optional().default(null),
+							contentCount: z.object({
+								imageCount: z.number().int().optional().default(0),
+								videoCount: z.number().int().optional().default(0),
+							}).optional().default({ imageCount: 0, videoCount: 0 }),
+							content: z.object({
+								contentId: z.coerce.number().int(),
+								thumbUrl: z.string().nullable().optional().default(null),
+								blurredUrl: z.string().nullable().optional().default(null),
+							}).nullable().optional().default(null),
+						}),
+					).optional().default([]),
+				})
+				.parse(await parseJsonSafe(response));
+			return parsed.albums.map((a) => ({
+				albumId: a.albumId,
+				albumName: a.albumName ?? null,
+				contentCount: a.contentCount,
+				previewContent: a.content
+					? { contentId: a.content.contentId, thumbUrl: a.content.thumbUrl ?? null, blurredUrl: a.content.blurredUrl ?? null }
+					: null,
+			}));
+		},
+
+		async getAlbumContentPoster(albumId: number | string, contentId: number | string): Promise<{ posterUrl: string | null; blurredPosterUrl: string | null }> {
+			const response = await fetchRest(`/v1/albums/${albumId}/content/${contentId}/poster`);
+			await assertSuccess(response, t("chat.errors.load_album_details"));
 			return z
 				.object({
-					albumId: z.coerce.number().int(),
-					albumName: z.string().nullable().optional().default(null),
-					content: z
-						.array(
-							z.object({
-								contentId: z.coerce.number().int(),
-								contentType: z.string().nullable().optional().default(null),
-								thumbUrl: z.string().nullable().optional().default(null),
-								url: z.string().nullable().optional().default(null),
-								coverUrl: z.string().nullable().optional().default(null),
-								processing: z.boolean().optional().default(false),
-							}),
-						)
-						.optional()
-						.default([]),
+					posterUrl: z.string().nullable().optional().default(null),
+					blurredPosterUrl: z.string().nullable().optional().default(null),
 				})
 				.parse(await parseJsonSafe(response));
 		},
@@ -440,60 +721,90 @@ export function createChatService(fetchRest: RestFetcher, t: (key: string) => st
 		async uploadChatMedia(
 			params: UploadChatMediaParams,
 		): Promise<UploadChatMediaResponse> {
-			const query = new URLSearchParams({
-				looping: String(params.options.looping),
-				takenOnGrindr: String(params.options.takenOnGrindr),
-			});
-
-			const response = await fetchRest(
-				`/v5/chat/media/upload?${query.toString()}`,
-				{
-					method: "POST",
-					rawBody: params.multipart.body,
+			// A dedicated command picks the endpoint: in-app captures go to the
+			// device-key-signed /v6 upload (signed Rust-side by grindr.rs), gallery
+			// media to the unsigned /v5 one.
+			let response: unknown;
+			try {
+				response = await invoke("upload_chat_media", {
+					body: Array.from(params.multipart.body),
 					contentType: params.multipart.contentType,
-				},
-			);
+					takenOnGrindr: params.options.takenOnGrindr,
+					length: params.options.length ?? null,
+					looping: params.options.looping,
+				});
+			} catch (error) {
+				throw mediaUploadErrorToApiFunctionError(error, t("chat.errors.upload_media_failed"), t);
+			}
 
-			await assertSuccess(response, t("chat.errors.upload_media_failed"));
-
-			const parsed = z
-				.object({
-					mediaId: z.coerce.number().int(),
-					mediaHash: z.string().nullable().optional().default(null),
-					url: z.string().nullable().optional().default(null),
-				})
-				.parse(await parseJsonSafe(response));
-
-			return {
-				mediaId: parsed.mediaId,
-				mediaHash: parsed.mediaHash,
-				url: parsed.url,
-			};
+			return uploadChatMediaResponseSchema.parse(response);
 		},
 
-		async uploadAlbumContent(
-			params: UploadAlbumContentParams,
-		): Promise<UploadAlbumContentResponse> {
-			const response = await fetchRest(`/v1/albums/${params.albumId}/content`, {
-				method: "POST",
-				rawBody: params.multipart.body,
-				contentType: params.multipart.contentType,
-			});
-			await assertSuccess(response, t("chat.errors.upload_media_failed"));
-			return z
-				.object({
-					contentId: z.coerce.number().int(),
-				})
-				.parse(await parseJsonSafe(response));
+		/**
+		 * Streams a video from disk (see stagedVideoUpload) to the unsigned
+		 * chat endpoint, cut and turned portrait as `edit` says (see
+		 * videoEdit); null when this binary can't, see uploadChatMedia.
+		 */
+		async uploadChatVideo(params: UploadChatVideoParams): Promise<UploadChatMediaResponse | null> {
+			await assertUploadFits(params.file, params.edit, MAX_CHAT_MEDIA_BYTES, t("chat.attachments.too_large"));
+			const report = uploadProgressReporter(params.edit, params.onProgress);
+			const upload = async (stagedId: string) => {
+				const edit = await stagedEdit(stagedId, params.file, params.edit, {
+					onLandscapeKept: params.onLandscapeKept,
+					notSendableMessage: t("chat.errors.video_not_sendable"),
+					onConverting: (fraction) => report("converting", fraction),
+				});
+				return invoke("upload_staged_chat_video", {
+					stagedId,
+					looping: params.looping,
+					lengthMs: params.lengthMs ?? null,
+					edit,
+					onProgress: report.channel(),
+				});
+			};
+			const response = await uploadStagedVideo(
+				params.file,
+				upload,
+				t("chat.errors.upload_media_failed"),
+				t,
+				(fraction) => report("preparing", fraction),
+				await stagingRanges(params.file, params.edit),
+			);
+			return response === null ? null : uploadChatMediaResponseSchema.parse(response);
 		},
 
 		async shareAlbum(payload: ShareAlbumPayload) {
 			const safePayload = shareAlbumPayloadSchema.parse(payload);
+			const share = async () => {
+				const response = await fetchRest(
+					`/v4/albums/${safePayload.albumId}/shares`,
+					{
+						method: "POST",
+						body: { profiles: safePayload.profiles },
+					},
+				);
+				await assertSuccess(response, t("chat.errors.album_share_failed"));
+			};
+			// An *expiring* share also uses up the expiring-album allowance.
+			const isExpiringShare = safePayload.profiles.some(
+				(profile) => profile.expirationType !== "INDEFINITE" && profile.expirationType !== 0,
+			);
+			if (isExpiringShare) {
+				await retryPaidAction("expiring_album_share", share).finally(() => markExpiringAllowanceStale("albums"));
+				return;
+			}
+			await retryPaidAction(
+				"album_share",
+				share,
+			);
+		},
+
+		async stopAlbumShare(albumId: number, recipientProfileId: number) {
 			const response = await fetchRest(
-				`/v4/albums/${safePayload.albumId}/shares`,
+				`/v1/albums/${albumId}/unshares`,
 				{
-					method: "POST",
-					body: { profiles: safePayload.profiles },
+					method: "PUT",
+					body: { profiles: [{ profileId: recipientProfileId, shareId: 0 }] },
 				},
 			);
 			await assertSuccess(response, t("chat.errors.album_share_failed"));
@@ -512,19 +823,23 @@ export function createChatService(fetchRest: RestFetcher, t: (key: string) => st
 			const response = await fetchRest(
 				`/v4/chat/media/drawer/${conversationId}`,
 			);
-			await assertSuccess(response, t("chat.errors.load_drawer_media"));
-			const payload = await parseJsonSafe(response);
-			const itemSchema = z.object({
-				id: z.coerce.number().int(),
-				url: z.string(),
-				contentType: z.string(),
-				createdTs: z.coerce.number().int(),
-				used: z.boolean().optional().default(false),
-				takenOnGrindr: z.boolean().optional().default(false),
-			});
+			return parseDrawerMediaResponse(response, t);
+		},
 
-			const parsed = z.array(itemSchema).safeParse(payload);
-			return parsed.success ? parsed.data : [];
+		// Same drawer contents, without the "used in this conversation" flag —
+		// used before a conversation exists yet (e.g. starting a chat from a
+		// profile), since /v4/chat/media/drawer/{conversationId} has no
+		// conversation-less variant.
+		async getGlobalDrawerMedia(): Promise<Array<{
+			id: number;
+			url: string;
+			contentType: string;
+			createdTs: number;
+			used: boolean;
+			takenOnGrindr: boolean;
+		}>> {
+			const response = await fetchRest("/v4/chat/media/drawer");
+			return parseDrawerMediaResponse(response, t);
 		},
 
 		async addMediaToDrawer(mediaId: number): Promise<void> {
