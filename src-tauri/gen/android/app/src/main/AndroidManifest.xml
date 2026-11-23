@@ -62,7 +62,7 @@
           like before this feature existed.
         -->
         <activity-alias
-            android:name=".DisguiseDefaultAlias"
+            android:name="${applicationId}.DisguiseDefaultAlias"
             android:targetActivity=".MainActivity"
             android:label="@string/app_name"
             android:icon="@mipmap/ic_launcher_adaptive"
@@ -89,7 +89,7 @@
         </activity-alias>
 
         <activity-alias
-            android:name=".DisguiseCalculatorAlias"
+            android:name="${applicationId}.DisguiseCalculatorAlias"
             android:targetActivity=".MainActivity"
             android:label="@string/disguise_name_calculator"
             android:icon="@mipmap/ic_launcher_calculator"
@@ -111,7 +111,7 @@
         </activity-alias>
 
         <activity-alias
-            android:name=".DisguiseNotesAlias"
+            android:name="${applicationId}.DisguiseNotesAlias"
             android:targetActivity=".MainActivity"
             android:label="@string/disguise_name_notes"
             android:icon="@mipmap/ic_launcher_notes"
@@ -133,7 +133,7 @@
         </activity-alias>
 
         <activity-alias
-            android:name=".DisguiseWeatherAlias"
+            android:name="${applicationId}.DisguiseWeatherAlias"
             android:targetActivity=".MainActivity"
             android:label="@string/disguise_name_weather"
             android:icon="@mipmap/ic_launcher_weather"
