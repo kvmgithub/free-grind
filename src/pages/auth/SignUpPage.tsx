@@ -2,7 +2,10 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { Mail, Lock, Cake, Eye, EyeOff, LogIn, ShieldAlert, Smartphone } from "lucide-react";
+import toast from "react-hot-toast";
 import { AuthShell } from "../../components/ui/auth-shell";
+import { Button } from "../../components/ui/button";
+import { openOfficialRegistration } from "../../services/officialRegistration";
 import { BugReportButton } from "../../components/ui/BugReportButton";
 import { useAuth } from "../../contexts/useAuth";
 import { useApi } from "../../hooks/useApi";
@@ -31,6 +34,42 @@ function birthdayToMillis(value: string): number | null {
 }
 
 export function SignUpPage() {
+	return import.meta.env.VITE_FG_REGISTRATION_HANDOFF === "true" ? <OfficialSignUpPage /> : <NativeSignUpPage />;
+}
+
+function OfficialSignUpPage() {
+	const { t } = useTranslation();
+	const { clearError } = useAuth();
+	useEffect(() => clearError, [clearError]);
+	const { addProfileMode, cancel, goTo } = useAddProfileMode();
+
+	const openGrindr = () => {
+		if (openOfficialRegistration()) {
+			goTo("/auth/sign-in");
+		} else {
+			toast.error(t("auth.sign_up.official_unavailable", {
+				defaultValue: "Couldn't open Grindr. Make sure the official app is installed in this Android profile.",
+			}));
+		}
+	};
+
+	return (
+		<AuthShell
+			title={t("auth.sign_up.title")}
+			subtitle={t("auth.sign_up.official_subtitle", {
+				defaultValue: "Create your account in the official Grindr app, then return here to sign in.",
+			})}
+		>
+			<Button type="button" variant="primary" className="w-full" onClick={openGrindr}>
+				{t("auth.sign_up.official_action", { defaultValue: "Open Grindr" })}
+			</Button>
+			<AuthAltAction onClick={() => goTo("/auth/sign-in")} label={t("auth.sign_up.have_account_action")} />
+			{addProfileMode ? <AuthCancelAction onClick={() => void cancel()} /> : null}
+		</AuthShell>
+	);
+}
+
+function NativeSignUpPage() {
 	const { t } = useTranslation();
 	const navigate = useNavigate();
 	const { signUp, login, error, clearError } = useAuth();

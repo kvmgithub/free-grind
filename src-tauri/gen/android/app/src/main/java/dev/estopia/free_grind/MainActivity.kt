@@ -681,6 +681,12 @@ class MainActivity : TauriActivity() {
       return ApkUpdater.openInstallPermissionSettings(this@MainActivity)
     }
 
+    @JavascriptInterface
+    fun openOfficialGrindr(): Boolean {
+      val launchIntent = packageManager.getLaunchIntentForPackage("com.grindrapp.android") ?: return false
+      return runCatching { startActivity(launchIntent) }.isSuccess
+    }
+
     /**
      * Mints a reCAPTCHA token for one of Grindr's actions ("login",
      * "report", ...) in RecaptchaMintActivity. The outcome arrives as a

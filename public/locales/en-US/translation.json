@@ -1603,6 +1603,9 @@
         "invite_required": "This server only accepts new accounts with an invite code.",
         "invite_invalid": "This invite code is invalid, expired or already used."
       },
+      "official_subtitle": "Create your account in the official Grindr app, then return here to sign in.",
+      "official_action": "Open Grindr",
+      "official_unavailable": "Couldn't open Grindr. Make sure the official app is installed in this Android profile.",
       "have_account_label": "Already have an account?",
       "have_account_action": "Sign in",
       "birthday_label": "Date of birth",

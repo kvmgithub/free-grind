@@ -2,16 +2,18 @@
 // app release on GitHub). Off means no update request goes out unless the user
 // checks manually in Settings. On by default.
 const UPDATE_CHECKS_STORAGE_KEY = "update-checks-enabled";
+const DEFAULT_UPDATE_CHECKS = import.meta.env.VITE_FG_REGISTRATION_HANDOFF !== "true";
 
 function readUpdateChecksEnabled(): boolean {
 	try {
-		return window.localStorage.getItem(UPDATE_CHECKS_STORAGE_KEY) !== "false";
+		const stored = window.localStorage.getItem(UPDATE_CHECKS_STORAGE_KEY);
+		return stored === null ? DEFAULT_UPDATE_CHECKS : stored !== "false";
 	} catch {
-		return true;
+		return DEFAULT_UPDATE_CHECKS;
 	}
 }
 
-let updateChecksEnabled = typeof window === "undefined" || readUpdateChecksEnabled();
+let updateChecksEnabled = typeof window === "undefined" ? DEFAULT_UPDATE_CHECKS : readUpdateChecksEnabled();
 const listeners = new Set<() => void>();
 
 export function areUpdateChecksEnabled(): boolean {

@@ -1603,6 +1603,9 @@
                 "invite_required": "Dieser Server nimmt neue Accounts nur mit Einladungscode an.",
                 "invite_invalid": "Dieser Einladungscode ist ungültig, abgelaufen oder schon benutzt."
             },
+            "official_subtitle": "Erstelle dein Konto in der offiziellen Grindr-App. Kehre danach zur Anmeldung hierher zurück.",
+            "official_action": "Grindr zur Registrierung öffnen",
+            "official_unavailable": "Grindr konnte nicht geöffnet werden. Die offizielle App muss in diesem Android-Profil installiert sein.",
             "have_account_label": "Hast du bereits ein Konto?",
             "have_account_action": "Anmelden",
             "birthday_label": "Geburtsdatum",
